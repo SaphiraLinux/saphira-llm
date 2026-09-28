@@ -1,0 +1,16 @@
+saphira-llm — notice
+
+Copyright (C) 2026 Andrew Smalley for and on behalf of AKADATA LIMITED.
+
+saphira-llm is an independently authored C11 inference runtime for BitNet
+1.58-bit and conventional GGUF models, targeting x86-64-v3 on Saphira Linux.
+
+No third-party source code is vendored into this distribution. Upstream
+projects are consulted as engineering references and are recorded by exact
+revision and licence in PROVENANCE.md. Where behaviour is reproduced, the
+algorithm has been independently reimplemented in C from the documented
+behaviour of those references; no source has been copied.
+
+Any future inclusion of third-party source must be recorded in PROVENANCE.md
+and NOTICE before it is committed, and must be licence-compatible with the
+MIT terms in LICENSE.

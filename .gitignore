@@ -1,0 +1,10 @@
+__pycache__/
+*.o
+*.a
+build/
+out/
+saphira-llm
+tests/sllm_test
+tools/reference/sllm-logits-ref
+*.gguf
+*.log
