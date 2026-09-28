@@ -3,8 +3,14 @@ __pycache__/
 *.a
 build/
 out/
-saphira-llm
-tests/sllm_test
-tools/reference/sllm-logits-ref
+
+# built binaries
+/saphira-llm
+/saphira-llm-test
+*.disasm
+*.funcs
+
+# models and scratch never belong in the repository
 *.gguf
+*.f32.tmp
 *.log
