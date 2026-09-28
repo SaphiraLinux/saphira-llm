@@ -13,11 +13,15 @@
 #include <saphira_llm/log.h>
 #include <saphira_llm/isa.h>
 #include <saphira_llm/gguf.h>
+#include <saphira_llm/topology.h>
+#include <saphira_llm/thread.h>
+#include <saphira_llm/quant.h>
+#include <saphira_llm/ops.h>
 
 #define SLLM_VERSION_MAJOR 0
 #define SLLM_VERSION_MINOR 1
-#define SLLM_VERSION_PATCH 0
-#define SLLM_VERSION_STRING "0.1.0"
+#define SLLM_VERSION_PATCH 1
+#define SLLM_VERSION_STRING "0.2.0"
 
 /*
  * The ISA baseline this build assumes. Not a claim about the host: the host

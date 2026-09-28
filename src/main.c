@@ -12,6 +12,8 @@
  */
 
 #include <saphira_llm/sllm.h>
+#include <saphira_llm/thread.h>
+#include <saphira_llm/topology.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,7 +26,9 @@ static void usage(FILE * out) {
 "  -m, --model FILE        GGUF model to load\n"
 "  -p, --prompt TEXT       prompt text\n"
 "  -c, --ctx N             context size\n"
-"  -t, --threads N         worker threads\n"
+"  -t, --threads N         worker threads (0 = recommended for this machine)\n"
+"      --no-place         do not pin threads; for measuring placement\n"
+"      --calibrate        measure cores before placing (default on)\n"
 "      --temp F            sampling temperature (0 = greedy)\n"
 "  -n, --n-predict N       maximum tokens to generate\n"
 "      --seed N            sampling seed\n"
@@ -41,6 +45,9 @@ int main(int argc, char ** argv) {
     const char * model = NULL;
     const char * prompt = NULL;
     sllm_isa_level isa_floor = SLLM_ISA_LEVEL_AUTO;
+    int  n_threads = 0;      /* 0 means "use the recommendation" */
+    bool no_place   = false;
+    bool calibrate  = true;
 
     for (int i = 1; i < argc; ++i) {
         const char * a = argv[i];
@@ -86,11 +93,30 @@ int main(int argc, char ** argv) {
             i++;
             continue;
         }
+        if (!strcmp(a, "-t") || !strcmp(a, "--threads")) {
+            if (!v) { fprintf(stderr, "%s needs a value\n", a); return 2; }
+            const int t = atoi(v);
+            if (t < 1) {
+                fprintf(stderr, "%s must be at least 1, got '%s'\n", a, v);
+                return 2;
+            }
+            n_threads = t;
+            i++;
+            continue;
+        }
+        if (!strcmp(a, "--no-place")) {
+            no_place = true;
+            continue;
+        }
+        if (!strcmp(a, "--calibrate")) {
+            calibrate = true;
+            continue;
+        }
+
         /* Options accepted for interface stability but not yet implemented.
          * Rejecting them loudly beats silently ignoring a flag the user
          * believes is having an effect. */
         if (!strcmp(a, "-c") || !strcmp(a, "--ctx") ||
-            !strcmp(a, "-t") || !strcmp(a, "--threads") ||
             !strcmp(a, "--temp") ||
             !strcmp(a, "-n") || !strcmp(a, "--n-predict") ||
             !strcmp(a, "--seed")) {
@@ -129,6 +155,41 @@ int main(int argc, char ** argv) {
             caps.avx512f  ? " (has avx512)" : "");
         return 1;
     }
+
+    /*
+     * Topology and threading. Placement is on by default because it was
+     * measured to be load-bearing here: without it, threads that repeatedly
+     * sleep and are woken per region do not get spread across the machine by
+     * the scheduler, and throughput stays at the single-thread figure.
+     */
+    sllm_topology topo;
+    sllm_topology_detect(&topo);
+    if (calibrate) {
+        (void) sllm_topology_calibrate(&topo, 2000000);
+    }
+    char topo_desc[256];
+    sllm_topology_describe(&topo, topo_desc, sizeof(topo_desc));
+    sllm_log(SLLM_LOG_INFO, "topology: %s", topo_desc);
+
+    if (n_threads <= 0) {
+        n_threads = sllm_topology_recommended_threads(&topo, 0);
+    }
+
+    int plan[SLLM_MAX_CPUS];
+    int plan_n = 0;
+    if (!no_place) {
+        plan_n = sllm_topology_plan(&topo, topo.n_cpus, plan, SLLM_MAX_CPUS);
+    }
+
+    sllm_pool_config pcfg = {
+        .n_threads = n_threads,
+        .plan      = plan_n > 0 ? plan : NULL,
+        .n_plan    = plan_n,
+        .topology  = &topo,
+    };
+    sllm_pool * pool = sllm_pool_create(&pcfg);
+    sllm_log(SLLM_LOG_INFO, "threading: %d threads, placement %s",
+             sllm_pool_threads(pool), plan_n > 0 ? "on" : "off");
 
     char isa_desc[256];
     sllm_isa_describe(&isa, isa_desc, sizeof(isa_desc));
@@ -180,5 +241,6 @@ int main(int argc, char ** argv) {
     }
 
     sllm_gguf_close(&g);
+    sllm_pool_destroy(pool);
     return 0;
 }

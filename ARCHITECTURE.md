@@ -94,7 +94,7 @@ bad-layout, known-but-unsupported versus not-a-type.
 | --- | --- | --- |
 | 0 | provenance, reference build, measured baseline, golden vectors | done |
 | 1 | container, ISA dispatch, first kernel, baseline proof | done |
-| 2 | tensor layer, vector kernels, threading, topology-aware affinity | 28-thread collapse eliminated |
+| 2 | tensor layer, vector kernels, threading, topology-aware affinity | done: no full-occupancy regression on representative workloads |
 | 3 | BitNet I2_S correctness: exact ports plus a scalar reference | golden-vector match |
 | 3.5 | gpt2 BPE tokenizer: load, encode, decode, golden vectors | tokeniser vectors match upstream |
 | 4 | forward pass and generation | **token-identical to the reference at t=0** |
@@ -120,15 +120,67 @@ so its output is a different input problem and cannot be the oracle.
 
 ## Threading
 
-Native pthreads, no OpenMP, no orchestration language. The work distribution is
-chosen from measurement.
+Native pthreads, no OpenMP, no orchestration language.
 
-This matters more than it sounds. Measured on the target: generation gains only
-2.45x going from 1 thread to the best thread count, and **collapses to 1.42 t/s
-at 28 threads** — 20x worse than the 22-thread best and 10x worse than
-single-threaded. The best measured count, 22, is 8 P-cores with SMT plus 6
-E-cores without their SMT siblings. Placement is therefore topology-aware, and
-the policy is decided from data rather than assumed.
+### The collapse is a barrier, not a placement problem
+
+This was measured rather than assumed, and the assumption was wrong. The
+reference implementation loses a factor of seventeen between 24 and 28 threads
+on the target. Varying one variable at a time:
+
+* 28 threads on **24** CPUs: 15.2 t/s, merely degraded
+* 28 threads on **28** CPUs: 1.7 t/s, catastrophic
+* **24** threads on 28 CPUs: 25.97 t/s, the best number in the table
+
+All 14 core pairs behave identically on their own, so no core is at fault. The
+failure is barrier saturation: every logical CPU ends up spinning on ggml's
+atomic barrier, and the thread that must break it cannot be scheduled.
+
+So the fix is structural, not a tuning knob. `sllm_parallel_for` has **no
+inter-worker barrier at all**: workers claim chunks from a single atomic cursor,
+and the only thread that ever blocks is the caller, on a condition variable.
+There is nothing for a fully-occupied machine to starve on. Measured at 28
+threads, saphira-llm sustains 10.8x, 9.8x and 6.9x on memory-bound,
+compute-bound and many-small-item workloads respectively, where the reference
+falls by 17x.
+
+### Topology is classified by measurement, not by assumption
+
+The target is a KVM guest that zeroes CPUID leaf 0x1A and ships no `core_type`
+file; `cluster_id` merely mirrors `core_id`. The hardware will not say which
+cores are fast, so `sllm_topology_calibrate` measures them: a short pinned FMA
+probe per logical CPU, best of three, ranked.
+
+Placement is on by default because it was measured to be load-bearing: without
+it, threads that sleep and are woken once per region do not get spread by this
+scheduler, and throughput stays at the single-thread figure. `--no-place`
+reproduces the contrast.
+
+`sllm_topology_recommended_threads` never fills every hardware thread — it
+returns 27 of 28 on the target — because full occupancy is where the reference
+barrier dies.
+
+### Two bugs worth remembering
+
+Both were found by measurement rather than by reading, and both are the kind
+that produce correct output while doing nothing useful:
+
+* **The caller starved the workers.** It claimed the whole region in a tight
+  loop before any freshly-signalled worker was scheduled, so "parallel"
+  regions ran on one thread. Pinning hid it, because a worker on another core
+  gets a chance to run the instant it is signalled. The fix is an arrival
+  rendezvous: the caller waits for the workers to arrive before it starts
+  claiming. Counting elements could not have found this; counting which thread
+  claimed which chunk could.
+* **The worker's inner wait did not re-check shutdown.** A worker finishing its
+  chunks while a region was still active parked in a wait it never woke from,
+  and `join` never returned. `pool_survives_create_destroy_cycles` now covers it.
+
+### What is not yet claimed
+
+The end-to-end `tg128 @ 28 threads` regression is **not** demonstrated fixed,
+because there is no generation path yet. It is a Phase 4/6 acceptance
+measurement.
 
 ## The I2_S contract
 

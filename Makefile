@@ -29,9 +29,11 @@ OBJDIR   = build/obj
 BIN      = saphira-llm
 TESTBIN  = saphira-llm-test
 
-CORE_SRC = src/status.c src/log.c src/isa.c src/gguf.c src/kernel_probe.c
+CORE_SRC = src/status.c src/log.c src/isa.c src/gguf.c src/kernel_probe.c \
+           src/topology.c src/thread.c src/quant.c src/ops.c
 MAIN_SRC = src/main.c
-TEST_SRC = tests/main.c tests/test_isa.c tests/test_gguf.c
+TEST_SRC = tests/main.c tests/test_isa.c tests/test_gguf.c tests/test_thread.c \
+            tests/test_ops.c
 
 CORE_OBJ = $(CORE_SRC:%.c=$(OBJDIR)/%.o)
 MAIN_OBJ = $(MAIN_SRC:%.c=$(OBJDIR)/%.o)
@@ -39,7 +41,11 @@ TEST_OBJ = $(TEST_SRC:%.c=$(OBJDIR)/%.o)
 
 ALL_OBJ  = $(CORE_OBJ) $(MAIN_OBJ) $(TEST_OBJ)
 
-.PHONY: all clean install test check check-isa san asan ubsan format-check help
+BENCH_SRC = bench/sched_bench.c
+BENCH_OBJ = $(BENCH_SRC:%.c=$(OBJDIR)/%.o)
+BENCH_BIN = saphira-llm-schedbench
+
+.PHONY: all clean install test check check-isa san asan ubsan bench format-check help
 
 all: $(BIN)
 
@@ -47,6 +53,9 @@ $(BIN): $(CORE_OBJ) $(MAIN_OBJ)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 $(TESTBIN): $(CORE_OBJ) $(TEST_OBJ)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BENCH_BIN): $(CORE_OBJ) $(BENCH_OBJ)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 $(OBJDIR)/%.o: %.c
@@ -57,6 +66,10 @@ $(OBJDIR)/%.o: %.c
 
 test: $(TESTBIN)
 	./$(TESTBIN)
+
+# Scheduler benchmark. Measures the Phase 2 gate: no full-occupancy collapse.
+bench: $(BENCH_BIN)
+	./$(BENCH_BIN) $(BENCH_ARGS)
 
 # The mechanical baseline proof. Reads the disassembled binary and fails if an
 # instruction above x86-64-v3 appears anywhere except the guarded section.
@@ -95,7 +108,7 @@ install: $(BIN)
 	install -Dm755 $(BIN) $(DESTDIR)$(BINDIR)/$(BIN)
 
 clean:
-	rm -rf build $(BIN) $(TESTBIN)
+	rm -rf build $(BIN) $(TESTBIN) $(BENCH_BIN)
 
 help:
 	@echo 'targets: all test check check-isa san asan ubsan install clean'

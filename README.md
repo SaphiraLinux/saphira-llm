@@ -11,10 +11,12 @@ make
 ./saphira-llm -m model.gguf -p "Hello"
 ```
 
-> **Status.** Phases 0 and 1 are complete. The GGUF container layer and the ISA
-> dispatch layer are real, tested and sanitiser-clean. Model execution does not
-> exist yet — the binary parses a model and says so rather than pretending to
-> generate text. See ARCHITECTURE.md for the phase plan and gates.
+> **Status.** Phases 0, 1 and 2 are complete. The GGUF container, the ISA
+> dispatch layer, the thread pool, the tensor layer and the vector kernels are
+> real, tested and sanitiser-clean. Model execution does not exist yet — the
+> binary parses a model and reports its topology and threading, then says so
+> rather than pretending to generate text. See ARCHITECTURE.md for the phase
+> plan and gates.
 
 ## What works today
 
@@ -25,7 +27,16 @@ make
   the selected level both permit. `make check-isa` proves this mechanically.
 * **First kernel and the dispatch pattern**: a signed-int8 dot product with a
   real v3 AVX2 path and a real AVX-VNNI path, required to agree exactly.
-* **234 assertions**, clean under `-Wall -Wextra -Wpedantic` and under
+* **Threading**: a native pthread pool with no inter-worker barrier, a
+  measurement-derived placement plan, and a thread count that never fills every
+  hardware thread. No full-occupancy regression, where the reference loses
+  about seventeen times.
+* **Tensor layer**: dequantisation for F32, F16, BF16, Q8_0, Q4_0 and the
+  BitNet I2_S ternary format, including the transposed tile layout and the
+  scale that sits after the packed weights.
+* **Vector kernels**: RMSNorm, RoPE (both layouts), softmax, SiLU, add, mul and
+  get_rows, each with golden vectors.
+* **21,712 assertions**, clean under `-Wall -Wextra -Wpedantic` and under
   ASan+UBSan.
 
 ## Build and test
@@ -35,6 +46,7 @@ make            # release binary, -march=x86-64-v3
 make test       # the test suite
 make check      # tests plus the mechanical baseline proof
 make san        # ASan + UBSan (clang; the Saphira gcc has no libasan)
+make bench      # the scheduler benchmark
 make clean
 ```
 

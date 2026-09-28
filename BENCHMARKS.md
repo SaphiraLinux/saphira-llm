@@ -127,6 +127,88 @@ different problems.
 Also note the CLI's output is only stable when `-st --no-warmup` are used; the
 interactive session otherwise carries state that changes the result.
 
+
+## Diagnosis of the 28-thread collapse
+
+`llama-bench` tg128, all 28 logical CPUs, varying only the thread count:
+
+| threads | t/s | | threads | t/s |
+| ---: | ---: | --- | ---: | ---: |
+| 20 | 23.54 | | 25 | 13.36 |
+| 22 | 22.43 | | 26 | 10.19 |
+| 24 | **25.97** | | 27 | 2.55 |
+| | | | 28 | **1.54** |
+
+And varying only the CPU set, at a fixed 28 threads:
+
+| CPUs | n | t/s |
+| --- | ---: | ---: |
+| 0-13 | 14 | 15.07 |
+| 0-19 | 20 | 15.32 |
+| 0-23 | 24 | 15.22 |
+| 0-27 | 28 | **1.68** |
+
+**The collapse is not a placement problem. It is barrier saturation at
+`threads == logical CPUs`.** 28 threads on 24 CPUs is merely degraded; 28
+threads on 28 CPUs is catastrophic; 24 threads on 28 CPUs is the best number
+in the whole table. Every logical CPU ends up spinning on ggml's atomic
+barrier, and the thread that has to break the barrier cannot get a CPU to run
+on. This was measured, not inferred, and the per-core data agrees: all 14 core
+pairs behave identically (1 thread ~11.5 t/s, 2 threads ~19-20 t/s), so no
+individual core is at fault.
+
+Placement is a *separate* and smaller effect: 14 threads on CPUs 0-13 run at
+26.0 t/s against 23.2 t/s for the same count spread over the whole machine.
+
+## saphira-llm scheduler, Phase 2
+
+`bench/sched_bench.c`, i9-13900K, placed per `sllm_topology_plan`, best of 5
+repetitions. Units per second; `gain` is against 1 thread.
+
+| threads | memory (32 MiB) | gain | vector (L1 FMA) | gain | sync (many items) | gain |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 4.84e9 | 1.00 | 2.33e7 | 1.00 | 1.46e6 | 1.00 |
+| 2 | 9.44e9 | 1.95 | 4.54e7 | 1.95 | 2.90e6 | 1.98 |
+| 4 | 1.36e10 | 2.82 | 9.07e7 | 3.90 | 5.70e6 | 3.90 |
+| 8 | 4.09e10 | 8.44 | 1.79e8 | 7.67 | 7.00e6 | 4.78 |
+| 14 | 5.53e10 | 11.41 | 1.55e8 | 6.66 | 1.17e7 | 7.99 |
+| 20 | 5.87e10 | 12.12 | 1.83e8 | 7.88 | 1.03e7 | 7.06 |
+| 24 | 5.41e10 | 11.16 | 2.23e8 | 9.56 | 1.29e7 | 8.81 |
+| **28** | **5.24e10** | **10.83** | **2.28e8** | **9.77** | **1.00e7** | **6.87** |
+
+**No full-occupancy regression in any workload.** At 28 threads on 28 logical
+CPUs, where the reference falls to 1.54 t/s from 25.97 at 24 threads, saphira-llm
+sustains 10.8x, 9.8x and 6.9x scaling respectively. The mechanism is
+structural: `sllm_parallel_for` has no inter-worker barrier. Workers claim
+chunks from one atomic cursor and the only thread that ever blocks is the
+caller, on a condition variable. There is no barrier for a fully-occupied
+machine to starve on.
+
+### Placement is load-bearing here
+
+The same table without placement shows throughput essentially flat at the
+1-thread figure for every thread count. Threads that sleep on a condition
+variable and are woken once per region do not get spread across this machine by
+the scheduler; they wake onto the same CPU. Pinning them is not a refinement,
+it is what makes the pool parallel at all. This is measured, and the runtime
+places by default with `--no-place` to reproduce the contrast.
+
+### Thread-count recommendation
+
+`sllm_topology_recommended_threads` never fills every hardware thread, and
+returns 27 of 28 on the target. The reference data says why: full occupancy is
+where the barrier dies.
+
+## Carried forward, not claimed
+
+The end-to-end `tg128 @ 28 threads` regression is **not** demonstrated fixed
+here, because there is no generation path to regress. It is a Phase 4/6
+acceptance measurement, to be made with the identical model, prompt, thread
+count, affinity, context and batch as the reference table at the top of this
+file. What Phase 2 establishes is that the scheduler does not reproduce the
+pathology on the workloads that resemble it, and that the mechanism responsible
+is absent by construction.
+
 ## Golden vectors
 
 Captured with `tools/reference/sllm-logits-ref` at `-t 1`. ggml's reduction
@@ -174,7 +256,8 @@ Python helper entry points.
 
 ## saphira-llm
 
-No measurements. The engine does not exist yet. This section is populated at
-Phase 4 (correctness) and Phase 6 (optimised), against the same machine, the
-same model, the same prompts, the same thread counts, the same context length
-and the same batch settings as the reference tables above.
+Phase 2 scheduler numbers are in the section above. Model execution does not
+exist yet, so there is no end-to-end throughput to report. When there is, it
+goes here, measured on this machine, same model, same prompts, same thread
+counts, same context length and same batch settings as the reference tables at
+the top of this file.
