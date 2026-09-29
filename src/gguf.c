@@ -281,7 +281,18 @@ static void kv_free(sllm_gguf_kv * kv) {
         return;
     }
     free(kv->key);
-    free(kv->data);
+    if (kv->data != NULL) {
+        if (kv->type == SLLM_VT_ARRAY && kv->arr_type == SLLM_VT_STRING) {
+            /* A string array owns `n` individually allocated strings. Slots
+             * never read are NULL, and free(NULL) is defined, so a partially
+             * built array needs no separate cleanup path. */
+            char ** strs = (char **) kv->data;
+            for (uint64_t i = 0; i < kv->n; ++i) {
+                free(strs[i]);
+            }
+        }
+        free(kv->data);
+    }
     kv->key  = NULL;
     kv->data = NULL;
 }
@@ -336,17 +347,49 @@ static sllm_status read_kv(sllm_reader * r, sllm_gguf_kv * kv) {
         kv->n        = n;
 
         if (atype == SLLM_VT_STRING) {
-            /* We have no use for string arrays; skip them so the token
-             * vocabulary, which is the only one in practice, still parses. */
-            for (uint64_t i = 0; i < n; ++i) {
-                char * tmp = NULL;
-                if (!rstr(r, &tmp)) {
-                    kv_free(kv);
-                    return SLLM_ERR_GGUF_TRUNCATED;
+            /*
+             * String arrays, needed by the tokenizer: the vocabulary is one,
+             * and it is the largest in practice at 128256 entries.
+             *
+             * Each element occupies at least 8 bytes in the file, because that
+             * is the size of its length prefix. That gives a bound on the
+             * pointer array we are about to allocate which comes from the file
+             * rather than from the declared count: a header claiming 2^28
+             * strings would otherwise ask for 2 GiB of pointers out of a file
+             * that has no room for them.
+             */
+            if (n > (uint64_t) (r->size / sizeof(uint64_t))) {
+                if (r->err != NULL && r->err_len > 0 && r->err[0] == '\0') {
+                    (void) snprintf(r->err, r->err_len,
+                        "metadata key '%s' declares %llu strings, more than the %zu bytes left in the file can hold",
+                        kv->key, (unsigned long long) n, r->size);
                 }
-                free(tmp);
+                kv_free(kv);
+                return SLLM_ERR_TOO_LARGE;
             }
-            kv->elem_size = 0;
+            if (n > 0) {
+                /* Overflow-safe: n is already bounded above by r->size/8. */
+                kv->data = calloc((size_t) n, sizeof(char *));
+                if (kv->data == NULL) {
+                    if (r->err != NULL && r->err_len > 0 && r->err[0] == '\0') {
+                        (void) snprintf(r->err, r->err_len,
+                            "out of memory reading %llu strings for '%s'",
+                            (unsigned long long) n, kv->key);
+                    }
+                    kv_free(kv);
+                    return SLLM_ERR_TOO_LARGE;
+                }
+                for (uint64_t i = 0; i < n; ++i) {
+                    char * tmp = NULL;
+                    if (!rstr(r, &tmp)) {
+                        kv->n = i;   /* free only what was filled in */
+                        kv_free(kv);
+                        return SLLM_ERR_GGUF_TRUNCATED;
+                    }
+                    ((char **) kv->data)[i] = tmp;
+                }
+            }
+            kv->elem_size = sizeof(char *);
             return SLLM_OK;
         }
 
@@ -775,13 +818,19 @@ const sllm_gguf_tensor * sllm_gguf_find_tensor(const sllm_gguf * g, const char *
 }
 
 /* Read element `i` of a numeric kv as a 64-bit value, sign-extending as the
- * declared type requires. */
+ * declared type requires.
+ *
+ * For an array the element type is `arr_type`, not `type`: `type` is
+ * SLLM_VT_ARRAY and would fall through to the default case, so reading element
+ * zero of any array failed. No test covered it, because the only arrays in the
+ * acceptance model are the tokenizer's, and the tokenizer was not built yet. */
 static bool kv_as_i64(const sllm_gguf_kv * kv, uint64_t i, int64_t * out) {
     if (kv->data == NULL || i >= kv->n) {
         return false;
     }
+    const sllm_gguf_vtype et = (kv->type == SLLM_VT_ARRAY) ? kv->arr_type : kv->type;
     const uint8_t * p = (const uint8_t *) kv->data + i * kv->elem_size;
-    switch (kv->type) {
+    switch (et) {
         case SLLM_VT_UINT8:  { uint8_t  v; memcpy(&v, p, 1); *out = (int64_t) v; return true; }
         case SLLM_VT_INT8:   { int8_t   v; memcpy(&v, p, 1); *out = v; return true; }
         case SLLM_VT_BOOL:   { uint8_t  v; memcpy(&v, p, 1); *out = v ? 1 : 0; return true; }
@@ -834,6 +883,56 @@ sllm_status sllm_gguf_kv_u64(const sllm_gguf * g, const char * key, uint64_t * o
         return SLLM_ERR_KV_TYPE;
     }
     *out = (uint64_t) v;
+    return SLLM_OK;
+}
+
+/*
+ * String and typed-array access, for the tokenizer.
+ *
+ * These hand back a pointer into the parsed kv rather than copying, so the
+ * caller must not free it and must not assume it outlives the sllm_gguf. The
+ * element count is returned separately because a NULL data pointer is legal
+ * for an empty array and is not the same as a missing key.
+ */
+sllm_status sllm_gguf_kv_str_array(const sllm_gguf * g, const char * key,
+                                   char * const * * out, uint64_t * n) {
+    const sllm_gguf_kv * kv = sllm_gguf_find_kv(g, key);
+    if (kv == NULL) {
+        return SLLM_ERR_KV_MISSING;
+    }
+    if (kv->type != SLLM_VT_ARRAY || kv->arr_type != SLLM_VT_STRING) {
+        return SLLM_ERR_KV_TYPE;
+    }
+    *out = (char * const *) kv->data;
+    *n   = kv->n;
+    return SLLM_OK;
+}
+
+sllm_status sllm_gguf_kv_i32_array(const sllm_gguf * g, const char * key,
+                                   const int32_t ** out, uint64_t * n) {
+    const sllm_gguf_kv * kv = sllm_gguf_find_kv(g, key);
+    if (kv == NULL) {
+        return SLLM_ERR_KV_MISSING;
+    }
+    if (kv->type != SLLM_VT_ARRAY || kv->arr_type != SLLM_VT_INT32) {
+        return SLLM_ERR_KV_TYPE;
+    }
+    *out = (const int32_t *) kv->data;
+    *n   = kv->n;
+    return SLLM_OK;
+}
+
+sllm_status sllm_gguf_kv_f32_array(const sllm_gguf * g, const char * key,
+                                   const float ** out, uint64_t * n) {
+    const sllm_gguf_kv * kv = sllm_gguf_find_kv(g, key);
+    if (kv == NULL) {
+        return SLLM_ERR_KV_MISSING;
+    }
+    if (kv->type != SLLM_VT_ARRAY || kv->arr_type != SLLM_VT_FLOAT32) {
+        return SLLM_ERR_KV_TYPE;
+    }
+    *out = (const float *) kv->data;
+    *n   = kv->n;
     return SLLM_OK;
 }
 

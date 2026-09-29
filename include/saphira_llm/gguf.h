@@ -160,6 +160,20 @@ sllm_status sllm_gguf_kv_i32(const sllm_gguf * gguf, const char * key, int32_t *
 sllm_status sllm_gguf_kv_f32(const sllm_gguf * gguf, const char * key, float * out);
 sllm_status sllm_gguf_kv_str(const sllm_gguf * gguf, const char * key, const char ** out);
 
+/*
+ * Array access, for the tokenizer's vocabulary, token types, scores and
+ * merges. The returned pointer aliases the parsed metadata: do not free it,
+ * and do not use it after sllm_gguf_close. `*n` is set even when the array
+ * is empty, where `*out` is NULL, so an empty array is distinguishable from a
+ * missing key by the status alone.
+ */
+sllm_status sllm_gguf_kv_str_array(const sllm_gguf * gguf, const char * key,
+                                   char * const ** out, uint64_t * n);
+sllm_status sllm_gguf_kv_i32_array(const sllm_gguf * gguf, const char * key,
+                                   const int32_t ** out, uint64_t * n);
+sllm_status sllm_gguf_kv_f32_array(const sllm_gguf * gguf, const char * key,
+                                   const float ** out, uint64_t * n);
+
 /* Tensor lookup by name. Returns NULL when absent. */
 const sllm_gguf_tensor * sllm_gguf_find_tensor(const sllm_gguf * gguf, const char * name);
 

@@ -96,7 +96,7 @@ bad-layout, known-but-unsupported versus not-a-type.
 | 1 | container, ISA dispatch, first kernel, baseline proof | done |
 | 2 | tensor layer, vector kernels, threading, topology-aware affinity | done: no full-occupancy regression on representative workloads |
 | 3 | BitNet I2_S correctness: exact ports plus a scalar reference | done: dequant over 46M real elements, and GEMV/GEMM matching the reference on real weights across two shapes |
-| 3.5 | gpt2 BPE tokenizer: load, encode, decode, golden vectors | tokeniser vectors match upstream |
+| 3.5 | gpt2 BPE tokenizer: load, encode, decode, golden vectors | done: 80 prompts token-identical to the reference, and every one round trips |
 | 4 | forward pass and generation | **token-identical to the reference at t=0** |
 | 5 | chunked attention, KV save/load, state restore | mask correct across chunk boundaries |
 | 6 | measured optimisation | full metric table on this machine |
@@ -206,6 +206,27 @@ Phase 1. I2_S weight codes are non-negative, so the weight operand is
 genuinely unsigned; the bias-and-correction the signed int8 kernel needs would
 break parity if carried over. The dispatch was built in Phase 1 to make the
 Phase 3 choice obvious, and the two phases are deliberately not merged.
+
+### The tokenizer is not a standard GPT-2 BPE
+
+The acceptance model has no `tokenizer.ggml.pre` key, so the reference uses its
+`DEFAULT` pre-type, announces that "GENERATION QUALITY WILL BE DEGRADED", and
+applies **four** split passes rather than the single canonical GPT-2 pattern:
+punctuation runs first, then the GPT-2 pattern, then number runs, then runs of
+three ASCII digits.
+
+The consequences are load-bearing for parity, so they are written down rather
+than left in the fixture: `they're` is `they` `'` `re` because the contraction
+rule is anchored at the current position; `%!` is a single token because of a
+pass that exists in no GPT-2 specification; `1234567890` becomes `123` `456`
+`789` `0` because of the digit-triple pass.
+
+Two consequences of reading the reference rather than the specification are
+worth keeping in mind when the ordinary GGUF models arrive in Phase 7. The
+pre-type is per-model, so it is configuration to be discovered, not a constant
+to be assumed. And whitespace is a list, not a Unicode category: the reference
+sets the whitespace bit from a separate table, and without it every double space
+tokenises wrongly while every single space stays correct.
 
 ### The layout, as verified
 

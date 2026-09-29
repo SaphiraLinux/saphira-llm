@@ -250,12 +250,154 @@ arithmetic, and matching the reference is the gate.
 
 ---
 
+## Phase 3.5
+
+### The model has no `tokenizer.ggml.pre`, so the reference uses four regexes
+
+The obvious implementation of "gpt2 BPE" is the single canonical GPT-2
+pattern. This model does not use it. `tokenizer.ggml.pre` is absent, so the
+reference falls back to its `DEFAULT` pre-type and logs:
+
+    load: missing pre-tokenizer type, using: 'default'
+    load: GENERATION QUALITY WILL BE DEGRADED!
+
+`DEFAULT` is four successive split passes, not one:
+
+    [\p{P}\$\+<=>\^~\|]+
+    's|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)
+    \p{N}+
+    [0-9][0-9][0-9]
+
+The observable consequences, all from the fixture:
+
+| input | reference | a textbook GPT-2 BPE |
+| --- | --- | --- |
+| `1234567890` | `123` `456` `789` `0` | `123` `456` `789` `0` only by luck of merge ranks |
+| `they're` | `they` `'` `re` | `they` `'re` |
+| `%!` | `%!` | `%` `!` |
+| `a + b` | `a` ` ` `+` ` b` | `a` ` +` ` b` |
+
+The third and fourth are pass 1, which is in no GPT-2 specification at all. The
+second is pass 2's apostrophe rule being anchored at the current position rather
+than searched for, so an apostrophe in the middle of a word does not begin a
+contraction.
+
+Reading the reference and reproducing its *configuration* mattered more here
+than reproducing its *algorithm*. The four-regex structure and the fallback
+warning are both invisible from the model file's contents alone; only running
+the reference reveals them.
+
+### Whitespace is not a general category
+
+The first port of the Unicode tables took the category ranges and stopped. That
+makes an ASCII space look like ordinary punctuation, because U+0020 is Zs and
+the range table marks it `SEPARATOR` with no whitespace bit. The result is that
+` ?[^\s\p{L}\p{N}]+` matches runs of spaces, `\s+(?!\S)` never fires, and every
+prompt containing a double space tokenises differently from the reference.
+
+The reference's own code shows why: it builds its per-code-point flags by
+overlaying the category ranges and then, separately, setting the whitespace bit
+for every entry in `unicode_set_whitespace`. Whitespace is a list, not a
+category, and the two tables have to be ported together.
+
+Worth noting what the failure looked like: it was not a crash and not an
+obviously wrong token, it was a *plausible* split that differed only in where
+the space tokens fell. ASCII-only prompts pass under both readings, so a fixture
+made of ordinary prose would never have caught it.
+
+### `byte_to_cpt` must return a UTF-8 encoding, not the bare byte
+
+A passing-through byte maps to the UTF-8 encoding of the code point of the same
+value. For ASCII the two are the same byte, which is exactly why the confusion
+survives: `byte_to_cpt(0xCE)` is the two bytes `C3 8E`, the character `Î`, and
+not the single byte `CE`.
+
+Returning the bare byte leaves every word's byte-encoded form identical to its
+original bytes, so no piece is ever found and non-ASCII text encodes to
+*nothing* -- while ASCII, which is most of any fixture, passes throughout. The
+symptom is a prompt that yields a bare BOS and nothing else, which looks like a
+missing-vocabulary problem and is not.
+
+### BPE without a staleness check is not BPE
+
+The reference's merge loop pops the lowest-ranked pair and merges it, but only
+after checking that the pair's text is still the text it had when the pair was
+queued. A pair whose left half has since absorbed a neighbour is dropped.
+
+Without that check, such pairs get merged anyway. The output is still plausible
+tokens, still round trips through decode, and is simply not the reference's.
+Seven prompts disagreed before the check was restored, all of them ones where
+merges chain: a long word, a run of repeated characters, a trailing word.
+
+The check is a length comparison rather than a string comparison, which is
+equivalent here because both halves are contiguous slices of the same word.
+
+### `kv_as_i64` could not read any array
+
+`kv_as_i64` switched on `kv->type`, which is `SLLM_VT_ARRAY` for every array, so
+it always fell through to the default case and returned false. Reading element
+zero of any array failed.
+
+No test covered it, because the only arrays in the acceptance model belong to
+the tokenizer, and the tokenizer had not been built. The accessors wrapped it
+looked correct: they validated the element type and then called a helper that
+could only return false. The failure surfaces as a missing metadata key, which
+points at the wrong file entirely.
+
+### A string array's pointer table is not bounded by the element count
+
+Phase 1 skipped string arrays so the vocabulary would still parse, and the
+comment said so. Loading them means allocating `n` pointers where `n` comes
+straight from the file: a header claiming 2^28 strings would ask for 2 GiB of
+pointers out of a file with no room for them.
+
+Each string element occupies at least 8 bytes in the file, since that is the
+size of its length prefix, so `n <= remaining_bytes / 8` is a bound taken from
+the file rather than from the declared count. That is the same reasoning as the
+existing tensor-extent checks: a header does not get to allocate what it says.
+
+### Two harness defects that reported the wrong thing
+
+Both of these produced confident, well-formatted messages that were false.
+
+A test that reported success from a count rather than an outcome printed "80
+prompts, all matching the reference" while all 80 records were failing, because
+the message was gated on having read 80 records and nothing else. A gate has to
+report what it compared, and a success line that fires regardless of the result
+is the most expensive kind of wrong: it is believed.
+
+The same test then failed to parse the fixture at all for a while, reporting
+`reference has 0` for every prompt. `"  ids"` is five characters and the parse
+started at `line + 4`, so `strtol` was handed the `s`. Every comparison ran
+against an empty expectation, which is why the count of 80 was the only thing
+that looked healthy.
+
+### The unescaper kept the line terminator
+
+The fixture stores each prompt's text on one line with newlines escaped as `\n`.
+The unescaper stopped only at NUL, so the line's trailing newline became part of
+the prompt. Every one of the 80 prompts gained a token, and the tokenizer was
+blamed for a systematic off-by-one that was in the test.
+
+A bare newline in the fixture is always the line terminator, never prompt
+content, so stopping at one is unambiguous.
+
+---
+
 ## What these have in common
 
 Four of the kernel defects above — SiLU, NeoX RoPE, rms_norm, Q4_0, and the
 I2_S layout — were invisible on the acceptance model and visible only against
 the reference, a synthesised adversarial case, or a varying shape. Two
 produced confident, well-formatted messages that pointed at the wrong code.
+
+The tokenizer added a sharper version of the same lesson. Of the six Phase 3.5
+defects, every one of them passed on ASCII text. Punctuation runs, digit
+triples, contractions, double spaces, multi-byte characters and corrupted
+UTF-8 are all invisible to a fixture made of English prose, and the project's
+own earlier conclusion — that the golden vectors had "earned their keep" — was
+only ever true because the fixture was built to attack the specific thing
+rather than to be representative.
 
 The defences that actually caught them were the ones that compare against the
 reference element by element, and the ones that vary the shape. A gate built

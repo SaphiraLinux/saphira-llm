@@ -20,6 +20,20 @@ Links against the upstream BitNet-capable llama.cpp (the same pinned tree as
 It requires a C++ toolchain because the reference is C++. It is never compiled
 into the runtime and the runtime has no equivalent.
 
+## `sllm-tokenize-ref`
+
+Links against the same pinned tree and dumps the reference's own tokenisation,
+so `tests/golden/tokenizer.txt` records the reference rather than a belief about
+it. One record per prompt: the text itself (escaped, so the fixture drives the
+test), the token ids, and the reference's own rendering of each token.
+
+The prompt set is an attack on the pre-tokeniser, not sample prose. The
+acceptance model has no `tokenizer.ggml.pre` key, so the reference uses its
+`DEFAULT` pre-type — four split passes, not the canonical single GPT-2 pattern
+— and a fixture of ordinary English would pass against almost any
+implementation. Punctuation, digits of every length, contractions, whitespace
+runs and multi-byte UTF-8 are the cases that actually discriminate.
+
 ### Building
 
 ```sh
@@ -38,6 +52,13 @@ cc -O2 -o sllm-logits-ref sllm-logits-ref.c \
   -Ithird_party/BitNet/3rdparty/llama.cpp/include \
   -Ithird_party/BitNet/3rdparty/llama.cpp/ggml/include \
   -Lbuild-base/bin -lllama -lggml -lggml-base -lm -lpthread -ldl
+
+cc -O2 -o sllm-tokenize-ref sllm-tokenize-ref.c \
+  -Ithird_party/BitNet/3rdparty/llama.cpp/include \
+  -Ithird_party/BitNet/3rdparty/llama.cpp/ggml/include \
+  -Lbuild-base/bin -lllama -lggml -lggml-base -lm -lpthread -ldl
+
+./sllm-tokenize-ref <model.gguf> tests/golden/tokenizer.txt
 
 LD_LIBRARY_PATH=build-base/bin ./sllm-logits-ref \
   -m /var/lib/spoon/models/ggml-model-i2_s.gguf \

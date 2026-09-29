@@ -278,6 +278,39 @@ argue about and nothing to gain from a tolerance. The measured-tolerance
 argument in the parity gate above applies to float accumulation across a
 30-layer forward pass, which does not exist yet.
 
+## Tokenizer golden vectors, Phase 3.5
+
+Captured with `tools/reference/sllm-tokenize-ref` from the pinned reference
+build, never from us, over a prompt set chosen to attack the pre-tokeniser
+rather than to be representative prose. `make test` re-derives every id without
+the reference present.
+
+The acceptance model has no `tokenizer.ggml.pre` key, so the reference falls
+back to its `DEFAULT` pre-type and logs "GENERATION QUALITY WILL BE DEGRADED".
+That default is four split passes, so the prompt set leads with the cases where
+a textbook GPT-2 BPE diverges: punctuation runs, digit runs of every length
+from one to thirty digits, contractions in every case form, whitespace runs,
+newlines, CRLF, and multi-byte UTF-8 in two-, three- and four-byte forms.
+
+| | |
+| --- | --- |
+| prompts | 80 |
+| token ids matching the reference | 80 / 80 |
+| prompts round tripping through encode and decode | 80 / 80 |
+| agreement criterion | exact |
+
+Exact equality, with no tolerance, because a tokeniser has no floating point in
+it. If the ids differ the model is conditioning on a different sequence, and
+nothing downstream recovers.
+
+Every prompt's text is stored in the fixture alongside its ids, so the test is
+driven by the fixture rather than by a second copy of the prompt list that could
+drift away from it.
+
+The measured-tolerance argument in the parity gate above does not apply here.
+That tolerance exists for float accumulation across a 30-layer forward pass,
+which does not exist yet. A gate that can only pass is not a gate.
+
 ## Reproducing
 
 ```sh
