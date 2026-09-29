@@ -20,6 +20,9 @@
 
 #include "harness.h"
 
+#include <saphira_llm/forward.h>
+#include <saphira_llm/i2s_gemm.h>
+#include <saphira_llm/isa.h>
 #include <saphira_llm/quant.h>
 
 #include <stdio.h>
@@ -479,6 +482,60 @@ TEST(i2s_activation_quantiser_matches_the_reference_rules) {
     CHECK_EQ_INT(act.sum, sum);
 }
 
+/*
+ * The production wiring, not the kernel.
+ *
+ * Every other test in this file pins a path explicitly, which is exactly why
+ * the AVX-VNNI kernel could be correct, tested against the reference on real
+ * tensors, and still never run: nothing outside the test suite ever called
+ * sllm_i2s_select_isa, so the global stayed NULL and sllm_i2s_dot fell back to
+ * AVX2. A profile of the shipping binary is what caught it -- the log said
+ * "selected=vnni" while the samples were all in dot_v3.
+ *
+ * So this asserts the thing the other tests structurally cannot: that loading
+ * a model, which is all a production caller does, leaves the best kernel this
+ * CPU has installed. On the target that is VNNI. A machine without it must not
+ * fail; it must simply be asserted not to claim it.
+ */
+TEST(loading_a_model_installs_the_best_ternary_kernel) {
+    const sllm_isa_dispatch d = sllm_isa_build(SLLM_ISA_LEVEL_AUTO);
+    const bool want_vnni = sllm_isa_level_supported(SLLM_ISA_VNNI, &d.caps) &&
+                           d.selected >= SLLM_ISA_VNNI;
+
+    /* No explicit selection: go through the public load path only. */
+    sllm_gguf g;
+    char err[512];
+    if (sllm_gguf_open(SLLM_TEST_MODEL, &g, err, sizeof err) != SLLM_OK) {
+        CHECK(1);
+        return;
+    }
+    sllm_model * m = NULL;
+    if (sllm_model_load(&g, &m) != SLLM_OK) {
+        sllm_gguf_close(&g);
+        CHECK(1);
+        return;
+    }
+
+    const sllm_isa_level got = sllm_i2s_dot_isa();
+    sllm_tests_run++;
+    if (want_vnni && got != SLLM_ISA_VNNI) {
+        sllm_tests_failed++;
+        fprintf(stderr, "  FAIL after model load the dot kernel is %d, "
+                        "expected VNNI (%d)\n", (int) got, (int) SLLM_ISA_VNNI);
+    } else if (!want_vnni && got != SLLM_ISA_V3) {
+        sllm_tests_failed++;
+        fprintf(stderr, "  FAIL after model load the dot kernel is %d, "
+                        "expected the v3 fallback (%d)\n", (int) got,
+                (int) SLLM_ISA_V3);
+    } else {
+        printf("    model load installed the %s ternary kernel\n",
+               got == SLLM_ISA_VNNI ? "AVX-VNNI" : "AVX2 v3");
+    }
+
+    sllm_model_free(m);
+    sllm_gguf_close(&g);
+}
+
 void sllm_test_i2s(void) {
     printf("i2s\n");
     RUN(i2s_reader_matches_the_reference_on_real_tensors);
@@ -487,4 +544,5 @@ void sllm_test_i2s(void) {
     RUN(i2s_activation_quantiser_matches_the_reference_rules);
     RUN(i2s_field_order_is_top_down_within_each_byte);
     RUN(i2s_row_and_dequant_agree_and_differ_only_by_sign_and_scale);
+    RUN(loading_a_model_installs_the_best_ternary_kernel);
 }

@@ -119,6 +119,23 @@ sllm_isa_level sllm_i2s_installed_isa(void);
  */
 void sllm_i2s_select_isa(const sllm_isa_dispatch * d);
 
+/*
+ * Select the best ternary kernel this CPU has, ignoring any explicit choice.
+ * sllm_model_load calls this, so production never has to remember to; the
+ * explicit form is for tests that need to pin a path.
+ */
+void sllm_i2s_select_auto(void);
+
+/*
+ * Pin the dot kernel to exactly one level, without detecting. sllm_isa_build
+ * takes a floor and climbs, so this is the only way to ask "what if this CPU
+ * had only v3?". The caller must have checked support.
+ */
+void sllm_i2s_select_level(sllm_isa_level level);
+
+/* Which level the current dot kernel is, for diagnostics and tests. */
+sllm_isa_level sllm_i2s_dot_isa(void);
+
 #ifdef __cplusplus
 }
 #endif

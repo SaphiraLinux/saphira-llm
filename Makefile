@@ -128,3 +128,15 @@ tgbench: $(TGBENCH_BIN)
 
 $(TGBENCH_BIN): $(TGBENCH_OBJ) $(LIBOBJ)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lm -lpthread
+
+# Isolated timing for the ternary dot kernels. Interleaves the two paths inside
+# one process, because end-to-end drift is larger than the effect being measured.
+KERNELBENCH_SRC = bench/kernel_bench.c
+KERNELBENCH_OBJ = $(KERNELBENCH_SRC:%.c=$(OBJDIR)/%.o)
+KERNELBENCH_BIN = saphira-llm-kernelbench
+
+.PHONY: kernelbench
+kernelbench: $(KERNELBENCH_BIN)
+
+$(KERNELBENCH_BIN): $(KERNELBENCH_OBJ) $(LIBOBJ)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lm -lpthread

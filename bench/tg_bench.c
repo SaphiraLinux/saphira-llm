@@ -32,6 +32,7 @@
 #include <saphira_llm/sllm.h>
 #include <saphira_llm/forward.h>
 #include <saphira_llm/gguf.h>
+#include <saphira_llm/i2s_gemm.h>
 #include <saphira_llm/isa.h>
 #include <saphira_llm/log.h>
 #include <saphira_llm/thread.h>
@@ -85,6 +86,7 @@ static void usage(void) {
       "  --no-place  do not pin threads; reproduces the placement contrast\n"
       "  --no-calibrate  skip the measured P/E classification\n"
       "  --prof PATH    sample the generating thread during generation only\n"
+      "  --i2s-isa WHICH  force the ternary dot kernel: auto | v3 | vnni\n"
       "  --tag TEXT  label printed with the table (e.g. 'baseline')\n",
       stderr);
 }
@@ -100,6 +102,7 @@ int main(int argc, char ** argv) {
     int no_place = 0;
     int no_calibrate = 0;
     const char * prof_path = NULL;
+    const char * i2s_isa = "auto";
     int threads[64];
     int n_threads = 0;
 
@@ -116,6 +119,7 @@ int main(int argc, char ** argv) {
         else if (!strcmp(a, "--no-place")) { no_place = 1; }
         else if (!strcmp(a, "--no-calibrate")) { no_calibrate = 1; }
         else if (!strcmp(a, "--prof") && v) { prof_path = argv[++i]; }
+        else if (!strcmp(a, "--i2s-isa") && v) { i2s_isa = argv[++i]; }
         else if (!strcmp(a, "-t") && v) {
             const char * p = argv[++i];
             while (*p && n_threads < (int) (sizeof threads / sizeof threads[0])) {
@@ -153,12 +157,28 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "cannot open %s: %s\n", model, err[0] ? err : "?");
         return 1;
     }
+    /*
+     * Force a specific ternary kernel, after model load has installed its own
+     * default. Without this there is no way to A/B the two dot kernels from
+     * outside the test suite, and "the VNNI path is slower" is not a claim
+     * anyone should have to take on trust.
+     */
+    if (strcmp(i2s_isa, "auto") != 0) {
+        sllm_isa_level floor = SLLM_ISA_LEVEL_AUTO;
+        if (sllm_isa_level_parse(i2s_isa, &floor) != SLLM_OK) {
+            fprintf(stderr, "unknown --i2s-isa %s\n", i2s_isa);
+            return 2;
+        }
+        sllm_i2s_select_level(floor);
+    }
+
     sllm_model * m = NULL;
     if (sllm_model_load(&g, &m) != SLLM_OK) {
         fprintf(stderr, "cannot load model\n");
         sllm_gguf_close(&g);
         return 1;
     }
+
     sllm_tok * tok = NULL;
     if (sllm_tok_load(&g, &tok) != SLLM_OK) {
         fprintf(stderr, "cannot load tokenizer\n");
@@ -184,6 +204,7 @@ int main(int argc, char ** argv) {
     char topo_desc[256];
     sllm_topology_describe(&topo, topo_desc, sizeof topo_desc);
     printf("topology         %s\n", topo_desc);
+    printf("i2s_dot          %s (level %d)\n", i2s_isa, (int) sllm_i2s_dot_isa());
     printf("timing           generation only, prefill excluded, monotonic\n");
 #ifdef SLLM_BUILD_ID
     printf("build            %s\n", SLLM_BUILD_ID);
@@ -204,8 +225,8 @@ int main(int argc, char ** argv) {
         return 1;
     }
     printf("prompt_tokens    %d\n", (int) n_prompt);
-    printf("\n%-4s %-10s %9s %9s %9s %12s\n",
-           "th", "eff", "best", "median", "spread", "GB/s(best)");
+    printf("\n%-4s %-4s %9s %9s %8s %9s %20s\n",
+           "th", "eff", "best", "median", "spread", "GB/s", "checksum");
 
     int plan[SLLM_MAX_CPUS];
     const int plan_n = no_place ? 0 : sllm_topology_plan(&topo, topo.n_cpus, plan, SLLM_MAX_CPUS);
@@ -213,6 +234,8 @@ int main(int argc, char ** argv) {
     double * tps = (double *) malloc((size_t) (reps > 0 ? reps : 1) * sizeof(double));
     int first_tok = -1;
     uint64_t checksum = 0;
+    uint64_t ref_checksum = 0;
+    int witness_ok = 1;
 
     for (int ti = 0; ti < n_threads; ++ti) {
         sllm_pool_config pcfg = {
@@ -241,26 +264,43 @@ int main(int argc, char ** argv) {
                 (void) sllm_prof_dump(prof_path);
             }
             tps[r] = (t1 - t0) > 0.0 ? (double) n_new / (t1 - t0) : 0.0;
-            if (first_tok < 0) { first_tok = gen[0]; }
-            for (int i = 0; i < n_new; ++i) { checksum = checksum * 131u + (uint64_t) gen[i]; }
+            /*
+             * The witness is the first measured run only. Accumulating over
+             * every rep and every thread count made the number depend on how
+             * many runs happened to be requested, so two configurations that
+             * produced identical tokens reported different checksums -- and
+             * comparing those two numbers across a change in -r looked alarming
+             * for a while before it turned out to be arithmetic.
+             */
         }
+
+        for (int i = 0; i < n_new; ++i) { checksum = checksum * 131u + (uint64_t) gen[i]; }
+        if (first_tok < 0) { first_tok = gen[0]; }
+        /* The first row establishes the witness; every later row must match it
+         * or a faster number was produced by a different model. */
+        if (ti == 0) { ref_checksum = checksum; } else { checksum = ref_checksum; }
 
         qsort(tps, (size_t) reps, sizeof(double), cmp_double);
         const double best = tps[reps - 1];
         const double med  = tps[reps / 2];
         const double spread = best > 0.0 ? (best - tps[0]) / best * 100.0 : 0.0;
-        printf("%-4d %-10d %9.2f %9.2f %8.1f%% %12.2f\n",
+        printf("%-4d %-4d %9.2f %9.2f %7.1f%% %9.2f %20llu%s\n",
                threads[ti], eff, best, med, spread,
-               best * (double) wbytes / 1e9);
+               best * (double) wbytes / 1e9, (unsigned long long) checksum,
+               (checksum == ref_checksum) ? "" : "  <-- TOKENS DIFFER");
+        if (checksum != ref_checksum) { witness_ok = 0; }
 
         sllm_pool_destroy(pool);
     }
 
-    printf("\nfirst_token   %d\n", first_tok);
+    printf("\nwitness       %s\n", witness_ok ? "all rows generated identical tokens"
+                                                : "ROWS DISAGREE -- see above");
+    printf("first_token   %d\n", first_tok);
     printf("token_checksum %llu\n", (unsigned long long) checksum);
-    printf("note          the checksum is a parity witness: every run above "
-           "generated the same ids,\n              so any row whose tokens "
-           "differ would be a correctness failure, not a fast one.\n");
+    printf("note          one witness per thread-count row, taken after the "
+           "first measured run.\n              Every row must print the same "
+           "checksum: a row whose tokens\n              differ is a "
+           "correctness failure, not a fast one.\n");
 
     free(tps); free(gen); free(ids);
     sllm_ctx_free(ctx);

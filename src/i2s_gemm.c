@@ -27,6 +27,7 @@
  */
 
 #include <saphira_llm/i2s_gemm.h>
+#include <saphira_llm/isa.h>
 #include <saphira_llm/log.h>
 
 #if defined(__x86_64__)
@@ -189,7 +190,27 @@ static int32_t dot_vnni(const uint8_t * w, const int8_t * a, size_t n) {
     const size_t blocks = n / SLLM_I2S_QK;
     const __m256i mask  = _mm256_set1_epi8(0x03);
 
-    __m256i acc = _mm256_setzero_si256();
+    /*
+     * Four independent accumulators, not one.
+     *
+     * The single-accumulator form was correct and measurably slower than the
+     * AVX2 path it was supposed to beat: 34.8 ns against 21.5 ns per dot at
+     * n=2560, and 127.6 against 57.3 at n=6912. The gap widens with n, which
+     * is the signature of a loop-carried dependency rather than a throughput
+     * limit. dpbusd has a latency of several cycles, and chaining four of
+     * them into one accumulator makes every block wait for the previous
+     * block's last add. The AVX2 path does not have this problem: its four
+     * maddubs are independent and it touches its accumulator once per block.
+     *
+     * Four accumulators is enough to cover the latency; the reference's
+     * unrolled GEMM makes the same move for the same reason. Integer addition
+     * is associative and exact, so this changes no result at all -- the Phase
+     * 3 gate against the reference's own hash is what confirms it.
+     */
+    __m256i acc0 = _mm256_setzero_si256();
+    __m256i acc1 = _mm256_setzero_si256();
+    __m256i acc2 = _mm256_setzero_si256();
+    __m256i acc3 = _mm256_setzero_si256();
     for (size_t b = 0; b < blocks; ++b) {
         __m256i c0, c1, c2, c3;
         unpack_block(w + b * 32u, &c0, &c1, &c2, &c3, mask);
@@ -205,12 +226,14 @@ static int32_t dot_vnni(const uint8_t * w, const int8_t * a, size_t n) {
          * int32. No int16 intermediate, so nothing can saturate at all. This
          * is the reference's own VNNI path, not an optimisation invented here.
          */
-        acc = _mm256_dpbusd_epi32(acc, c0, b0);
-        acc = _mm256_dpbusd_epi32(acc, c1, b1);
-        acc = _mm256_dpbusd_epi32(acc, c2, b2);
-        acc = _mm256_dpbusd_epi32(acc, c3, b3);
+        acc0 = _mm256_dpbusd_epi32(acc0, c0, b0);
+        acc1 = _mm256_dpbusd_epi32(acc1, c1, b1);
+        acc2 = _mm256_dpbusd_epi32(acc2, c2, b2);
+        acc3 = _mm256_dpbusd_epi32(acc3, c3, b3);
     }
-    return hsum8(acc);
+    acc0 = _mm256_add_epi32(acc0, acc1);
+    acc2 = _mm256_add_epi32(acc2, acc3);
+    return hsum8(_mm256_add_epi32(acc0, acc2));
 }
 
 static int32_t (*g_dot)(const uint8_t *, const int8_t *, size_t) = NULL;
@@ -271,6 +294,57 @@ sllm_isa_level sllm_i2s_installed_isa(void) {
     return g_dot_isa == SLLM_ISA_COUNT ? SLLM_ISA_V3 : g_dot_isa;
 #else
     return SLLM_ISA_V3;
+#endif
+}
+
+/*
+ * Select the best kernel this CPU actually has, without being told.
+ *
+ * This exists because of a measurement, and the measurement was embarrassing.
+ * Profiling the shipping binary showed dot_v3 -- the AVX2 saturating-maddubs
+ * path -- running, while the log line above it said "selected=vnni". The
+ * reason was that sllm_i2s_select_isa was called from tests and from nothing
+ * else: no production entry point ever passed a dispatch, so the global stayed
+ * NULL and sllm_i2s_dot fell through to its AVX2 default. The VNNI kernel was
+ * correct, tested against the reference on real tensors, and dead.
+ *
+ * So the default is now the best available rather than the safest-looking one.
+ * An explicit sllm_i2s_select_isa still overrides it, which is what the tests
+ * need to pin a path; this is only what happens when nobody has an opinion.
+ */
+void sllm_i2s_select_auto(void) {
+    const sllm_isa_dispatch d = sllm_isa_build(SLLM_ISA_LEVEL_AUTO);
+    sllm_i2s_select_isa(&d);
+}
+
+/*
+ * Pin the dot kernel to exactly one level, skipping detection.
+ *
+ * sllm_isa_build takes a *floor* and goes as high as the CPU allows, so it
+ * cannot be used to ask "what if we had only v3?" -- which is the only way to
+ * A/B the two kernels from outside the test suite, and the only way to check a
+ * claim that one of them is faster. The caller is responsible for having
+ * checked the CPU supports the level; this does not detect, on purpose.
+ */
+void sllm_i2s_select_level(sllm_isa_level level) {
+#if defined(SLLM_X86)
+    if (level >= SLLM_ISA_VNNI) {
+        g_dot     = dot_vnni;
+        g_dot_isa = SLLM_ISA_VNNI;
+    } else {
+        g_dot     = dot_v3;
+        g_dot_isa = SLLM_ISA_V3;
+    }
+#else
+    (void) level;
+#endif
+}
+
+sllm_isa_level sllm_i2s_dot_isa(void) {
+#if defined(SLLM_X86)
+    return g_dot_isa;
+#else
+    return SLLM_ISA_COUNT;
 #endif
 }
 

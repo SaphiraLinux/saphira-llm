@@ -163,6 +163,18 @@ sllm_status sllm_model_load(const sllm_gguf * g, sllm_model ** out) {
     }
     *out = NULL;
 
+    /*
+     * Pick the ternary kernel now, while we are still on the thread that
+     * loaded the model and before any worker exists.
+     *
+     * The placement matters as much as the call. This used to be nobody's job:
+     * no entry point selected an ISA for the forward pass, so the dot kernel
+     * kept its NULL default and silently ran the AVX2 path on a CPU that has
+     * VNNI. Selecting here means a library caller cannot forget to, and doing
+     * it before the pool exists keeps it off the concurrent path entirely.
+     */
+    sllm_i2s_select_auto();
+
     const char * arch = NULL;
     if (sllm_gguf_kv_str(g, "general.architecture", &arch) != SLLM_OK ||
         strcmp(arch, "bitnet-b1.58") != 0) {
