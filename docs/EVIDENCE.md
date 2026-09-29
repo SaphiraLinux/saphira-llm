@@ -708,6 +708,145 @@ Phase 4 float floor is untouched and stays closed; nothing here is evidence for
 reopening it. See `PHASE5-ACCEPTANCE.md`.
 
 ---
+## Phase 6
+
+Measured optimisation. Full record, with provenance, in
+`PHASE6-BASELINE.md`. 24,087 assertions, 0 failed. The acceptance target in the
+brief is **not** met and the file says so with the measurement behind it.
+
+### The profile contradicted the plan, and it was right to
+
+The brief named the AVX-VNNI ternary GEMM as the primary kernel work. Sampled,
+the ternary dot product was 12 percent of decode and one line of `forward.c`
+was 86 percent — and the line was not the multiply-accumulate, it was a
+software half-float converter called 328 million times per token, on a CPU
+with F16C that the project already used elsewhere. A 3.45x single-thread
+improvement came from that one line.
+
+Had the named kernel been optimised first, the phase would have spent its budget
+on 12 percent of the runtime and called it a 1.3x. "Profile before changing
+code" is the part of the brief that earned its keep; the part naming a kernel
+in advance is the part that would have wasted the phase.
+
+### The kernel that was correct, tested, and dead
+
+`sllm_i2s_select_isa` was called from tests and from nothing else. The global
+stayed NULL, `sllm_i2s_dot` fell through to its AVX2 default, and the binary
+logged `selected=vnni` the whole time. The AVX-VNNI kernel had been written,
+dispatched behind an ISA level, and checked against the reference's own hash on
+real tensors — and had never executed in production.
+
+Every test in `test_i2s.c` pins a path explicitly, which is *why* this survived.
+A suite that tests three kernels perfectly can still ship none of them. The
+replacement test asserts the wiring instead: load a model through the public
+path, require the best kernel to be installed, and on a machine without VNNI
+require that it does not claim VNNI.
+
+### Faster instructions, worse kernel
+
+`dot_vnni` chained four `dpbusd` per block into one accumulator, so every block
+waited on the previous block's last add. It was **1.6x to 2.2x slower than the
+AVX2 path it was written to beat**, and slower in a way that widened with `n` —
+the signature of a dependency chain, not a throughput limit. Four accumulators
+made it 1.26x to 1.31x faster than AVX2, with no change to any result, because
+integer addition is associative.
+
+An instruction-count reading would have got this backwards: the VNNI path had
+*fewer* instructions per block (4 dpbusd against 4 maddubs plus 4 int16
+combines) and was still slower. The plan named the instruction; the measurement
+had to name the accumulator.
+
+### A gate that was structurally unable to fire
+
+Phase 2 established that the pool "cannot exhibit the reference's barrier
+pathology, whatever the thread count", and the reason given is sound: no worker
+blocks on another worker, so there is nothing to starve.
+
+But the caller waits for every worker to **arrive** before it claims any work.
+That is a rendezvous, and on a machine where every logical CPU is busy a woken
+worker cannot be scheduled until something yields — so the thread that has to
+make progress is precisely the one that cannot run. The Phase 2 microbenchmarks
+could not see it because their regions are few and large, and a rendezvous per
+region is invisible when a region does a lot of work.
+
+Threading the forward pass produced 6.25 t/s at 28 threads against 21.63 at 4,
+monotonically worse with every extra thread, 33 percent spread. Monotonic
+degradation is what a rendezvous looks like and the opposite of what bandwidth
+looks like. Decode issues **211 regions per token**, so the cost is O(threads x
+regions) and it arrives 5,900 times per token at 28 threads.
+
+The claim in the header comment was not merely incomplete; it was the reason
+nobody looked. It is now corrected in place, next to the measurement.
+
+### Two float bugs of my own, one of them a repeat
+
+- `_mm256_fmadd_ps(acc, w, a)` is `acc*w + a`. I wanted `acc + w*a`. Logits came
+  out at 83 instead of 21 and the parity gate failed on all 16 prompt positions
+  in one run. The gate is the reason this cost minutes rather than a release.
+- The F16C test compared `-0.0` against `+0.0` with `memcmp`. IEEE
+  round-to-nearest says `+0 + -0` is `+0`, so the kernel was correct and the test
+  was wrong. This is the Phase 5 uninitialised-`memcmp` mistake again: in Phase 5
+  it compared memory that was never written, here it compared floats by their
+  bytes. Same instinct, different victim, and the second occurrence is the one
+  that makes it a habit rather than an accident.
+
+### The instrument, and what it took to build one
+
+No `perf`, no root, no valgrind, no gdb, and `apk` cannot install. gprof is
+present and useless here, because -pg recompilation folds inlined AVX2 and VNNI
+intrinsics into their enclosing function — the exact distinction the phase
+needed. So the profiler is in-process SIGPROF sampling, and both things I got
+wrong in it are worth recording because neither announced itself:
+
+- The saved program counter is **not at a fixed register index** between build
+  modes on this toolchain. Index 16 is RIP under `-std=gnu11` and is not under
+  the project's `-std=c11`, and the wrong one produced a file full of kernel
+  addresses and a plausible-looking sample count. It now locates the register
+  that falls inside the program's own text, which is what a program counter is.
+- `dl_iterate_phdr` reports a `dlpi_addr` for this non-PIE binary that is not the
+  load bias. Subtracting it turned every valid program counter into a kernel
+  address. The load bias now comes from `/proc/self/maps`, which is not
+  ambiguous.
+
+A profiler that quietly reports nothing is worse than no profiler, and both of
+these would have been accepted as "the profile was empty" rather than "the
+profiler is wrong".
+
+### The benchmark lied about parity, twice
+
+The token checksum accumulated over every repetition and every thread count, so
+its value depended on how many runs were requested. Two configurations that
+produced **identical tokens** reported different checksums, which looked exactly
+like a numerical regression and cost a detour. The witness is now taken per row
+against the first row, and a row that disagrees is flagged in the table.
+
+Separately, end-to-end tg throughput turned out to be the wrong instrument for
+kernel work: it drifts up to 8 percent between processes on this host, wider
+than the effect being measured, so two back-to-back runs disagreed by more than
+the difference under test. `bench/kernel_bench.c` now times the two dot kernels
+interleaved in one process.
+
+### The host is shared, and that is a measurement condition
+
+Three other agent sessions and a long-running `python3` were resident for the
+whole phase, with load average between 4.7 and 13.6. A 28-thread pool against
+eleven other runnable threads is oversubscribing on purpose. Throughput is now
+best-of-N, because under external interference the minimum is the closest
+estimate to the unloaded machine, and load average is printed with every row.
+None of the tables in `PHASE6-BASELINE.md` should be treated as a project
+record until they are re-run on a quiet host, and the file says so.
+
+### What a gate that cannot fail looks like when you write one yourself
+
+The reset regression test in Phase 5 could not fail, and was caught by reverting
+the fix. In Phase 6 the same habit paid: the arrival-rendezvous fix was measured
+against a threshold sweep rather than accepted, and the calibration that has
+been quietly wrong since Phase 2 — this 8 P + 6 E CPU classified as 14/0, 13/1
+and 12/2 perf/efficiency across three runs on an idle machine — was found by
+noticing the scheduler bench disagree with itself, and is recorded as unfixed
+rather than left to be discovered later.
+
+---
 ## What these have in common
 
 Five of the kernel defects above — SiLU, NeoX RoPE, rms_norm, Q4_0, and the
