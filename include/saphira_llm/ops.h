@@ -37,6 +37,17 @@ void sllm_rms_norm(float * dst, const float * x, const float * weight,
                    size_t n, float eps);
 
 /*
+ * One row of an F16 table dotted with an F32 activation vector.
+ *
+ * This is the tied output projection: n_vocab rows of n_embd, once per token.
+ * The scalar form is exposed alongside it so a test can hold the vectorised
+ * path to the portable one; see src/ops.c for why this kernel is shaped the
+ * way it is, and what the profile that motivated it actually said.
+ */
+float sllm_dot_f16_f32(const uint16_t * row, const float * x, size_t n);
+float sllm_dot_f16_f32_scalar(const uint16_t * row, const float * x, size_t n);
+
+/*
  * Softmax over one row of `n` elements, overwriting the row with the
  * normalised values. The maximum is subtracted first, so this is safe on
  * f32 values that would otherwise overflow in exp.

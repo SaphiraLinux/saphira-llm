@@ -16,6 +16,7 @@
  */
 
 #include <saphira_llm/ops.h>
+#include <saphira_llm/quant.h>
 #include <saphira_llm/log.h>
 
 #if defined(__x86_64__)
@@ -47,6 +48,101 @@ sllm_status sllm_rope_type_parse(const char * name, sllm_rope_type * out) {
 
 float sllm_fast_exp(float x) {
     return expf(x);
+}
+
+/* ------------------------------------------------------------------ */
+/* F16 weight against an F32 activation: the tied output projection     */
+/* ------------------------------------------------------------------ */
+
+/*
+ * This kernel exists because a profile said it had to, and the profile was
+ * not what the plan expected.
+ *
+ * The Phase 6 brief named the AVX-VNNI ternary GEMM as the primary kernel
+ * work, on the reasonable grounds that it is the model's whole distinctive
+ * arithmetic. Sampling the decode path said otherwise: the ternary dot product
+ * was 12 percent of the time and this loop was 86 percent, one line of
+ * src/forward.c, and the reason was not the multiply-accumulate at all. It was
+ * the half-to-float conversion. `f16_to_f32` was a software function that
+ * unpacks the exponent, the mantissa and the sign by hand and spins in a while
+ * loop for subnormals, and it was being called 328 million times per token,
+ * once per element of 128256 vocabulary rows by 2560 dimensions.
+ *
+ * The fix is not an invention. It is the reference's own kernel: ggml's
+ * GGML_F16_VEC on x86 is eight floats wide, loaded with _mm256_cvtph_ps, and
+ * ggml_vec_dot_f16_unroll runs it over GGML_F16_STEP (32) elements with
+ * GGML_F16_ARR (4) accumulators, reduced by a binary tree. Those constants are
+ * the reference's, and so is the reduction order, which is deliberate: the
+ * Phase 4 contract already records that our lm_head reduction order differs
+ * from upstream's and is governed by the margin gate rather than by bit
+ * equality, so matching upstream's shape is the direction that can only help.
+ *
+ * What is deliberately NOT changed is the arithmetic. The reference narrows the
+ * activation to F16 before this kernel runs (F16's vec_dot_type is F16); we do
+ * not, and Phase 4 accepted that as-is. The product is still F16 weight times
+ * F32 activation accumulated in F32. Only the order of the additions moves.
+ */
+
+#define SLLM_F16_STEP 32
+#define SLLM_F16_ARR  4
+
+/* Exposed so a test can hold the vectorised path to the portable one. */
+float sllm_dot_f16_f32_scalar(const uint16_t * row, const float * x, size_t n) {
+    float acc = 0.0f;
+    for (size_t d = 0; d < n; ++d) {
+        acc += sllm_fp16_to_fp32((sllm_fp16) row[d]) * x[d];
+    }
+    return acc;
+}
+
+float sllm_dot_f16_f32(const uint16_t * row, const float * x, size_t n) {
+    if (row == NULL || x == NULL) {
+        return 0.0f;
+    }
+    size_t d = 0;
+#if defined(SLLM_X86)
+    /*
+     * Four independent accumulators. One would be simpler and would serialise
+     * on a four-cycle FMA latency across all eight lanes, which is most of the
+     * gain thrown away; four match the reference's GGML_F16_ARR.
+     */
+    __m256 acc[SLLM_F16_ARR];
+    for (int k = 0; k < SLLM_F16_ARR; ++k) { acc[k] = _mm256_setzero_ps(); }
+
+    if (n >= SLLM_F16_STEP) {
+        const size_t np = n & ~(size_t) (SLLM_F16_STEP - 1);
+        for (; d < np; d += SLLM_F16_STEP) {
+            for (int j = 0; j < SLLM_F16_ARR; ++j) {
+                const __m128i h = _mm_loadu_si128((const __m128i *) (row + d + (size_t) j * 8));
+                const __m256  w = _mm256_cvtph_ps(h);
+                const __m256  a = _mm256_loadu_ps(x + d + (size_t) j * 8);
+                acc[j] = _mm256_fmadd_ps(w, a, acc[j]);
+            }
+        }
+    }
+
+    /* ggml's reduction: halve the accumulator count, adding pairs, then fold
+     * the 256-bit lanes down. Same tree, same order, so the rounding matches
+     * the reference rather than merely resembling it. */
+    for (int off = SLLM_F16_ARR / 2; off >= 1; off >>= 1) {
+        for (int i = 0; i < off; ++i) {
+            acc[i] = _mm256_add_ps(acc[i], acc[off + i]);
+        }
+    }
+    const __m128 t0 = _mm_add_ps(_mm256_castps256_ps128(acc[0]),
+                                 _mm256_extractf128_ps(acc[0], 1));
+    const __m128 t1 = _mm_hadd_ps(t0, t0);
+    const float head = _mm_cvtss_f32(_mm_hadd_ps(t1, t1));
+
+    /* Tail, in the portable order, added onto the reduced head. */
+    float acc_scalar = head;
+    for (; d < n; ++d) {
+        acc_scalar += sllm_fp16_to_fp32((sllm_fp16) row[d]) * x[d];
+    }
+    return acc_scalar;
+#else
+    return sllm_dot_f16_f32_scalar(row, x, n);
+#endif
 }
 
 /* ------------------------------------------------------------------ */

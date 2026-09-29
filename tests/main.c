@@ -17,6 +17,7 @@ void sllm_test_i2s(void);
 void sllm_test_tokenizer(void);
 void sllm_test_forward(void);
 void sllm_test_phase5(void);
+void sllm_test_dot_f16(void);
 
 int sllm_tests_run    = 0;
 int sllm_tests_failed = 0;
@@ -33,6 +34,7 @@ int main(void) {
     sllm_test_i2s();
     sllm_test_tokenizer();
     sllm_test_forward();
+    sllm_test_dot_f16();
     sllm_test_phase5();
 
     printf("\n%d checks, %d failed\n", sllm_tests_run, sllm_tests_failed);

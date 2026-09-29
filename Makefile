@@ -33,13 +33,15 @@ CORE_SRC = src/status.c src/log.c src/isa.c src/gguf.c src/kernel_probe.c \
            src/topology.c src/thread.c src/quant.c src/ops.c src/unicode_data.c src/i2s_gemm.c src/tokenizer.c src/forward.c
 MAIN_SRC = src/main.c
 TEST_SRC = tests/main.c tests/test_isa.c tests/test_gguf.c tests/test_thread.c \
-            tests/test_ops.c tests/test_i2s.c tests/test_tokenizer.c tests/test_forward.c tests/test_phase5.c
+            tests/test_ops.c tests/test_i2s.c tests/test_tokenizer.c tests/test_forward.c \
+            tests/test_phase5.c tests/test_dot_f16.c
 
 CORE_OBJ = $(CORE_SRC:%.c=$(OBJDIR)/%.o)
 MAIN_OBJ = $(MAIN_SRC:%.c=$(OBJDIR)/%.o)
 TEST_OBJ = $(TEST_SRC:%.c=$(OBJDIR)/%.o)
 
 ALL_OBJ  = $(CORE_OBJ) $(MAIN_OBJ) $(TEST_OBJ)
+LIBOBJ   = $(CORE_OBJ)
 
 BENCH_SRC = bench/sched_bench.c
 BENCH_OBJ = $(BENCH_SRC:%.c=$(OBJDIR)/%.o)
@@ -114,3 +116,15 @@ help:
 	@echo 'targets: all test check check-isa san asan ubsan install clean'
 	@echo 'vars   : CC CFLAGS BASELINE PREFIX BINDIR DEBUG=1 SAN_CC=clang'
 	@echo '  BASELINE defaults to $(BASELINE)'
+
+# Phase 6 decode-throughput harness. Loads the model once and sweeps thread
+# counts, so the numbers are not mixed up with page faults and cold cache.
+TGBENCH_SRC = bench/tg_bench.c bench/prof.c
+TGBENCH_OBJ = $(TGBENCH_SRC:%.c=$(OBJDIR)/%.o)
+TGBENCH_BIN = saphira-llm-tgbench
+
+.PHONY: tgbench
+tgbench: $(TGBENCH_BIN)
+
+$(TGBENCH_BIN): $(TGBENCH_OBJ) $(LIBOBJ)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lm -lpthread

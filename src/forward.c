@@ -638,10 +638,7 @@ sllm_status sllm_forward_chunk(const sllm_model * m, sllm_ctx * c,
         const float * xn = c->cxn + (size_t) t * n_embd;
         float * out = logits_out + (size_t) t * m->n_vocab;
         for (int32_t v = 0; v < m->n_vocab; ++v) {
-            const uint16_t * row = m->tok_embd + (size_t) v * n_embd;
-            float acc = 0.0f;
-            for (int32_t d = 0; d < n_embd; ++d) { acc += f16_to_f32(row[d]) * xn[d]; }
-            out[v] = acc;
+            out[v] = sllm_dot_f16_f32(m->tok_embd + (size_t) v * n_embd, xn, n_embd);
         }
     }
 
