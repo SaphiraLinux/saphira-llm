@@ -33,7 +33,7 @@ CORE_SRC = src/status.c src/log.c src/isa.c src/gguf.c src/kernel_probe.c \
            src/topology.c src/thread.c src/quant.c src/ops.c src/unicode_data.c src/i2s_gemm.c src/tokenizer.c src/forward.c
 MAIN_SRC = src/main.c
 TEST_SRC = tests/main.c tests/test_isa.c tests/test_gguf.c tests/test_thread.c \
-            tests/test_ops.c tests/test_i2s.c tests/test_tokenizer.c tests/test_forward.c
+            tests/test_ops.c tests/test_i2s.c tests/test_tokenizer.c tests/test_forward.c tests/test_phase5.c
 
 CORE_OBJ = $(CORE_SRC:%.c=$(OBJDIR)/%.o)
 MAIN_OBJ = $(MAIN_SRC:%.c=$(OBJDIR)/%.o)

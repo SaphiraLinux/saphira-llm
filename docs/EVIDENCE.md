@@ -587,12 +587,141 @@ pushes the deviation past a margin fails naming the position that did it.
 
 ---
 
+## Phase 5
+
+Chunked prefill and KV state. 24,083 assertions, 0 failed, sanitizers clean.
+
+### The leak that only LeakSanitizer could see
+
+Rewriting the forward pass around a `[n * chunk]` column stride meant the
+context grew ten chunk scratch buffers and dropped the nine single-token ones.
+`sllm_ctx_free` was updated to the new fields. `sllm_ctx_new` was not: it kept
+allocating `attn`, `proj`, `ffn_gate_buf`, `ffn_up_buf` and `ffn_h` at their old
+sizes. Nothing freed them, so every context leaked 103,424 bytes in five
+allocations.
+
+This is the mirror image of the dead-code defect in the same file. Both are the
+cost of changing a struct by hand, and they fail in opposite directions -- one
+frees a pointer nobody allocates, the other allocates a pointer nobody frees.
+Only one of them is a crash.
+
+The second part is the reason it survived a release run. The context is 157 MB
+and the leak was 103 KB, so a nine-context loop still passed while RSS climbed.
+Chasing it properly meant shrinking to a 20-line standalone program that does
+create-one-free-one; the 103 KB was not findable in a 2 GB test run, because
+the thing that leaks is not the thing that is large.
+
+### The double free that had two different faces
+
+`sllm_state_load()` read the last position's logits *after* its final
+`fclose`. The header is small and read early, the cache data is most of the
+file, so the logits read looked like a harmless tail -- except it was a read
+from a freed `FILE *`.
+
+That single misplaced line produced:
+
+- under the test suite, `gguf-truncated (-12)`, twice, which reads like the
+  state writer was at fault
+- under a standalone probe, `attempting double-free` in `fclose`
+- in the release build, a plain segfault with no diagnostic at all
+
+Three symptoms, one line, and the two builds disagreed about what had happened.
+Reading from a closed handle is undefined behaviour, so the file it "read" was
+whatever happened to still be mapped -- sometimes short, sometimes complete
+enough to reach the second `fclose` and corrupt the heap.
+
+The lesson worth keeping is narrower than "check your fclose": the symptom that
+looks most like a *data* problem is the one that is most likely to be a *lifetime*
+problem. `gguf-truncated` named the GGUF reader. The state file was never
+truncated -- the reader was reading freed memory.
+
+### The test that was a different gate in each build
+
+```c
+int32_t direct[16];
+int32_t resumed[16];
+/* n_new == 6, so only 6 elements are ever written */
+if (memcmp(direct, resumed, sizeof(direct)) != 0) {   /* 64 bytes */
+```
+
+`sizeof(direct)` is the whole array, not the part that was filled. The compare
+covered 10 elements of uninitialised stack in both operands, so it reported
+whether the compiler happened to reuse the same stack in both cases.
+
+At `-O0` (the sanitizer build) it passed. At `-O2` (release) it failed, on a
+continuation that printed as identical:
+
+```
+direct : 264 6864 3363 315 9822 374
+resumed: 264 6864 3363 315 9822 374
+```
+
+The state restore was correct the entire time. The fixed form compares
+`n_new * sizeof(int32_t)`, and the new state test passes at both levels.
+
+The generalisation is uncomfortable and worth stating: a gate that reads
+uninitialised memory is not a weaker gate, it is a *different gate per
+compiler*, and the build you trust most is the one most likely to be lying. Both
+builds were reporting a real memcmp result. Neither was reporting a real model
+result. Equal printed values beside a `FAIL` is the tell -- and the response to
+it is to distrust the test's arithmetic, not to go looking in the kernel for a
+difference that is not there.
+
+### A fix I could not prove, and did not claim
+
+`sllm_ctx_reset()` cleared `n_past * kv_head_stride` bytes, but
+`kv_head_stride` is *per layer*, so it zeroed layer 0 and left layers 1-29
+holding the previous conversation. The fix multiplies by `n_layer`.
+
+I wrote a regression test for it -- dirty the cache with a real prompt, reset,
+require the next prefill to match a fresh context -- and then reverted the fix
+to check the test actually failed. **It passed with the bug in place.**
+
+That is the honest result, and it is worth more than the fix. `sllm_ctx_reset`
+sets `n_past = 0`, and every prefill overwrites the whole live prefix, so stale
+data is never in range. The memset is defence in depth against a future path
+that reads the cache before writing it, and it is correct now only so that it
+will still be correct on the day it matters.
+
+So the test stays, renamed to what it actually locks -- the reuse contract,
+which is worth protecting and was worth proving -- and both the test comment
+and the `sllm_ctx_reset` comment say plainly that it does not cover the memset's
+layer count. A test named for a bug it cannot fail is the same defect as the
+uninitialised `memcmp`, one level up: it reports a guarantee nobody is getting.
+
+### Gates
+
+- 9 chunk sizes (1, 2, 3, 4, 5, 7, 16, 64, 256) and an uneven `2|8` split, all
+  bit-identical to one token per forward
+- a later chunk demonstrably attends to a key written by an earlier one
+- save, load, and continue 6 tokens: identical to an uninterrupted run
+- a reset context is bit-identical to a fresh one
+- a state file with valid magic and a 2^20-layer geometry is rejected before
+  it can size a 2 GiB read
+- the Phase 4 prompt argmax and margin gates unchanged and still enforced
+- `make check` green, ISA guard green, ASan/UBSan/LSan green
+
+### Still not claimed
+
+`tg128 @ 28 threads` remains unclaimed and Phase 5 did not change that. The
+Phase 4 float floor is untouched and stays closed; nothing here is evidence for
+reopening it. See `PHASE5-ACCEPTANCE.md`.
+
+---
 ## What these have in common
 
-Four of the kernel defects above — SiLU, NeoX RoPE, rms_norm, Q4_0, and the
+Five of the kernel defects above — SiLU, NeoX RoPE, rms_norm, Q4_0, and the
 I2_S layout — were invisible on the acceptance model and visible only against
 the reference, a synthesised adversarial case, or a varying shape. Two
 produced confident, well-formatted messages that pointed at the wrong code.
+
+Phase 5 adds a second family. Its three defects were not wrong arithmetic; they
+were wrong *about what was true*: a freed pointer, an allocation nobody owned, a
+comparison over memory that was never written. The messages pointed at the GGUF
+reader, at a 2 GB test run, and at a kernel that was correct throughout. In
+every case the expensive move was to distrust the message -- to shrink the
+reproduction, to run the same test at two optimisation levels, to revert the fix
+and check that the test could still fail.
 
 The tokenizer added a sharper version of the same lesson. Of the six Phase 3.5
 defects, every one of them passed on ASCII text. Punctuation runs, digit
@@ -608,6 +737,15 @@ only from the acceptance model's own parameters would have passed every one of
 these.
 
 That is the argument for the parity rule in `ARCHITECTURE.md`, and it is worth
-restating when a new gate is added: *what would this fail on?* A gate that
-cannot fail is not a gate, and the one in this file that could not fail is the
-one that took longest to notice.
+restating when a new gate is added: *what would this fail on?*
+
+The sharpest instance in this file is one written after the others. The
+`sllm_ctx_reset` regression test was added to catch a real defect, the fix was
+applied, and the test passed — so the obvious next step was to revert the fix
+and see whether the test could still fail. It could not. A test that cannot fail
+is not a gate, and the ones that took longest to notice are not the ones that
+never worked. They are the ones that look like gates: a name, a `CHECK`, a
+green line, and a claim about a guarantee that was never actually tested. The
+only reliable question is the one asked before the test is trusted, and it has
+to be asked out loud, because "the test passes" and "the test can fail" are
+different sentences and the first one is much easier to read.
