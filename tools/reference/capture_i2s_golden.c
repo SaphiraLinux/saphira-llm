@@ -147,13 +147,18 @@ static void emit_gemv(FILE * f, const sllm_gguf_tensor * t) {
      * gates the kernel, and a second hash gates the epilogue, computed here
      * from the reference's OWN raw output and the documented formula:
      *
-     *     dst = (dot - act_sum) / act_scale * w_scale
+     *     post_scale = w_scale / act_scale
+     *     dst       = (dot - act_sum) * post_scale
      */
     {
         float * epi = calloc(R, sizeof(float));
         if (!epi) { exit(1); }
         for (size_t r = 0; r < R; ++r) {
-            epi[r] = ((gemv[r] - (float) act.sum) / act.scale) * (float) w_scale;
+            /* The reference's forward path (ggml-cpu.c) does the division ONCE
+             * per column, then (dot - sum) * post_scale. Matching that grouping
+             * matters: the per-element form rounds differently. */
+            const float post_scale = (float) w_scale / act.scale;
+            epi[r] = (gemv[r] - (float) act.sum) * post_scale;
         }
         fprintf(f, "  epilogue_fnv1a64 %016llx\n",
                 (unsigned long long) fnv1a64(epi, R * sizeof(float)));

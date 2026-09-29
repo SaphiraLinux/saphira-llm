@@ -246,7 +246,24 @@ void sllm_i2s_gemv(const uint8_t * w, size_t n_rows, size_t n,
 }
 
 float sllm_i2s_epilogue(int32_t dot, int32_t act_sum, float act_scale, float w_scale) {
-    return ((float) (dot - act_sum)) / act_scale * w_scale;
+    /*
+     * The op ORDER matters and is taken from the path the forward pass
+     * actually runs, ggml-cpu.c's generic mul_mat, not from the standalone
+     * ggml-bitnet-compute.c. The forward does:
+     *
+     *     const float post_scale = ws / act_scales[col];
+     *     dst_row[row] = (tmp[row] - asum) * post_scale;
+     *
+     * i.e. the division is done ONCE per activation column and the per-element
+     * work is a subtraction and a multiply. The other form,
+     * (dot - act_sum) / act_scale * w_scale, divides and multiplies per
+     * element and groups differently, so it rounds differently. The two are
+     * mathematically equal and can differ by an ulp, and an ulp here reaches
+     * the next layer's int8 activation quantiser, where it can flip a rounding
+     * boundary. The reference is the specification, so its grouping wins.
+     */
+    const float post_scale = w_scale / act_scale;
+    return ((float) (dot - act_sum)) * post_scale;
 }
 
 sllm_isa_level sllm_i2s_installed_isa(void) {

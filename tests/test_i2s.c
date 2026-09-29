@@ -439,7 +439,10 @@ TEST(i2s_epilogue_is_reproduced_verbatim) {
 
     for (size_t i = 0; i < sizeof(dots) / sizeof(dots[0]); ++i) {
         const float got = sllm_i2s_epilogue(dots[i], sums[i], scales[i], w[i]);
-        const float want = ((float) (dots[i] - sums[i])) / scales[i] * w[i];
+        /* The reference's forward divides once per column and then multiplies,
+         * so that is the grouping asserted here. See sllm_i2s_epilogue. */
+        const float post_scale = w[i] / scales[i];
+        const float want = ((float) (dots[i] - sums[i])) * post_scale;
         CHECK_SAME_BITS(got, want);
     }
 

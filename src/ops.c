@@ -121,8 +121,21 @@ void sllm_rms_norm(float * dst, const float * x, const float * weight,
         ss += (double) x[i] * (double) x[i];
     }
 
-    const double mean = ss / (double) n;
-    const float scale = (float) (1.0 / sqrt(mean + (double) eps));
+    /*
+     * The narrowing order is taken from ggml_compute_forward_rms_norm_f32 and
+     * is not negotiable:
+     *
+     *     const float mean  = sum/ne00;                    // narrows to f32
+     *     const float scale = 1.0f/sqrtf(mean + eps);      // f32 sqrtf
+     *
+     * Computing sqrt in double and narrowing afterwards is arguably more
+     * accurate and is off by about an ulp. That ulp is the difference between
+     * a value landing either side of a rounding boundary when the next layer
+     * quantises the activation to int8, so "more accurate" would be a parity
+     * bug. The reference is the specification.
+     */
+    const float mean  = (float) (ss / (double) n);
+    const float scale = 1.0f / sqrtf(mean + eps);
 
     i = 0;
 #if defined(SLLM_X86)
