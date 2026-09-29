@@ -43,10 +43,12 @@
  */
 
 #include "saphira_llm/tokenizer.h"
+#include "saphira_llm/log.h"
 #include "saphira_llm/status.h"
 #include "saphira_llm/unicode.h"
 
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -260,11 +262,70 @@ struct sllm_tok {
     bool      add_bos;
     bool      add_eos;
 
+    sllm_pre_type pre_type;
+    char       pre_declared[64];   /* "" when the key is absent */
+
     char    * special_text; /* NUL-separated special piece strings */
 };
 
 static int32_t tok_piece_id(const sllm_tok * t, const char * s, size_t n) {
     return map_str_get_n(&t->piece_to_id, s, n);
+}
+
+/*
+ * Resolve `tokenizer.ggml.pre` to a pre-tokeniser.
+ *
+ * The reference maps a long list of `pre` strings onto a smaller set of
+ * pre-types, and treats an unrecognised value as a hard error rather than a
+ * fallback. We reproduce that shape: a table of the names we accept, DEFAULT
+ * when the key is absent, and a specific rejection naming the value otherwise.
+ *
+ * Only the two pre-types whose behaviour is fully understood are accepted.
+ * Adding a name here without implementing its split passes would be the worst
+ * possible outcome -- the model would load, tokenise, and be wrong in a way no
+ * fixture covers. Unsupported is the honest answer and it is also the
+ * reference's.
+ */
+static sllm_status resolve_pre_type(const sllm_gguf * g, sllm_pre_type * out,
+                                    char * declared, size_t declared_cap) {
+    const char * pre = NULL;
+    const sllm_status rc = sllm_gguf_kv_str(g, "tokenizer.ggml.pre", &pre);
+
+    if (rc == SLLM_ERR_KV_MISSING) {
+        /* Absent is DEFAULT, and DEFAULT is not GPT-2. */
+        *out = SLLM_PRE_UNSET;
+        if (declared_cap > 0) { declared[0] = '\0'; }
+        return SLLM_OK;
+    }
+    if (rc != SLLM_OK) {
+        return rc;
+    }
+
+    snprintf(declared, declared_cap, "%s", pre);
+
+    /* The reference groups many names onto GPT2. Only the names that describe
+     * GPT-2's own tokeniser are listed; the vendor-specific aliases in the
+     * reference are not, because a model carrying one of those has not been
+     * shown to behave like GPT-2 here and we would be guessing. */
+    static const char * const gpt2_names[] = {
+        "gpt-2", "gpt2", "phi-2", "jina-es", "jina-de", "gigachat",
+        "jina-v2-es", "jina-v2-de", "a.x-4.0", "mellum", "modern-bert",
+        "jina-v1-en", "jina-v2-code", "roberta-bpe", "exaone4",
+        NULL
+    };
+    for (size_t i = 0; gpt2_names[i] != NULL; ++i) {
+        if (strcmp(pre, gpt2_names[i]) == 0) {
+            *out = SLLM_PRE_GPT2;
+            return SLLM_OK;
+        }
+    }
+    if (strcmp(pre, "default") == 0) {
+        *out = SLLM_PRE_UNSET;
+        return SLLM_OK;
+    }
+
+    *out = SLLM_PRE_UNSUPPORTED;
+    return SLLM_ERR_UNSUPPORTED;
 }
 
 sllm_status sllm_tok_load(const sllm_gguf * g, sllm_tok ** out) {
@@ -279,6 +340,23 @@ sllm_status sllm_tok_load(const sllm_gguf * g, sllm_tok ** out) {
     }
     if (strcmp(model, "gpt2") != 0) {
         return SLLM_ERR_UNSUPPORTED;   /* only the BPE family, for now */
+    }
+
+    sllm_pre_type pre_type = SLLM_PRE_UNSUPPORTED;
+    char pre_declared[64] = "";
+    {
+        const sllm_status prc = resolve_pre_type(g, &pre_type, pre_declared, sizeof(pre_declared));
+        if (prc != SLLM_OK) {
+            /*
+             * Name the value in the log rather than only in a status code: a
+             * rejection the operator cannot act on is barely better than a
+             * wrong answer, and the fix is to implement that pre-tokeniser or
+             * convert the model.
+             */
+            sllm_log(SLLM_LOG_WARN, "tokenizer.ggml.pre = \"%s\" names a pre-tokeniser this build does "
+                          "not implement; refusing to tokenise rather than guess", pre_declared);
+            return prc;
+        }
     }
 
     char * const * tokens = NULL;
@@ -303,6 +381,8 @@ sllm_status sllm_tok_load(const sllm_gguf * g, sllm_tok ** out) {
     t->bos = -1;
     t->eos = -1;
     t->n_vocab = (uint32_t) n_tokens;
+    t->pre_type = pre_type;
+    snprintf(t->pre_declared, sizeof(t->pre_declared), "%s", pre_declared);
 
     size_t piece_bytes = 0;
     size_t spec_need   = 1;
@@ -426,6 +506,27 @@ int32_t  sllm_tok_bos(const sllm_tok * t)     { return t != NULL ? t->bos : -1; 
 int32_t  sllm_tok_eos(const sllm_tok * t)     { return t != NULL ? t->eos : -1; }
 bool     sllm_tok_add_bos(const sllm_tok * t) { return t != NULL && t->add_bos; }
 bool     sllm_tok_add_eos(const sllm_tok * t) { return t != NULL && t->add_eos; }
+
+sllm_pre_type sllm_tok_pre_type(const sllm_tok * t) {
+    return t != NULL ? t->pre_type : SLLM_PRE_UNSUPPORTED;
+}
+
+const char * sllm_tok_pre_declared(const sllm_tok * t) {
+    return t != NULL ? t->pre_declared : "";
+}
+
+bool sllm_tok_pre_is_verified(const sllm_tok * t) {
+    /*
+     * DEFAULT is verified by tests/golden/tokenizer.txt, captured from this
+     * model. GPT2 is implemented because it is the same single pass the
+     * DEFAULT pipeline applies as its second stage, and it is verified by a
+     * synthetic-vocabulary fixture, but no real model carrying `pre` = "gpt-2"
+     * was available. Both facts are reported rather than collapsed into a
+     * single "supported" answer.
+     */
+    if (t == NULL) { return false; }
+    return t->pre_type == SLLM_PRE_UNSET || t->pre_type == SLLM_PRE_GPT2;
+}
 
 bool sllm_tok_is_special(const sllm_tok * t, int32_t id) {
     if (t == NULL || id < 0 || (uint32_t) id >= t->n_vocab) { return false; }
@@ -803,11 +904,27 @@ static void split_gpt2(const uint32_t * cp, const u32vec * segs, u32vec * out) {
     }
 }
 
-/* Run all four passes, in order, over the code points. */
-static sllm_status pretokenize_cpts(const uint32_t * cp, size_t n, u32vec * out) {
+/*
+ * Run the split passes for the model's pre-type, in the reference's order.
+ *
+ * GPT2 is exactly pass 2 and nothing else. DEFAULT is passes 1, 2, 3 and 4.
+ * Both funnel through the same hand-written GPT-2 splitter, which is why the
+ * second stage is factored out: the difference between the two pre-types is
+ * precisely the passes wrapped around it, and expressing it that way keeps the
+ * shared stage in one place.
+ */
+static sllm_status pretokenize_cpts(sllm_pre_type pre, const uint32_t * cp,
+                                    size_t n, u32vec * out) {
     u32vec a, b, c, d;
     uv_init(&a); uv_init(&b); uv_init(&c); uv_init(&d);
     uv_push(&a, (uint32_t) n);
+
+    if (pre == SLLM_PRE_GPT2) {
+        split_gpt2(cp, &a, out);
+        const bool bad = a.oom || out->oom;
+        uv_free(&a);
+        return bad ? SLLM_ERR_NOMEM : SLLM_OK;
+    }
 
     split_runs(cp, &a, &b, pass1_punct);   /* [\p{P}\$\+<=>\^~\|]+  */
     split_gpt2(cp, &b, &c);                /* the GPT-2 pattern      */
@@ -1038,7 +1155,8 @@ static sllm_status encode_words(const uint32_t * cp, const u32vec * segs,
 }
 
 /* Encode a run of ordinary text, no special-token handling. */
-static sllm_status encode_plain(const sllm_tok * t, const char * text, size_t len,
+static sllm_status encode_plain(const sllm_tok * t, sllm_pre_type pre,
+                                const char * text, size_t len,
                                 int32_t * out, int32_t cap, int32_t * n_out) {
     uint32_t * cp = NULL;
     size_t n = 0;
@@ -1047,7 +1165,7 @@ static sllm_status encode_plain(const sllm_tok * t, const char * text, size_t le
 
     u32vec segs;
     uv_init(&segs);
-    rc = pretokenize_cpts(cp, n, &segs);
+    rc = pretokenize_cpts(pre, cp, n, &segs);
     if (rc != SLLM_OK) { free(cp); uv_free(&segs); return rc; }
 
     size_t * woff = NULL;
@@ -1077,7 +1195,17 @@ static sllm_status emit(int32_t id, int32_t * out, int32_t cap, int32_t * n) {
 int32_t sllm_tok_encode(const sllm_tok * t, const char * text, size_t text_len,
                         bool add_special, bool parse_special,
                         int32_t * out, int32_t cap) {
+    if (t == NULL) { return SLLM_ERR_ARG; }
+    return sllm_tok_encode_pre(t, t->pre_type, text, text_len,
+                               add_special, parse_special, out, cap);
+}
+
+int32_t sllm_tok_encode_pre(const sllm_tok * t, sllm_pre_type pre,
+                            const char * text, size_t text_len,
+                            bool add_special, bool parse_special,
+                            int32_t * out, int32_t cap) {
     if (t == NULL || (text == NULL && text_len > 0)) { return SLLM_ERR_ARG; }
+    if (pre != SLLM_PRE_UNSET && pre != SLLM_PRE_GPT2) { return SLLM_ERR_UNSUPPORTED; }
     if (cap <= 0) { return 0; }
 
     int32_t n = 0;
@@ -1104,20 +1232,20 @@ int32_t sllm_tok_encode(const sllm_tok * t, const char * text, size_t text_len,
                 p += l + 1;
             }
             if (best == NULL) {
-                if (encode_plain(t, text + pos, text_len - pos, out, cap, &n) != SLLM_OK) {
+                if (encode_plain(t, pre, text + pos, text_len - pos, out, cap, &n) != SLLM_OK) {
                     return SLLM_ERR_TOO_LARGE;
                 }
                 break;
             }
             if (pos > 0 || best_len > 0) {
-                if (encode_plain(t, text + pos, 0, out, cap, &n) != SLLM_OK) { break; }
+                if (encode_plain(t, pre, text + pos, 0, out, cap, &n) != SLLM_OK) { break; }
             }
             const int32_t id = tok_piece_id(t, best, best_len);
             if (id >= 0) { (void) emit(id, out, cap, &n); }
             pos += best_len;
         }
     } else {
-        if (encode_plain(t, text, text_len, out, cap, &n) != SLLM_OK) {
+        if (encode_plain(t, pre, text, text_len, out, cap, &n) != SLLM_OK) {
             return SLLM_ERR_TOO_LARGE;
         }
     }
@@ -1190,9 +1318,10 @@ int32_t sllm_tok_decode(const sllm_tok * t, const int32_t * tokens, int32_t n,
  * separated by a single NUL, so the result is a run of C strings and the caller
  * needs no allocation.
  */
-sllm_status sllm_tok_pretokenize(const sllm_tok * t, const char * text, size_t text_len,
+sllm_status sllm_tok_pretokenize(sllm_pre_type pre, const char * text, size_t text_len,
                                  char * out, size_t cap, int32_t * n_out) {
-    if (t == NULL || out == NULL || n_out == NULL) { return SLLM_ERR_ARG; }
+    if (out == NULL || n_out == NULL) { return SLLM_ERR_ARG; }
+    if (pre != SLLM_PRE_UNSET && pre != SLLM_PRE_GPT2) { return SLLM_ERR_UNSUPPORTED; }
     *n_out = 0;
 
     uint32_t * cp = NULL;
@@ -1202,7 +1331,7 @@ sllm_status sllm_tok_pretokenize(const sllm_tok * t, const char * text, size_t t
 
     u32vec segs;
     uv_init(&segs);
-    rc = pretokenize_cpts(cp, n, &segs);
+    rc = pretokenize_cpts(pre, cp, n, &segs);
     if (rc != SLLM_OK) { free(cp); uv_free(&segs); return rc; }
 
     size_t * woff = NULL;

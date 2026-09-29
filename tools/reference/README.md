@@ -34,6 +34,31 @@ acceptance model has no `tokenizer.ggml.pre` key, so the reference uses its
 implementation. Punctuation, digits of every length, contractions, whitespace
 runs and multi-byte UTF-8 are the cases that actually discriminate.
 
+## `make-pre-variant`
+
+Rewrites a GGUF's metadata, adding or replacing `tokenizer.ggml.pre`, and
+copies the tensor blob through unchanged. Everything else -- vocabulary,
+merges, token types, every weight -- is the source model's, byte for byte.
+
+It settles one question with evidence: **is the pre-tokeniser a property of the
+model file or a constant in the tokenizer?** The only model available declares
+no `pre` at all, so without this the DEFAULT behaviour would be
+indistinguishable from something compiled in, and Phase 7's models would
+silently tokenise wrong.
+
+Running the reference over the same prompts against the original and the
+variant gives different tokens -- `they're` is `they` `'re` under `gpt-2` and
+`they` `'` `re` under DEFAULT -- which is the whole point. Both variants' ids
+are recorded as fixtures.
+
+```sh
+make-pre-variant <in.gguf> gpt-2 /tmp/variant-gpt2.gguf
+make-pre-variant <in.gguf> -        /tmp/variant-default.gguf   # key removed
+```
+
+A `pre` of `-` removes the key, which reproduces the DEFAULT fallback and is
+how you check the tool is reversible.
+
 ### Building
 
 ```sh
@@ -59,6 +84,8 @@ cc -O2 -o sllm-tokenize-ref sllm-tokenize-ref.c \
   -Lbuild-base/bin -lllama -lggml -lggml-base -lm -lpthread -ldl
 
 ./sllm-tokenize-ref <model.gguf> tests/golden/tokenizer.txt
+
+cc -O2 -o make-pre-variant make-pre-variant.c -I../../include ../../src/gguf.c
 
 LD_LIBRARY_PATH=build-base/bin ./sllm-logits-ref \
   -m /var/lib/spoon/models/ggml-model-i2_s.gguf \

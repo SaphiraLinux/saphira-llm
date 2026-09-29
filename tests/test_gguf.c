@@ -409,6 +409,139 @@ TEST(gguf_known_versus_supported_are_different_questions) {
     CHECK_STR(sllm_gguf_type_name((sllm_ggml_type) 200), "UNKNOWN(200)");
 }
 
+/*
+ * Regression: reading any array at all.
+ *
+ * kv_as_i64 switched on kv->type, which is SLLM_VT_ARRAY for every array, so it
+ * fell through to its default case and returned false. Element zero of every
+ * array was unreadable. No test covered it because the only arrays in the
+ * acceptance model belong to the tokenizer, and the tokenizer did not exist
+ * when this was written -- the symptom was a missing metadata key, which
+ * points at the wrong file entirely.
+ *
+ * These are written as a synthetic file so they run without the model.
+ */
+static void bkv_arr_i32(builder * bd, const char * key, const int32_t * v, uint32_t n) {
+    bstr(&bd->b, key);
+    bu32(&bd->b, SLLM_VT_ARRAY);
+    bu32(&bd->b, SLLM_VT_INT32);
+    bu64(&bd->b, n);
+    for (uint32_t i = 0; i < n; ++i) { bu32(&bd->b, (uint32_t) v[i]); }
+    bd->n_kv++;
+}
+
+static void bkv_arr_str(builder * bd, const char * key, const char * const * v, uint32_t n) {
+    bstr(&bd->b, key);
+    bu32(&bd->b, SLLM_VT_ARRAY);
+    bu32(&bd->b, SLLM_VT_STRING);
+    bu64(&bd->b, n);
+    for (uint32_t i = 0; i < n; ++i) { bstr(&bd->b, v[i]); }
+    bd->n_kv++;
+}
+
+/* Pad to the default 32-byte alignment, append a small blob, and patch the
+ * counts into the header. Mirrors build_valid, because a file with no padded
+ * data region is rejected for a reason unrelated to what these tests are about. */
+static void bfinish(builder * bd, buf * out) {
+    while (bd->b.len % 32 != 0) { bu8(&bd->b, 0); }
+    bu64(&bd->b, 32);   /* data_size, no tensors to describe it */
+
+    uint64_t nt = (uint64_t) bd->n_tensors;
+    uint64_t nk = (uint64_t) bd->n_kv;
+    memcpy(bd->b.buf +  8, &nt, 8);
+    memcpy(bd->b.buf + 16, &nk, 8);
+
+    *out = bd->b;
+}
+
+TEST(gguf_reads_every_element_of_an_array) {
+    builder bd;
+    memset(&bd, 0, sizeof(bd));
+    bput(&bd.b, "GGUF", 4);
+    bu32(&bd.b, SLLM_GGUF_VERSION);
+    bu64(&bd.b, 0);   /* tensor_count */
+    bu64(&bd.b, 0);   /* kv_count      */
+
+    static const int32_t types[] = { 1, 3, 3, 256, -1, 0, 7, 4, 0, 0, 1, 1 };
+    bkv_arr_i32(&bd, "test.types", types, (uint32_t) (sizeof(types) / sizeof(types[0])));
+    static const char * const strs[] = { "alpha", "beta gamma", "", "\xc3\xa9" };
+    bkv_arr_str(&bd, "test.tokens", strs, (uint32_t) (sizeof(strs) / sizeof(strs[0])));
+
+    buf b;
+    bfinish(&bd, &b);
+
+    sllm_gguf g;
+    char err[256] = {0};
+    CHECK_STATUS(sllm_gguf_open_memory(b.buf, b.len, &g, err, sizeof(err)), SLLM_OK);
+
+    const int32_t * t = NULL;
+    uint64_t n = 0;
+    CHECK_STATUS(sllm_gguf_kv_i32_array(&g, "test.types", &t, &n), SLLM_OK);
+    CHECK(n == (uint64_t) (sizeof(types) / sizeof(types[0])));
+    for (size_t i = 0; i < (size_t) n; ++i) {
+        CHECK(t[i] == types[i]);
+    }
+
+    char * const * s = NULL;
+    uint64_t m = 0;
+    CHECK_STATUS(sllm_gguf_kv_str_array(&g, "test.tokens", &s, &m), SLLM_OK);
+    CHECK(m == (uint64_t) (sizeof(strs) / sizeof(strs[0])));
+    for (size_t i = 0; i < (size_t) m; ++i) {
+        CHECK(strcmp(s[i], strs[i]) == 0);
+    }
+
+    /* A scalar read of a key that happens to be an array must be refused as a
+     * type error, not silently answered with element zero. */
+    uint32_t u = 0;
+    CHECK_STATUS(sllm_gguf_kv_u32(&g, "test.types", &u), SLLM_ERR_KV_TYPE);
+    CHECK_STATUS(sllm_gguf_kv_i32_array(&g, "test.tokens", &t, &n), SLLM_ERR_KV_TYPE);
+    CHECK_STATUS(sllm_gguf_kv_str_array(&g, "test.types", &s, &m), SLLM_ERR_KV_TYPE);
+
+    sllm_gguf_close(&g);
+    bfree(&b);
+}
+
+/*
+ * Regression: a string array's pointer table is bounded by the file, not by
+ * the declared count.
+ *
+ * Each element occupies at least 8 bytes, the size of its length prefix, so a
+ * header claiming 2^28 strings cannot require 2 GiB of pointers out of a file
+ * with no room for them. A header does not get to allocate what it says.
+ */
+TEST(gguf_rejects_a_string_array_the_file_cannot_hold) {
+    builder bd;
+    memset(&bd, 0, sizeof(bd));
+    bput(&bd.b, "GGUF", 4);
+    bu32(&bd.b, SLLM_GGUF_VERSION);
+    bu64(&bd.b, 0);
+    bu64(&bd.b, 0);
+
+    /*
+     * One string, then declare 2^28 of them. Written by hand rather than
+     * through bkv_arr_str because that helper would declare an honest count
+     * and we need a dishonest one. The count must still be counted, or the
+     * parser skips the key entirely and the file trivially opens -- which is
+     * what happened the first time this test was written.
+     */
+    bstr(&bd.b, "test.tokens");
+    bu32(&bd.b, SLLM_VT_ARRAY);
+    bu32(&bd.b, SLLM_VT_STRING);
+    bu64(&bd.b, 1u << 28);
+    bstr(&bd.b, "x");
+    bd.n_kv = 1;
+
+    buf b;
+    bfinish(&bd, &b);
+
+    sllm_gguf g;
+    char err[256] = {0};
+    const sllm_status rc = sllm_gguf_open_memory(b.buf, b.len, &g, err, sizeof(err));
+    CHECK_STATUS(rc, SLLM_ERR_TOO_LARGE);
+    CHECK(err[0] != '\0');
+    bfree(&b);
+}
+
 void sllm_test_gguf(void) {
     printf("gguf\n");
     RUN(gguf_accepts_a_valid_container);
@@ -424,4 +557,6 @@ void sllm_test_gguf(void) {
     RUN(gguf_i2_s_size_is_four_per_byte_plus_a_tail);
     RUN(gguf_fixed_block_sizes);
     RUN(gguf_known_versus_supported_are_different_questions);
+    RUN(gguf_reads_every_element_of_an_array);
+    RUN(gguf_rejects_a_string_array_the_file_cannot_hold);
 }

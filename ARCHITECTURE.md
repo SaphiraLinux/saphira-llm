@@ -221,12 +221,31 @@ rule is anchored at the current position; `%!` is a single token because of a
 pass that exists in no GPT-2 specification; `1234567890` becomes `123` `456`
 `789` `0` because of the digit-triple pass.
 
-Two consequences of reading the reference rather than the specification are
-worth keeping in mind when the ordinary GGUF models arrive in Phase 7. The
-pre-type is per-model, so it is configuration to be discovered, not a constant
-to be assumed. And whitespace is a list, not a Unicode category: the reference
-sets the whitespace bit from a separate table, and without it every double space
-tokenises wrongly while every single space stays correct.
+That is measured, not asserted. `tools/reference/make-pre-variant` produces a
+second model from the acceptance model with exactly one metadata key changed --
+`tokenizer.ggml.pre = "gpt-2"` -- and the same vocabulary, merges, token types
+and 1.2 GB of weights otherwise byte for byte. The reference over the same 80
+prompts gives different tokens for the two:
+
+| prompt | `gpt-2` | absent (DEFAULT) |
+| --- | --- | --- |
+| `they're` | `they` `'re` | `they` `'` `re` |
+| `1234567890` | `123` `456` `7890` | `123` `456` `789` `0` |
+| `a + b = c` | `a` ` +` ` b` ` =` ` c` | `a` ` ` `+` ` b` ` ` `=` ` c` |
+| `a   b` | unchanged | unchanged |
+
+The last row is the control: whitespace handling is inside the pattern the two
+pre-types share, so the two are one implementation with three extra passes
+rather than unrelated ones. Both sets of ids are gated in tests.
+
+Two consequences for Phase 7, where the ordinary GGUF models arrive. The
+pre-type is per-model configuration to be *discovered*, so a name we have not
+implemented is refused with that name in the message rather than approximated;
+loading such a model and tokenising it with whatever is compiled in is the worst
+available outcome, because the model appears to work. And whitespace is a list,
+not a Unicode category: the reference sets the whitespace bit from a separate
+table, and without it every double space tokenises wrongly while every single
+space stays correct.
 
 ### The layout, as verified
 

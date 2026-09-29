@@ -1,15 +1,35 @@
-# saphira-llm tokenizer golden vectors
+# saphira-llm tokenizer golden vectors, GPT-2 pre-type variant
 # Captured from the REFERENCE llama_tokenize(), never from us.
 #
-# The acceptance model has no tokenizer.ggml.pre key, so the reference
-# uses its DEFAULT pre-type: FOUR regexes, not the single canonical
-# GPT-2 pattern. Punctuation and digit runs are split separately. A
-# hand-written standard GPT-2 BPE diverges on most of these prompts.
+# THIS FIXTURE EXISTS TO PROVE ONE THING: the pre-tokeniser is model
+# metadata, not a constant in the tokenizer.
+#
+# The vocabulary, the merges, the token types and every weight are those of
+# the acceptance model, byte for byte. Exactly one metadata key differs:
+# tokenizer.ggml.pre = "gpt-2", added by tools/reference/make-pre-variant.
+# The source model declares no `pre` at all, which is what
+# tests/golden/tokenizer.txt records -- the DEFAULT fallback.
+#
+# Same vocabulary, one key, different tokens:
+#
+#   they're     gpt-2: they 're        DEFAULT: they ' ' re
+#   it's        gpt-2: it 's           DEFAULT: it  ' ' s
+#   1234567890  gpt-2: 123 456 7890    DEFAULT: 123 456 789 0
+#   a + b = c   gpt-2: a ' +' ' b'...  DEFAULT: a ' ' + ' b' ' ' = ...
+#
+# The gpt-2 pre-type is the GPT-2 pattern alone. DEFAULT is that pattern
+# wrapped in three more passes, and those are what split punctuation runs
+# and group digits in threes. Whitespace handling lives inside the shared
+# pattern, so prompts differing only in whitespace are identical under both
+# -- which is itself worth recording, because it shows the two pre-types
+# share a stage rather than being unrelated implementations.
+#
+# Phase 7's ordinary GGUF models will each declare their own `pre`. This
+# fixture is the evidence that reading it is mandatory.
 #
 # add_special is 1: the model sets add_bos_token, so every sequence
-# here begins with BOS. The renderer below is the reference's own
-# llama_token_to_piece, so a decode mismatch is visible per token.
-model /var/lib/spoon/models/ggml-model-i2_s.gguf
+# here begins with BOS.
+model (acceptance vocabulary, one metadata key changed)
 n_vocab 128256
 n_prompts 80
 
@@ -112,26 +132,26 @@ prompt punct_light
 prompt punct_full
   bytes 28
   text Hello, world! (Test) [x] {y}
-  n 17
-  fnv1a64 4f9fb5be6a59d68d
-  ids 128000 9906 11 1917 0 220 7 2323 8 220 58 87 60 220 90 88 92
-  pieces <> <Hello> <,> < world> <!> < > <(> <Test> <)> < > <[> <x> <]> < > <{> <y> <}>
+  n 14
+  fnv1a64 a31d5eab28078e21
+  ids 128000 9906 11 1917 0 320 2323 8 510 87 60 314 88 92
+  pieces <> <Hello> <,> < world> <!> < (> <Test> <)> < [> <x> <]> < {> <y> <}>
 
 prompt punct_math
   bytes 9
   text a + b = c
-  n 8
-  fnv1a64 78297b078f8a8435
-  ids 128000 64 220 10 293 220 28 272
-  pieces <> <a> < > <+> < b> < > <=> < c>
+  n 6
+  fnv1a64 8b396d744ae1998a
+  ids 128000 64 489 293 284 272
+  pieces <> <a> < +> < b> < => < c>
 
 prompt punct_dollar
   bytes 15
   text costs $5 or $10
-  n 10
-  fnv1a64 13a774adccb71067
-  ids 128000 16845 82 220 3 20 477 220 3 605
-  pieces <> <cost> <s> < > <$> <5> < or> < > <$> <10>
+  n 8
+  fnv1a64 75004db4565ba4d3
+  ids 128000 16845 82 400 20 477 400 605
+  pieces <> <cost> <s> < $> <5> < or> < $> <10>
 
 prompt punct_caret
   bytes 11
@@ -144,10 +164,10 @@ prompt punct_caret
 prompt punct_gt
   bytes 11
   text x => y <= z
-  n 8
-  fnv1a64 0e15f759c3d2e4d5
-  ids 128000 87 220 2228 379 220 8367 1167
-  pieces <> <x> < > <=>> < y> < > <<=> < z>
+  n 6
+  fnv1a64 15ab17af18e31f84
+  ids 128000 87 591 379 2717 1167
+  pieces <> <x> < =>> < y> < <=> < z>
 
 prompt punct_run
   bytes 12
@@ -177,9 +197,9 @@ prompt digit_4
   bytes 4
   text 1234
   n 3
-  fnv1a64 7cfed326933a565f
-  ids 128000 4513 19
-  pieces <> <123> <4>
+  fnv1a64 5ab71b1126a0be46
+  ids 128000 717 1958
+  pieces <> <12> <34>
 
 prompt digit_6
   bytes 6
@@ -193,17 +213,17 @@ prompt digit_7
   bytes 7
   text 1234567
   n 4
-  fnv1a64 7d825e6a05abe419
-  ids 128000 4513 10961 22
-  pieces <> <123> <456> <7>
+  fnv1a64 403b443e49a7aa0c
+  ids 128000 4513 1774 3080
+  pieces <> <123> <45> <67>
 
 prompt digit_10
   bytes 10
   text 1234567890
   n 5
-  fnv1a64 a75d1312c522537a
-  ids 128000 4513 10961 16474 15
-  pieces <> <123> <456> <789> <0>
+  fnv1a64 f1ec8a21db895c3c
+  ids 128000 4513 10961 2495 1954
+  pieces <> <123> <456> <78> <90>
 
 prompt digit_lead0
   bytes 3
@@ -225,65 +245,65 @@ prompt digit_sent
   bytes 29
   text In 2024, GDP was 3.5 billion.
   n 14
-  fnv1a64 d9cd6fb8807ec5e2
-  ids 128000 644 220 2366 19 11 30830 574 220 18 13 20 7239 13
-  pieces <> <In> < > <202> <4> <,> < GDP> < was> < > <3> <.> <5> < billion> <.>
+  fnv1a64 abd6ac5015e790c8
+  ids 128000 644 220 508 1187 11 30830 574 220 18 13 20 7239 13
+  pieces <> <In> < > <20> <24> <,> < GDP> < was> < > <3> <.> <5> < billion> <.>
 
 prompt apos_s
   bytes 4
   text it's
-  n 4
-  fnv1a64 796d22ac272e43ae
-  ids 128000 275 6 82
-  pieces <> <it> <'> <s>
+  n 3
+  fnv1a64 c6471699a3982618
+  ids 128000 275 596
+  pieces <> <it> <'s>
 
 prompt apos_t
   bytes 5
   text don't
-  n 4
-  fnv1a64 c6270010578dec3b
-  ids 128000 15357 6 83
-  pieces <> <don> <'> <t>
+  n 3
+  fnv1a64 4bd7719dbb55c8d7
+  ids 128000 15357 956
+  pieces <> <don> <'t>
 
 prompt apos_re
   bytes 7
   text they're
-  n 4
-  fnv1a64 f16dc00f54d18cac
-  ids 128000 20670 6 265
-  pieces <> <they> <'> <re>
+  n 3
+  fnv1a64 b81192251d91be44
+  ids 128000 20670 2351
+  pieces <> <they> <'re>
 
 prompt apos_ve
   bytes 5
   text we've
-  n 4
-  fnv1a64 d063cbeb4fa7279d
-  ids 128000 906 6 588
-  pieces <> <we> <'> <ve>
+  n 3
+  fnv1a64 948f413beff014bc
+  ids 128000 906 3077
+  pieces <> <we> <'ve>
 
 prompt apos_m
   bytes 3
   text I'm
-  n 4
-  fnv1a64 977bf3165eaea6e4
-  ids 128000 40 6 76
-  pieces <> <I> <'> <m>
+  n 3
+  fnv1a64 0260e94dcf1f10c9
+  ids 128000 40 2846
+  pieces <> <I> <'m>
 
 prompt apos_ll
   bytes 5
   text we'll
-  n 4
-  fnv1a64 8cae259468bbbdd4
-  ids 128000 906 6 657
-  pieces <> <we> <'> <ll>
+  n 3
+  fnv1a64 6bab2a979f57304c
+  ids 128000 906 3358
+  pieces <> <we> <'ll>
 
 prompt apos_d
   bytes 4
   text he'd
-  n 4
-  fnv1a64 9ebad97e4e45712b
-  ids 128000 383 6 67
-  pieces <> <he> <'> <d>
+  n 3
+  fnv1a64 c4d73b3e79312ed7
+  ids 128000 383 4265
+  pieces <> <he> <'d>
 
 prompt apos_upper
   bytes 18
@@ -296,10 +316,10 @@ prompt apos_upper
 prompt apos_bare
   bytes 12
   text the ' symbol
-  n 5
-  fnv1a64 1b0e51671edaf520
-  ids 128000 1820 220 6 7891
-  pieces <> <the> < > <'> < symbol>
+  n 4
+  fnv1a64 eb3e5d557ad11d89
+  ids 128000 1820 364 7891
+  pieces <> <the> < '> < symbol>
 
 prompt unicode_acc
   bytes 17
@@ -352,10 +372,10 @@ prompt unicode_mix
 prompt mixed_hard
   bytes 46
   text In 2024, the U.S. spent $3.5B on AI -- up 40%!
-  n 26
-  fnv1a64 13ecb05813c50750
-  ids 128000 644 220 2366 19 11 279 549 13 50 13 7543 220 3 18 13 20 33 389 15592 220 313 709 220 1272 90520
-  pieces <> <In> < > <202> <4> <,> < the> < U> <.> <S> <.> < spent> < > <$> <3> <.> <5> <B> < on> < AI> < > <--> < up> < > <40> <%!>
+  n 24
+  fnv1a64 9ac9992e06ed41aa
+  ids 128000 644 220 508 1187 11 279 549 13 50 13 7543 400 18 13 20 33 389 15592 1198 709 220 1272 90520
+  pieces <> <In> < > <20> <24> <,> < the> < U> <.> <S> <.> < spent> < $> <3> <.> <5> <B> < on> < AI> < --> < up> < > <40> <%!>
 
 prompt capitol
   bytes 11
@@ -440,10 +460,10 @@ prompt url_ish
 prompt quotes
   bytes 21
   text "quoted" and 'single'
-  n 9
-  fnv1a64 4ff14a4b6fee8f85
-  ids 128000 1 64825 1 323 220 6 15698 6
-  pieces <> <"> <quoted> <"> < and> < > <'> <single> <'>
+  n 8
+  fnv1a64 9152ad5b0c5890bc
+  ids 128000 1 64825 1 323 364 15698 6
+  pieces <> <"> <quoted> <"> < and> < '> <single> <'>
 
 prompt slash
   bytes 5
@@ -464,26 +484,26 @@ prompt backslash
 prompt plus_plus
   bytes 9
   text a++ + ++b
-  n 8
-  fnv1a64 bbdf0cf2826d2df5
-  ids 128000 64 1044 220 10 220 1044 65
-  pieces <> <a> <++> < > <+> < > <++> <b>
+  n 6
+  fnv1a64 c6a92fe2c8506c68
+  ids 128000 64 1044 489 3526 65
+  pieces <> <a> <++> < +> < ++> <b>
 
 prompt star_star
   bytes 10
   text x = a ** b
-  n 8
-  fnv1a64 2730ae3e5666332d
-  ids 128000 87 220 28 264 220 334 293
-  pieces <> <x> < > <=> < a> < > <**> < b>
+  n 6
+  fnv1a64 67d4a58a860948f9
+  ids 128000 87 284 264 3146 293
+  pieces <> <x> < => < a> < **> < b>
 
 prompt at_amp
   bytes 12
   text @user & more
-  n 6
-  fnv1a64 352b57a27a1d5644
-  ids 128000 31 882 220 5 810
-  pieces <> <@> <user> < > <&> < more>
+  n 5
+  fnv1a64 64eb2272e8f8394b
+  ids 128000 31 882 612 810
+  pieces <> <@> <user> < &> < more>
 
 prompt percent
   bytes 11
@@ -616,26 +636,26 @@ prompt digit_letter
 prompt big_int
   bytes 30
   text 123456789012345678901234567890
-  n 11
-  fnv1a64 06f763cc97bce409
-  ids 128000 4513 10961 16474 11531 12901 17458 19319 11727 19282 21381
-  pieces <> <123> <456> <789> <012> <345> <678> <901> <234> <567> <890>
+  n 13
+  fnv1a64 26acfec6054b4aa0
+  ids 128000 4513 10961 2495 1954 4513 10961 2495 1954 4513 10961 2495 1954
+  pieces <> <123> <456> <78> <90> <123> <456> <78> <90> <123> <456> <78> <90>
 
 prompt neg_num
   bytes 7
   text -42 +17
-  n 6
-  fnv1a64 02ff1af32bed9ae4
-  ids 128000 12 2983 220 10 1114
-  pieces <> <-> <42> < > <+> <17>
+  n 5
+  fnv1a64 9e0132fd5adedda4
+  ids 128000 12 2983 489 1114
+  pieces <> <-> <42> < +> <17>
 
 prompt sp_punct_word
   bytes 20
   text hello , world ! next
-  n 8
-  fnv1a64 6b9310b7aaf378d6
-  ids 128000 15339 220 11 1917 220 0 1828
-  pieces <> <hello> < > <,> < world> < > <!> < next>
+  n 6
+  fnv1a64 0b468bae7e43b1ef
+  ids 128000 15339 1174 1917 758 1828
+  pieces <> <hello> < ,> < world> < !> < next>
 
 prompt caps_run
   bytes 16

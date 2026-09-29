@@ -372,6 +372,67 @@ started at `line + 4`, so `strtol` was handed the `s`. Every comparison ran
 against an empty expectation, which is why the count of 80 was the only thing
 that looked healthy.
 
+### The pre-tokeniser is model metadata, and that is now measured
+
+The finding that `tokenizer.ggml.pre` being absent means DEFAULT rather than
+"ordinary GPT-2" is easy to record and easy to forget. It was made structural
+instead, by producing a second model from the first:
+
+    tools/reference/make-pre-variant <in.gguf> gpt-2 <out.gguf>
+
+Same vocabulary, same merges, same token types, same 1.2 GB of weights, byte
+for byte. Exactly one metadata key added. Running the reference over the same
+80 prompts against both:
+
+| prompt | `pre` = gpt-2 | `pre` absent (DEFAULT) |
+| --- | --- | --- |
+| `they're` | `they` `'re` | `they` `'` `re` |
+| `it's` | `it` `'s` | `it` `'` `s` |
+| `1234567890` | `123` `456` `7890` | `123` `456` `789` `0` |
+| `a + b = c` | `a` ` +` ` b` ` =` ` c` | `a` ` ` `+` ` b` ` ` `=` ` c` |
+| `a   b` | unchanged | unchanged |
+
+One key, different tokens. The last row is the useful control: whitespace
+handling lives inside the pattern the two pre-types share, so prompts differing
+only in whitespace are identical, which is what shows the two are one
+implementation with three extra passes rather than two unrelated ones.
+
+So the pre-type is an enum resolved from the file, with an explicit fallback,
+an accessor for reporting, and a refusal for any name we have not implemented.
+Refusing matters: loading a model whose `pre` names a pre-tokeniser we lack and
+tokenising it with whatever happened to be compiled in is the worst available
+outcome, because the model appears to work. The reference throws there too.
+
+Phase 7's ordinary GGUF models will each carry their own `pre`, and this is the
+evidence that reading it is mandatory rather than a nicety.
+
+### Writing a scalar GGUF string as a raw blob desynchronises the file
+
+The variant tool above emitted every non-array key as `elem_size` bytes. For a
+scalar string the parser records `elem_size = 1`, because a scalar has no
+meaningful element size, so every string key was written as a single byte. The
+resulting file was rejected several keys later with an absurd string length
+(11584560907875033284), which points at the last key rather than at the
+miswriter.
+
+A parser that reports `elem_size = 1` for a scalar string is inviting exactly
+this. The writer now special-cases strings and the parser's oddity is documented
+where it is set.
+
+### A regression test that counted instead of asserting
+
+The GGUF test for the string-array bound declared 2^28 strings and expected a
+rejection. It passed vacuously: the array was written by hand, so the
+key-value count was never incremented, so the parser skipped the key and the
+file opened successfully. The test asserted that a file which was never
+examined had been rejected.
+
+The bound itself was correct all along, which is the uncomfortable part: a
+repro outside the harness rejected the same bytes immediately. Three separate
+gates in this project have now reported success without having compared
+anything, which is why the completion messages now check the failure count
+rather than a count of records read.
+
 ### The unescaper kept the line terminator
 
 The fixture stores each prompt's text on one line with newlines escaped as `\n`.

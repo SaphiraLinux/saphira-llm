@@ -292,12 +292,18 @@ a textbook GPT-2 BPE diverges: punctuation runs, digit runs of every length
 from one to thirty digits, contractions in every case form, whitespace runs,
 newlines, CRLF, and multi-byte UTF-8 in two-, three- and four-byte forms.
 
-| | |
-| --- | --- |
-| prompts | 80 |
-| token ids matching the reference | 80 / 80 |
-| prompts round tripping through encode and decode | 80 / 80 |
-| agreement criterion | exact |
+| | DEFAULT (`pre` absent) | gpt-2 (`pre` = "gpt-2") |
+| --- | ---: | ---: |
+| prompts | 80 | 80 |
+| token ids matching the reference | 80 / 80 | 80 / 80 |
+| prompts round tripping through encode and decode | 80 / 80 | n/a |
+| agreement criterion | exact | exact |
+
+The two columns are the same vocabulary, the same merges, the same token types
+and the same 1.2 GB of weights, differing in one metadata key. That is the
+measurement behind "the pre-tokeniser is model metadata": `they're` is
+`they` `'re` under one and `they` `'` `re` under the other, `1234567890` splits
+into triples under one and not the other.
 
 Exact equality, with no tolerance, because a tokeniser has no floating point in
 it. If the ids differ the model is conditioning on a different sequence, and

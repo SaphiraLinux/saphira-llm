@@ -42,6 +42,30 @@ static void die(const char * msg) {
     exit(1);
 }
 
+/*
+ * Escape to unambiguous ASCII.
+ *
+ * Prompts and pieces contain raw bytes -- UTF-8 sequences, and byte-encoded
+ * pieces that are not UTF-8 at all -- so a fixture written verbatim is not
+ * line-oriented, is not diffable, and cannot be round-tripped through a text
+ * tool without a decoding decision nobody wrote down. Everything outside
+ * printable ASCII is written as \xNN.
+ *
+ * ASCII prompts stay readable, which is the point: the fixture is read by
+ * people reviewing a change, not only by the test.
+ */
+static void escape(FILE * f, const char * s, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+        const unsigned char c = (unsigned char) s[i];
+        if      (c == '\\') { fprintf(f, "\\\\"); }
+        else if (c == '\n')  { fprintf(f, "\\n"); }
+        else if (c == '\r')  { fprintf(f, "\\r"); }
+        else if (c == '\t')  { fprintf(f, "\\t"); }
+        else if (c < 0x20 || c >= 0x7F) { fprintf(f, "\\x%02x", c); }
+        else                 { fputc(c, f); }
+    }
+}
+
 static uint64_t fnv1a64(const void * data, size_t n) {
     const unsigned char * p = (const unsigned char *) data;
     uint64_t h = 1469598103934665603ULL;
@@ -210,15 +234,7 @@ int main(int argc, char ** argv) {
         /* The text itself, escaped, so the fixture drives the test rather than
          * the test carrying a second copy of the prompt list that can drift. */
         fprintf(f, "  text ");
-        for (int32_t b = 0; b < text_len; ++b) {
-            const unsigned char c = (unsigned char) text[b];
-            if      (c == '\\') { fprintf(f, "\\\\"); }
-            else if (c == '\n')  { fprintf(f, "\\n"); }
-            else if (c == '\r')  { fprintf(f, "\\r"); }
-            else if (c == '\t')  { fprintf(f, "\\t"); }
-            else if (c < 0x20)   { fprintf(f, "\\x%02x", c); }
-            else                 { fputc(c, f); }
-        }
+        escape(f, text, (size_t) text_len);
         fprintf(f, "\n");
         fprintf(f, "  n %d\n", got);
         fprintf(f, "  fnv1a64 %016llx\n",
@@ -237,12 +253,7 @@ int main(int argc, char ** argv) {
             if (len < 0) { len = 0; }
             buf[len < (int32_t) sizeof(buf) ? len : (int32_t) sizeof(buf) - 1] = '\0';
             fprintf(f, " <");
-            for (int32_t b = 0; b < len; ++b) {
-                const unsigned char c = (unsigned char) buf[b];
-                if (c == '\\')      { fprintf(f, "\\\\"); }
-                else if (c < 0x20)  { fprintf(f, "\\x%02x", c); }
-                else                { fputc(c, f); }
-            }
+            escape(f, buf, (size_t) len);
             fprintf(f, ">");
         }
         fprintf(f, "\n\n");
