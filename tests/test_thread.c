@@ -72,6 +72,175 @@ TEST(topology_detection_is_self_consistent) {
     CHECK_STR(sllm_core_class_name(SLLM_CORE_UNKNOWN), "unknown");
 }
 
+/*
+ * Detection must be a pure function of the machine's identity, not of its
+ * current load.
+ *
+ * The bug this guards against was real: classification used to run a timing
+ * probe and threshold the result, and on this virtualised host it answered
+ * 14/0, 13/1, 12/2 and 11/3 performance/efficiency cores on four
+ * consecutive runs, and put 27 of 28 logical CPUs in the full-rate class at
+ * every threshold from 0.60 to 0.95. A test that only checked self-consistency
+ * passed throughout, because each individual answer was internally coherent.
+ * The property worth asserting is that repeated detection is byte-identical,
+ * and that it stays identical across a varying amount of concurrent work.
+ */
+TEST(topology_detection_is_byte_identical_across_runs) {
+    sllm_topology first, again;
+    sllm_topology_detect(&first);
+    sllm_topology_detect(&again);
+    CHECK_EQ_INT(memcmp(&first, &again, sizeof first), 0);
+
+    for (int i = 0; i < 4; ++i) {
+        sllm_topology_detect(&again);
+        CHECK_EQ_INT(memcmp(&first, &again, sizeof first), 0);
+    }
+}
+
+/*
+ * Load must not reach the result. Saturation of the machine is a stand-in for
+ * the real cause, which is the host scheduler placing our vCPUs wherever it
+ * likes; the observable contract is the same either way.
+ */
+TEST(topology_detection_is_stable_under_load) {
+    sllm_topology quiet, busy;
+    sllm_topology_detect(&quiet);
+
+    /* Create pressure, detect during it, then confirm nothing moved. */
+    volatile unsigned long sink = 0;
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 200000; ++j) {
+            sink += (unsigned long) j;
+        }
+        sllm_topology_detect(&busy);
+        CHECK_EQ_INT(memcmp(&quiet, &busy, sizeof quiet), 0);
+    }
+    (void) sink;
+}
+
+/*
+ * Core class must come from the hardware or not at all.
+ *
+ * There is no timing fallback any more. If CPUID leaf 0x1A is hidden or
+ * zeroed -- as it is here, under a hypervisor that reports a non-GenuineIntel
+ * vendor string -- then the classes are UNKNOWN, the counts are zero, and
+ * hybrid is false. The counts must not be silently inferred, because a
+ * manufactured split is indistinguishable from a real one to every caller
+ * downstream.
+ */
+/*
+ * hybrid == false must never be readable as "definitely homogeneous".
+ *
+ * On a host where CPUID leaf 0x1A is hidden or zeroed -- which is the case
+ * here -- the class fields are zeroed rather than left stale, so hybrid, n_perf
+ * and n_eff are all false/zero. A caller that reads hybrid on its own cannot
+ * tell that apart from a genuinely homogeneous machine, and the two justify
+ * opposite behaviour: "no efficiency cores" means spread work everywhere,
+ * "we were not told" means nothing.
+ *
+ * sllm_topology_classes_known() is the gate, and it must disagree with naive
+ * interpretation of the flag on any host lacking core type.
+ */
+TEST(topology_classes_known_gates_the_hybrid_flag) {
+    sllm_topology topo;
+    sllm_topology_detect(&topo);
+
+    CHECK_EQ_INT(sllm_topology_classes_known(&topo),
+                 topo.core_type_available ? 1 : 0);
+    CHECK_EQ_INT(sllm_topology_classes_known(NULL), 0);
+
+    if (!sllm_topology_classes_known(&topo)) {
+        /* Unknown class: every class-derived field is inert, and the
+         * combination is one that also describes a homogeneous machine, so
+         * the flag is the only thing separating them. */
+        CHECK_EQ_INT(topo.hybrid, 0);
+        CHECK_EQ_INT(topo.n_perf, 0);
+        CHECK_EQ_INT(topo.n_eff, 0);
+    } else {
+        /* Known class: hybrid is exactly "both classes were present". */
+        CHECK_EQ_INT(topo.hybrid,
+                     (topo.n_perf > 0 && topo.n_eff > 0) ? 1 : 0);
+    }
+}
+
+TEST(topology_core_class_is_never_inferred) {
+    sllm_topology topo;
+    sllm_topology_detect(&topo);
+
+    if (!topo.core_type_available) {
+        /* Unavailable means every class is UNKNOWN and nothing is counted. */
+        CHECK_EQ_INT(topo.n_perf, 0);
+        CHECK_EQ_INT(topo.n_eff, 0);
+        CHECK_EQ_INT(topo.hybrid, 0);
+        for (int i = 0; i < topo.n_cpus; ++i) {
+            CHECK_EQ_INT(topo.cpus[i].klass, SLLM_CORE_UNKNOWN);
+        }
+    } else {
+        /* Available means the counts are a partition of the physical cores by
+         * primary hardware thread, and a classified CPU carries a raw value. */
+        int counted = 0;
+        for (int i = 0; i < topo.n_cpus; ++i) {
+            if (!topo.cpus[i].primary) {
+                continue;
+            }
+            if (topo.cpus[i].klass != SLLM_CORE_UNKNOWN) {
+                ++counted;
+            }
+        }
+        CHECK_EQ_INT(counted, topo.n_perf + topo.n_eff);
+        CHECK(topo.n_perf + topo.n_eff <= topo.n_cores);
+    }
+}
+
+/*
+ * The declared core-type constants must be the values the header documents,
+ * and must not be used to force a class onto an unrecognised value. A core
+ * reporting something we have no name for stays UNKNOWN.
+ */
+TEST(topology_core_type_constants_match_intel_documented_values) {
+    /* Intel documents 0x40 for a performance core, 0x20 for an efficiency
+     * core. The values are not assumed anywhere else; this pins them so a
+     * change is deliberate rather than accidental. */
+    sllm_topology topo;
+    sllm_topology_detect(&topo);
+    for (int i = 0; i < topo.n_cpus; ++i) {
+        const unsigned t = topo.cpus[i].core_type;
+        if (t != 0u && t != 0x40u && t != 0x20u) {
+            /* Recorded raw, but deliberately not named. */
+            CHECK_EQ_INT(topo.cpus[i].klass, SLLM_CORE_UNKNOWN);
+        }
+        if (t == 0x40u) {
+            CHECK_EQ_INT(topo.cpus[i].klass, SLLM_CORE_PERF);
+        }
+        if (t == 0x20u) {
+            CHECK_EQ_INT(topo.cpus[i].klass, SLLM_CORE_EFFICIENCY);
+        }
+    }
+}
+
+/*
+ * Calibration measures throughput. It must not be able to classify, because
+ * its numbers are load-dependent and topology is not.
+ */
+TEST(topology_calibration_does_not_classify_cores) {
+    sllm_topology before, after;
+    sllm_topology_detect(&before);
+
+    after = before;
+    const bool ok = sllm_topology_calibrate(&after, 20000);
+    if (ok) {
+        /* Classes, counts and the hybrid flag survive untouched. */
+        for (int i = 0; i < before.n_cpus; ++i) {
+            CHECK_EQ_INT(before.cpus[i].klass, after.cpus[i].klass);
+        }
+        CHECK_EQ_INT(before.n_perf, after.n_perf);
+        CHECK_EQ_INT(before.n_eff, after.n_eff);
+        CHECK_EQ_INT(before.hybrid, after.hybrid);
+        CHECK_EQ_INT(before.core_type_available, after.core_type_available);
+        CHECK(after.calibrated);
+    }
+}
+
 TEST(topology_plan_is_a_permutation_of_the_online_cpus) {
     sllm_topology topo;
     sllm_topology_detect(&topo);
@@ -365,6 +534,12 @@ TEST(pool_restores_the_callers_affinity) {
 void sllm_test_thread(void) {
     printf("topology\n");
     RUN(topology_detection_is_self_consistent);
+    RUN(topology_detection_is_byte_identical_across_runs);
+    RUN(topology_detection_is_stable_under_load);
+    RUN(topology_classes_known_gates_the_hybrid_flag);
+    RUN(topology_core_class_is_never_inferred);
+    RUN(topology_core_type_constants_match_intel_documented_values);
+    RUN(topology_calibration_does_not_classify_cores);
     RUN(topology_plan_is_a_permutation_of_the_online_cpus);
     RUN(topology_never_recommends_full_occupancy);
 

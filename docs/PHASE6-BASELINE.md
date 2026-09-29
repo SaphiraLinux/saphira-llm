@@ -251,15 +251,109 @@ second time is the one that makes it a habit.
   violate that. It needs hardware that has it.
 - **The `tg128 @ 28 threads` claim is now ours to make, and is not made** beyond
   the table above.
-- **The topology calibration is unreliable and is not trusted.** Across runs on
-  the same idle machine it classified this 8 P + 6 E CPU as 14/0, 13/1 and 12/2
-  perf/efficiency. That is a measured defect in the Phase 2 calibration and it
-  directly affects placement, which is the largest remaining single-thread
-  effect. It is unfixed.
+- **Topology classification is now deterministic, and on this host it reports
+  "unavailable".** Classification is read from CPUID leaf 0x1A, `EAX[31:24]`,
+  pinned to each logical CPU. The hypervisor zeroes it here and reports a
+  non-GenuineIntel vendor string, so core classes are `UNKNOWN` and the counts
+  are zero. Nothing is inferred to fill the gap. See "Timing cannot classify
+  cores" below.
+
+## Timing cannot classify cores
+
+The Phase 2 calibration ranked cores by timing and thresholded at 0.75. On this
+host it answered 14/0, 13/1, 12/2 and 11/3 performance/efficiency cores on four
+consecutive runs of an idle machine, and put 27 of 28 logical CPUs in the
+full-rate class at every threshold from 0.60 to 0.95.
+
+The cause is virtualisation, and it is not a tuning problem. Guest
+`sched_setaffinity` pins a vCPU to a guest logical CPU, but the host remains
+free to run that vCPU's thread on any host core. A single logical CPU's samples
+swing by a factor of two between rounds, at random, uncorrelated with round or
+CPU — `~5.08e8` and `~1.05e9` measured. Best-of-three therefore samples the
+fast mode almost every time. Guest-side timing measures host scheduling, not
+the guest CPU's capability.
+
+Threshold tuning was explicitly not attempted, because no threshold can
+separate a signal that is not present.
+
+### What replaced it
+
+`CPUID.7.0:EBX[15]` reports whether the processor advertises a hybrid
+architecture; here it returns 0. `CPUID.1A` `EAX[31:24]` is the native core-type
+field, read pinned to each logical CPU; here it returns 0 on all 28. Intel
+documents 0x40 for a performance core and 0x20 for an efficiency core, and those
+values are stored and named — but a value we do not recognise is recorded raw
+and left `UNKNOWN` rather than forced into a class.
+
+sysfs is used to cross-check, never to derive. Two logical CPUs that sysfs says
+share a physical core must report the same core type; if they disagree the two
+sources contradict each other and neither is trusted. `cluster_id` is not used:
+on this host it merely mirrors `2 * core_id` and carries no class information.
+
+`sllm_topology_calibrate` is retained but narrowed to measurement: it fills
+`score` and sets `calibrated`, and can no longer set any core class. A test
+asserts that.
+
+Verified: detection is byte-identical across repeated runs and under
+concurrent load, and contains no timing call. `sllm_topology_describe` reports
+class availability explicitly, because a bare "hybrid: no" is ambiguous between
+a homogeneous machine and one that would not say.
+
+### Egg's topology is synthetic, and does not describe homer
+
+The physical host i9-13900K has **8 P cores x 2 threads = 16 logical, plus
+16 E cores x 1 thread = 16 logical: 24 physical cores, 32 logical CPUs.**
+
+Egg is not that machine. Its libvirt domain is declared as:
+
+```xml
+<cpu mode="host-passthrough" check="none" migratable="on">
+  <topology sockets="1" dies="1" clusters="1" cores="14" threads="2"/>
+</cpu>
+<vcpu placement="static">28</vcpu>
+```
+
+The guest is therefore given 14 cores with 2 threads each, 28 vCPUs, SMT on
+every presented core. That is a synthesised topology: it matches neither the
+physical 24 cores / 32 logical CPUs nor any real hybrid arrangement, and it
+puts SMT siblings on cores the silicon has no siblings on.
+
+Two consequences follow, and they are why the CPUID route was necessary rather
+than merely preferable.
+
+First, the structural cross-check cannot confirm or deny the expected 8 P / 16 E
+split, because the sibling pattern it would read is the VM's rather than the
+CPU's. An inference from it would describe the hypervisor's configuration, not
+the processor.
+
+Second, timing cannot recover what the topology declines to give. Under
+`host-passthrough` with no domain CPU pinning, the host scheduler places each
+vCPU's thread wherever it likes, which is the ~2x random per-round swing
+measured above.
+
+The sysfs figures detection reports on Egg (14 cores, 28 logical, SMT on all)
+are exactly what the domain declares, and are correct as a description of the
+guest. They are not a description of homer's silicon and must not be quoted as
+one.
+
+### Reading the core-class fields
+
+`hybrid` is false on Egg, but that does **not** mean the CPU is homogeneous: it
+means core type was unavailable, and the fields were zeroed rather than left
+stale. `n_perf`, `n_eff` and every `klass` are zero/UNKNOWN for the same reason.
+The distinction is the whole point -- "this machine has no efficiency cores"
+would justify spreading work across every core, whereas "we were not told"
+justifies nothing. Call `sllm_topology_classes_known()` before consulting any of
+them; it is false on any host where CPUID leaf 0x1A is hidden or zeroed.
 
 ## Open items
 
-1. Calibration misclassification (above). Affects placement ordering.
+## Open items
+
+1. ~~Calibration misclassification~~ — **fixed**: classification is deterministic
+   from CPUID, and unavailable rather than wrong on this host. Placement
+   ordering still uses measured `score`, which is a throughput observation and
+   not a topology fact.
 2. `sllm_topology_recommended_threads` returns 27, which is wrong for this
    workload; the peak is 4 to 8. It should be derived from measurement rather
    than from "leave one hardware thread free", which was a rule derived from the
@@ -268,5 +362,5 @@ second time is the one that makes it a habit.
    the residual float ordering, not instruction selection.
 4. Peak is 4 to 8 threads, not 14. Whether the 211-regions-per-token structure
    can be coarsened — rather than skipping small regions — is unexplored.
-5. Re-run every table on an unloaded host before any of this is treated as a
+5. Re-run every table on a quiet host before any of this is treated as a
    project record.

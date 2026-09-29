@@ -16,9 +16,20 @@
  *    barrier saturation at threads == logical CPUs, and it is addressed in
  *    thread.c, not here. This file is about quality, not about that cliff.
  *
- * The target is a KVM guest that zeroes CPUID leaf 0x1A and ships no
- * core_type file, so the hardware will not tell us which cores are fast. It
- * gets measured instead.
+ * Structure (which logical CPUs share a physical core, how many cores exist,
+ * whether any core has SMT) comes from sysfs and is exact.
+ *
+ * Core classification comes from CPUID leaf 0x1A, EAX[31:24], read pinned to
+ * each logical CPU. That is a hardware answer, so it is deterministic and
+ * independent of machine load, which is what Phase 6 requires of detection.
+ *
+ * On the target, a KVM guest, the hypervisor zeroes that leaf and reports a
+ * non-GenuineIntel vendor string, so core type is unavailable and the classes
+ * are left UNKNOWN. That is a reported fact, not a gap, and no runtime
+ * measurement is used to fill it in: guest-side timing on this host measures
+ * host scheduling, swinging ~2x between rounds on the same logical CPU at
+ * random, which is precisely why it was removed from discovery rather than
+ * retuned. See sllm_topology_calibrate for the narrow use it retains.
  */
 
 #ifndef _GNU_SOURCE
@@ -28,6 +39,7 @@
 #include <saphira_llm/topology.h>
 #include <saphira_llm/log.h>
 
+#include <cpuid.h>
 #include <sched.h>
 #include <unistd.h>
 
@@ -37,6 +49,186 @@
 #include <time.h>
 
 #include <immintrin.h>
+
+/* Defined below, used by the CPUID classification in sllm_topology_detect. */
+static int pin_to_cpu(int cpu);
+
+/* ------------------------------------------------------------------ */
+/* CPUID core classification                                            */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Intel's documented native core-type values for CPUID leaf 0x1A, EAX[31:24].
+ *
+ * These are recorded as constants for readability, but nothing in this file
+ * assumes a core returns one of them. Every value the hardware produces is
+ * stored in sllm_cpu.core_type, and a value we do not recognise is left
+ * UNKNOWN rather than being forced into one of the two classes.
+ */
+#define SLLM_CORE_TYPE_INTEL_CORE 0x40u  /* performance core  */
+#define SLLM_CORE_TYPE_INTEL_ATOM 0x20u  /* efficiency core  */
+
+/*
+ * Does the processor advertise a hybrid architecture?
+ *
+ * CPUID.7.0:EBX[15]. Returns 1 for hybrid, 0 for homogeneous, -1 if the
+ * leaf is not available to ask.
+ *
+ * A hypervisor that does not expose the topology will report 0 here. That is
+ * not a claim that the silicon is homogeneous -- it is a claim that we were
+ * not told, and we treat it as being not told.
+ */
+static int cpuid_hybrid_advertised(void) {
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    if (!__get_cpuid_count(7, 0, &a, &b, &c, &d)) {
+        return -1;
+    }
+    return (int) ((b >> 15) & 1u);
+}
+
+/*
+ * Read the native core-type field while pinned to `cpu`.
+ *
+ * CPUID is per-thread state, so the thread must be on the CPU being asked
+ * about; running this unpinned would report the core the caller happened to
+ * be on, for every CPU in turn.
+ *
+ * Returns 0 and fills *out on success. Returns -1 if affinity was refused or
+ * the leaf is unavailable, in which case *out is untouched.
+ */
+static int read_core_type(int cpu, unsigned * out) {
+    if (pin_to_cpu(cpu) != 0) {
+        return -1;
+    }
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    if (!__get_cpuid_count(0x1A, 0, &a, &b, &c, &d)) {
+        return -1;
+    }
+    *out = (a >> 24) & 0xffu;
+    return 0;
+}
+
+/* Restore affinity to every CPU, so a caller that only wanted to ask a
+ * question does not leave itself pinned. */
+static void unpin_all(void) {
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    for (int i = 0; i < SLLM_MAX_CPUS; ++i) {
+        CPU_SET(i, &set);
+    }
+    (void) sched_setaffinity(0, sizeof set, &set);
+}
+
+/*
+ * Classify cores from the native CPUID core-type field.
+ *
+ * This is a hardware answer and nothing else participates: no timing, no
+ * thresholds tuned against observed timings, and no inference from
+ * cluster_id. The same call returns the same bytes regardless of what the
+ * machine is doing, which is the property Phase 6 needs.
+ *
+ * sysfs facts are used only to CROSS-CHECK, never to derive a class. The
+ * check that matters is SMT siblings: two logical CPUs that sysfs says share a
+ * physical core must report the same core type, because they are the same
+ * core. A disagreement means the two sources contradict each other, and we
+ * would rather report nothing than pick a winner.
+ *
+ * On this host the leaf is present but zeroed, every value is 0, so nothing is
+ * classifiable and we say so.
+ */
+static void classify_cores_cpuid(sllm_topology * topo) {
+    topo->hybrid_advertised = (cpuid_hybrid_advertised() == 1);
+
+    int read_ok = 0;
+    bool any_nonzero = false;
+    for (int i = 0; i < topo->n_cpus; ++i) {
+        sllm_cpu * c = &topo->cpus[i];
+        c->klass = SLLM_CORE_UNKNOWN;
+        c->core_type = 0;
+        unsigned t = 0;
+        if (read_core_type(c->id, &t) == 0) {
+            ++read_ok;
+            c->core_type = t;
+            if (t != 0) {
+                any_nonzero = true;
+            }
+        }
+    }
+    unpin_all();
+
+    /* Cross-check: sysfs says these logical CPUs are one physical core, so
+     * they must agree on core type. */
+    bool sibling_conflict = false;
+    for (int i = 0; i < topo->n_cpus; ++i) {
+        for (int j = i + 1; j < topo->n_cpus; ++j) {
+            const sllm_cpu * a = &topo->cpus[i];
+            const sllm_cpu * b = &topo->cpus[j];
+            if (a->package == b->package && a->core_id == b->core_id &&
+                a->core_type != b->core_type) {
+                sibling_conflict = true;
+            }
+        }
+    }
+
+    const bool usable = (read_ok == topo->n_cpus) && any_nonzero && !sibling_conflict;
+    topo->core_type_available = usable;
+
+    if (!usable) {
+        /* Record why, so an absent classification is never mistaken for a
+         * homogeneous machine. */
+        if (read_ok != topo->n_cpus) {
+            sllm_log(SLLM_LOG_INFO,
+                     "topology: CPUID.1A unreadable on %d of %d logical CPUs; "
+                     "core type unavailable",
+                     topo->n_cpus - read_ok, topo->n_cpus);
+        } else if (!any_nonzero) {
+            sllm_log(SLLM_LOG_INFO,
+                     "topology: CPUID.1A returned core type 0 on all %d logical "
+                     "CPUs (hypervisor does not expose hybrid topology; "
+                     "CPUID.7.0:EBX[15]=%d). Core class left UNKNOWN. Structure "
+                     "below is from sysfs and is exact.",
+                     topo->n_cpus, topo->hybrid_advertised ? 1 : 0);
+        } else {
+            sllm_log(SLLM_LOG_INFO,
+                     "topology: CPUID.1A core types contradict sysfs sibling "
+                     "grouping; core type unavailable");
+        }
+        topo->n_perf = 0;
+        topo->n_eff  = 0;
+        topo->hybrid = false;
+        return;
+    }
+
+    for (int i = 0; i < topo->n_cpus; ++i) {
+        sllm_cpu * c = &topo->cpus[i];
+        switch (c->core_type) {
+            case SLLM_CORE_TYPE_INTEL_CORE: c->klass = SLLM_CORE_PERF;     break;
+            case SLLM_CORE_TYPE_INTEL_ATOM: c->klass = SLLM_CORE_EFFICIENCY; break;
+            default:
+                /* Recorded, but not one we are prepared to name. */
+                c->klass = SLLM_CORE_UNKNOWN;
+                break;
+        }
+    }
+
+    topo->n_perf = 0;
+    topo->n_eff  = 0;
+    for (int i = 0; i < topo->n_cpus; ++i) {
+        if (!topo->cpus[i].primary) {
+            continue;
+        }
+        if (topo->cpus[i].klass == SLLM_CORE_PERF) {
+            ++topo->n_perf;
+        } else if (topo->cpus[i].klass == SLLM_CORE_EFFICIENCY) {
+            ++topo->n_eff;
+        }
+    }
+    topo->hybrid = (topo->n_perf > 0 && topo->n_eff > 0);
+    sllm_log(SLLM_LOG_INFO,
+             "topology: CPUID.1A core types available; %d performance, %d "
+             "efficiency cores (hybrid_advertised=%d)",
+             topo->n_perf, topo->n_eff, topo->hybrid_advertised ? 1 : 0);
+}
 
 /* ------------------------------------------------------------------ */
 /* sysfs helpers                                                       */
@@ -216,6 +408,8 @@ void sllm_topology_detect(sllm_topology * topo) {
 
     sllm_log(SLLM_LOG_DEBUG, "topology: %d logical cpus, %d cores, smt=%s",
              topo->n_cpus, topo->n_cores, topo->smt ? "yes" : "no");
+
+    classify_cores_cpuid(topo);
 }
 
 /* ------------------------------------------------------------------ */
@@ -296,6 +490,10 @@ static double probe_throughput(int cpu, size_t units) {
     return (double) units / (t1 - t0);
 }
 
+/*
+ * Samples per logical CPU, and the two independent halves used to check that
+ * the probe measured anything at all. Must be even.
+ */
 bool sllm_topology_calibrate(sllm_topology * topo, size_t work_units) {
     if (topo == NULL || topo->n_cpus <= 0) {
         return false;
@@ -304,82 +502,49 @@ bool sllm_topology_calibrate(sllm_topology * topo, size_t work_units) {
         work_units = 2000000;
     }
 
-    /* Pinning is optional. Without it the probe is still valid, just less
-     * controlled, so a refusal degrades the measurement rather than failing. */
-    const bool can_pin = (pin_to_cpu(0) == 0);
-
-    bool ok = true;
-    for (int i = 0; i < topo->n_cpus; ++i) {
-        double best = 0.0;
-        /* Three passes, keep the best: the scheduler can preempt us, and the
-         * fastest clean pass is the one that reflects the core rather than
-         * the noise around it. */
-        for (int attempt = 0; attempt < 3; ++attempt) {
-            const double t = probe_throughput(topo->cpus[i].id, work_units);
-            if (t > best) {
-                best = t;
-            }
-        }
-        topo->cpus[i].score = best;
-        if (best <= 0.0) {
-            ok = false;
-        }
-    }
-
-    if (!ok) {
-        return false;
-    }
-
-    double max_score = 0.0;
-    for (int i = 0; i < topo->n_cpus; ++i) {
-        if (topo->cpus[i].score > max_score) {
-            max_score = topo->cpus[i].score;
-        }
-    }
-    if (max_score <= 0.0) {
-        return false;
-    }
-
     /*
-     * Class a core by how far its throughput falls below the best core. On the
-     * target a full-rate core scores near 1.0 and a reduced-rate core near
-     * 0.5, so the 0.75 threshold separates them with a wide margin and is not
-     * balanced on a knife edge. Cores are classified by their primary
-     * hardware thread and the class is shared with their siblings, because an
-     * SMT sibling is the same core.
+     * Measurement only. This deliberately does NOT classify cores, set
+     * hybrid, or touch n_perf/n_eff. Those are hardware facts now, established
+     * once by sllm_topology_detect() from CPUID, and a load-dependent
+     * measurement must not be able to overwrite them.
+     *
+     * It fills score, which is a throughput observation about this machine at
+     * this moment, and is therefore not a topology fact and not stable. Callers
+     * that want a thread count from it must accept that.
+     *
+     * The median of the passes is taken rather than the best, so a single
+     * preempted pass cannot be read as a fast core. Even so the result is
+     * noisy on a virtualised host, which is the whole reason this is not
+     * allowed to classify.
      */
     for (int i = 0; i < topo->n_cpus; ++i) {
-        const double rel = topo->cpus[i].score / max_score;
-        topo->cpus[i].klass = (rel >= 0.75) ? SLLM_CORE_PERF : SLLM_CORE_EFFICIENCY;
+        double v[3];
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            v[attempt] = probe_throughput(topo->cpus[i].id, work_units);
+            if (v[attempt] <= 0.0) {
+                return false;
+            }
+        }
+        if (v[0] > v[1]) { const double t = v[0]; v[0] = v[1]; v[1] = t; }
+        if (v[1] > v[2]) { const double t = v[1]; v[1] = v[2]; v[2] = t; }
+        if (v[0] > v[1]) { const double t = v[0]; v[0] = v[1]; v[1] = t; }
+        topo->cpus[i].score = v[1];
     }
 
-    topo->n_perf = 0;
-    topo->n_eff  = 0;
-
-    /* Count distinct cores by class, via the primaries. */
+    double best = 0.0;
     for (int i = 0; i < topo->n_cpus; ++i) {
-        if (!topo->cpus[i].primary) {
-            continue;
-        }
-        if (topo->cpus[i].klass == SLLM_CORE_PERF) {
-            ++topo->n_perf;
-        } else {
-            ++topo->n_eff;
-        }
+        if (topo->cpus[i].score > best) { best = topo->cpus[i].score; }
+    }
+    if (best <= 0.0) {
+        return false;
+    }
+    for (int i = 0; i < topo->n_cpus; ++i) {
+        topo->cpus[i].score /= best;
     }
 
     topo->calibrated = true;
-    topo->hybrid = (topo->n_perf > 0 && topo->n_eff > 0);
-    (void) can_pin;
-
-    sllm_log(SLLM_LOG_INFO, "topology calibrated by measurement: %d perf cores, %d efficiency cores, hybrid=%s",
-             topo->n_perf, topo->n_eff, topo->hybrid ? "yes" : "no");
     return true;
 }
-
-/* ------------------------------------------------------------------ */
-/* placement planning                                                  */
-/* ------------------------------------------------------------------ */
 
 static int cmp_cpu(const void * a, const void * b) {
     const sllm_cpu * x = (const sllm_cpu *) a;
@@ -441,6 +606,10 @@ int sllm_topology_recommended_threads(const sllm_topology * topo, int ceiling) {
     return n;
 }
 
+bool sllm_topology_classes_known(const sllm_topology * topo) {
+    return topo != NULL && topo->core_type_available;
+}
+
 const char * sllm_core_class_name(sllm_core_class k) {
     switch (k) {
         case SLLM_CORE_PERF:       return "perf";
@@ -457,9 +626,24 @@ void sllm_topology_describe(const sllm_topology * topo, char * buf, size_t bufle
         buf[0] = '\0';
         return;
     }
+
+    /*
+     * Report core class availability explicitly. A bare "hybrid: no" is
+     * ambiguous between a genuinely homogeneous machine and one that would not
+     * tell us, and those two need very different treatment from a caller.
+     */
+    const char * class_str;
+    if (topo->core_type_available) {
+        class_str = topo->hybrid ? " (hybrid, CPUID.1A)"
+                                 : " (homogeneous, CPUID.1A)";
+    } else {
+        class_str = " (core class unavailable)";
+    }
+
     (void) snprintf(buf, buflen,
-        "%d logical cpus, %d cores, smt=%s, %s%s",
+        "%d logical cpus, %d cores, smt=%s, %s%s%s",
         topo->n_cpus, topo->n_cores, topo->smt ? "yes" : "no",
         topo->calibrated ? "calibrated" : "uncalibrated",
-        topo->hybrid ? " (hybrid)" : "");
+        class_str,
+        topo->hybrid_advertised ? "" : " [no hybrid hint from CPUID.7]");
 }

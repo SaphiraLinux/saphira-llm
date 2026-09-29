@@ -8,6 +8,11 @@ out/
 /saphira-llm
 /saphira-llm-test
 /saphira-llm-schedbench
+# Disposable diagnostic: prints per-CPU timing evidence for the calibration
+# claim in docs/PHASE6-BASELINE.md. The evidence is recorded in that document;
+# the binary is not, and saphira-llm-tgbench / saphira-llm-kernelbench remain
+# tracked by deliberate policy established in d96f361.
+/saphira-llm-topoprobe
 *.disasm
 *.funcs
 

@@ -140,3 +140,16 @@ kernelbench: $(KERNELBENCH_BIN)
 
 $(KERNELBENCH_BIN): $(KERNELBENCH_OBJ) $(LIBOBJ)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lm -lpthread
+
+# Topology classification diagnostic. Prints per-CPU scores, within-CPU spread
+# and the margin to the best, plus a threshold sweep, so the P/E classification
+# rule can be chosen from evidence instead of guessed.
+TOPOPROBE_SRC = bench/topo_probe.c
+TOPOPROBE_OBJ = $(TOPOPROBE_SRC:%.c=$(OBJDIR)/%.o)
+TOPOPROBE_BIN = saphira-llm-topoprobe
+
+.PHONY: topoprobe
+topoprobe: $(TOPOPROBE_BIN)
+
+$(TOPOPROBE_BIN): $(TOPOPROBE_OBJ) $(LIBOBJ)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lm -lpthread

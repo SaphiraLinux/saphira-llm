@@ -280,7 +280,11 @@ static void ref_dequant(sllm_ggml_type type, const void * src, float * dst, size
 
 TEST(ops_add_mul_match_the_scalar_definition) {
     for (size_t n = 0; n < 100; ++n) {
-        float a[128], b[128], got[128];
+        /* Zero-initialised, because n may be 0 and these are only filled for
+         * i < n. The kernels are passed n, so they only read that prefix, but
+         * leaving the tail indeterminate is a warning and a trap for the next
+         * reader who widens a bound. */
+        float a[128] = {0}, b[128] = {0}, got[128] = {0};
         for (size_t i = 0; i < n; ++i) { a[i] = frand(); b[i] = frand(); }
 
         sllm_add(got, a, b, n);
