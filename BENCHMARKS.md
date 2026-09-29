@@ -234,6 +234,50 @@ reproduction, so the fixtures are sound.
 3. **The FNV-1a hash** in each manifest is for diagnosing *why* a run differs.
    It is not a pass/fail criterion for saphira-llm.
 
+## I2_S golden vectors, Phase 3
+
+Captured with `tools/reference/capture_i2s_golden` from the pinned reference
+build, never from our code. `make test` re-derives every number below without
+the reference present.
+
+Two record types, because they gate different things.
+
+**Dequantisation.** Every element of four real tensors is dequantised and
+hashed, so the check covers ~46 million values without storing them:
+
+| Tensor | Elements | Scale | FNV-1a 64 |
+| --- | ---: | ---: | --- |
+| `blk.0.attn_q.weight` | 6,553,600 | 1.21885478 | `2c276a3373e90d1c` |
+| `blk.0.ffn_down.weight` | 17,694,720 | 2.16316128 | `c667847993a6b44f` |
+| `blk.15.ffn_gate.weight` | 17,694,720 | 2.17397785 | `6dbf54125319d5db` |
+| `blk.29.attn_output.weight` | 6,553,600 | 1.21885478 | `f9046f6f38744fd0` |
+
+**Kernels.** Real weights, a fixed synthetic activation, 512 rows per tensor.
+The reference's own `ggml_gemv_i2_i8_s` and `ggml_gemm_i2_i8_s` are recorded
+twice: once raw, and once with the epilogue applied, because the reference
+applies the epilogue to the GEMM's float output and we need both stages gated
+separately. The fixture also pins the activation scale and sum, since the
+reference takes an already-quantised row and our quantiser must reproduce it
+exactly or the comparison means nothing.
+
+| Tensor | n | Raw dots | Epilogue |
+| --- | ---: | --- | --- |
+| `blk.0.attn_q.weight` | 2560 | `0d1ef9ffb017d5b4` | `a50fab43d0735934` |
+| `blk.0.ffn_down.weight` | 6912 | `9f985628347a4518` | `f10a46ca0c634845` |
+| `blk.15.ffn_gate.weight` | 2560 | `8f9818bb12b01fe3` | `5bda4c205baa2bcf` |
+| `blk.29.attn_output.weight` | 2560 | `5bda4c205baa2bcf` | `11115974560096c9` |
+
+Each of these is checked four ways — our v3 kernel, our VNNI kernel, our scalar
+oracle, and our epilogue — and each must match the reference bit for bit. Two
+shapes are covered deliberately: n=2560 is 20 blocks of 128 and n=6912 is 54, so
+the tail and block-boundary paths are both exercised on real data.
+
+The gate is exact equality, deliberately. This is integer arithmetic on small
+domains with a single documented epilogue, so there is no reduction order to
+argue about and nothing to gain from a tolerance. The measured-tolerance
+argument in the parity gate above applies to float accumulation across a
+30-layer forward pass, which does not exist yet.
+
 ## Reproducing
 
 ```sh

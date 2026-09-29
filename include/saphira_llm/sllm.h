@@ -17,6 +17,7 @@
 #include <saphira_llm/thread.h>
 #include <saphira_llm/quant.h>
 #include <saphira_llm/ops.h>
+#include <saphira_llm/i2s_gemm.h>
 
 #define SLLM_VERSION_MAJOR 0
 #define SLLM_VERSION_MINOR 1

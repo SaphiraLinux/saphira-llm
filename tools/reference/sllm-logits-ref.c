@@ -305,6 +305,7 @@ int main(int argc, char ** argv) {
 
     /* ---- greedy continuation ---- */
     llama_token next = 0;
+    float next_logit = 0.0f;
     {
         const float * lg = llama_get_logits_ith(ctx, n_tok - 1);
         if (!lg) {
@@ -317,13 +318,39 @@ int main(int argc, char ** argv) {
             }
         }
         next = best;
+        next_logit = lg[best];
     }
     if (opts.n_predict > 0) {
         fprintf(f, "\ngreedy\n");
         const int total = n_tok + opts.n_predict;
         int pos = n_tok;
         const double t_gen0 = now_ms();
+
+        /*
+         * Emit the token, then consume it.
+         *
+         * The previous version decoded `next` and then printed the argmax of
+         * the logits that decode produced, labelling it with the position of
+         * the token just consumed. That printed the prediction for position
+         * pos+1 under the label pos, and it never printed the first generated
+         * token at all, because that one came from the prompt decode. The
+         * .f32 logits and their FNV hash were unaffected -- those are written
+         * above this block -- but the listing was off by one, and a listing
+         * that mislabels its positions is worse than no listing.
+         */
         while (pos < total) {
+            char piece[256];
+            int np = llama_token_to_piece(vocab, next, piece, sizeof(piece), 0, false);
+            if (np < 0) {
+                np = 0;
+            }
+            piece[np] = '\0';
+            for (int k = 0; k < np; ++k) {
+                if (piece[k] == '\n') { piece[k] = ' '; }
+            }
+            fprintf(f, "  %4d  %8d  %.6f  %s\n", pos, (int) next, next_logit, piece);
+
+            /* Consume it at this position; that produces position pos+1. */
             llama_memory_t mem = llama_get_memory(ctx);
             llama_memory_seq_rm(mem, 0, pos, pos);
             llama_batch gb = llama_batch_init(1, 0, 1);
@@ -340,6 +367,7 @@ int main(int argc, char ** argv) {
                 die("llama_decode failed during generation");
             }
             llama_batch_free(gb);
+
             const float * lg = llama_get_logits_ith(ctx, 0);
             if (!lg) {
                 die("no logits during generation");
@@ -351,16 +379,7 @@ int main(int argc, char ** argv) {
                 }
             }
             next = best;
-            char piece[256];
-                    int np = llama_token_to_piece(vocab, next, piece, sizeof(piece), 0, false);
-            if (np < 0) {
-                np = 0;
-            }
-            piece[np] = '\0';
-            for (int k = 0; k < np; ++k) {
-                if (piece[k] == '\n') { piece[k] = ' '; }
-            }
-            fprintf(f, "  %4d  %8d  %.6f  %s\n", pos, (int) next, lg[best], piece);
+            next_logit = lg[best];
             ++pos;
         }
         const double t_gen1 = now_ms();

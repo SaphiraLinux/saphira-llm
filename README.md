@@ -76,6 +76,7 @@ worse than no check.
 | BENCHMARKS.md | measured reference baselines and the optimisation targets |
 | PROVENANCE.md | every upstream revision and licence consulted |
 | docs/CUDA-FEASIBILITY.md | why there is no Saphira CUDA path |
+| docs/EVIDENCE.md | every defect found, and why the gate missed it |
 | tools/reference/README.md | the reference-only golden-vector tooling |
 | tests/golden/README.md | the fixtures and the rules for regenerating them |
 

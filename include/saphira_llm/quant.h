@@ -64,15 +64,20 @@ sllm_status sllm_dequant_row(sllm_ggml_type type, const void * src,
  *   byte_in_chunk = k % 32
  *   chunk         = (k / 128) % 32
  *   byte_offset   = chunk * 32 + byte_in_chunk
- *   field         = (k % 128) / 32        (which 2-bit field of that byte)
+ *   field         = (k % 128) / 32
  *
- * so a byte holds four weights 32 apart rather than four consecutive ones.
- * Reading it as consecutive would produce plausible, entirely wrong weights,
- * which is the same failure mode as trusting the ggml type table for the size.
+ * so a byte holds four weights 32 apart rather than four consecutive ones, and
+ * field a is at bit shift 6 - 2a, meaning field 0 is the TOP of the byte.
+ * Both details were wrong in the first version of this reader, and the first
+ * golden test could not catch either because it shared the same assumption.
+ * Reading it as consecutive, or reading the fields bottom-up, produces
+ * plausible entirely wrong weights -- the same failure mode as trusting the
+ * ggml type table for the size.
  */
 uint8_t sllm_i2s_code(const uint8_t * packed, size_t k);
 
-/* Codes are 0, 1, 2 for ternary -1, 0, +1. */
+/* Codes are 0, 1, 2 for ternary -1, 0, +1. Code 3 is unused and dequantises
+ * to zero, matching the reference table. */
 #define SLLM_I2S_BIAS 1
 
 /*
@@ -81,8 +86,22 @@ uint8_t sllm_i2s_code(const uint8_t * packed, size_t k);
  */
 float sllm_i2s_scale(const void * packed, size_t n_elements);
 
-/* Expand one row of I2_S codes as floats, still without the scale. */
+/* Expand one row of I2_S codes as floats {0,1,2}, still without the scale.
+ * This is what the GEMM consumes. */
 void sllm_i2s_row(const void * packed, float * dst, size_t n);
+
+/*
+ * Expand one row as the signed, scaled ternary value, using the reference's
+ * own table {-1, 0, +1, 0} so that an out-of-range code 3 yields zero rather
+ * than 2 * scale.
+ *
+ * This is what the reference's dequantize_row_i2_s returns, and the golden
+ * vectors in tests/golden/i2s-reference.txt are that function's output on real
+ * tensors. The two paths are kept separate on purpose: the kernel wants raw
+ * codes, this wants the semantic value, and conflating them is how a sign
+ * error becomes a plausible number.
+ */
+void sllm_i2s_dequant(const void * packed, float * dst, size_t n);
 
 /* The scale for an I2_S row, given the row's element count. */
 static inline float sllm_i2s_row_scale(const void * row, size_t n) {

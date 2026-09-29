@@ -81,8 +81,22 @@ uint8_t sllm_i2s_code(const uint8_t * packed, size_t k) {
     const size_t byte_in_chunk = inblk % 32u;
     const unsigned field = (unsigned) ((inblk % 128u) / 32u);
 
+    /*
+     * Field 0 is the TOP of the byte, not the bottom.
+     *
+     * The converter packs (q[:,0,:] << 6) | (q[:,1,:] << 4) | (q[:,2,:] << 2)
+     * | q[:,3,:] over a (4, 32) reshape, so field a sits at shift 6 - 2a.
+     * Reading it as shift 2a reverses the four fields in every byte.
+     *
+     * This was wrong in the first version, and the golden test did not catch
+     * it, because that test built the packed buffer and read it back with the
+     * same inverted assumption. A test that shares its assumption with the code
+     * under test cannot detect that code is wrong. The permanent fix is a
+     * golden vector captured from the reference's own dequantiser on a real
+     * tensor -- see tests/golden/i2s-reference.txt.
+     */
     const uint8_t byte = packed[block * I2S_BLOCK_BYTES + chunk * I2S_CHUNK_BYTES + byte_in_chunk];
-    return (uint8_t) ((byte >> (field * 2u)) & 0x3u);
+    return (uint8_t) ((byte >> (6u - 2u * field)) & 0x3u);
 }
 
 float sllm_i2s_scale(const void * packed, size_t n_elements) {
@@ -94,10 +108,40 @@ float sllm_i2s_scale(const void * packed, size_t n_elements) {
 void sllm_i2s_row(const void * packed, float * dst, size_t n) {
     const uint8_t * p = (const uint8_t *) packed;
     for (size_t k = 0; k < n; ++k) {
-        /* The raw code, not the signed value. The scale and the sign live in
-         * the GEMM epilogue upstream, and folding them in here would diverge
-         * from the reference the parity gate compares against. */
+        /*
+         * The raw code {0,1,2}, not the signed value.
+         *
+         * The kernel needs the codes, because dpbusd takes its first operand
+         * unsigned and that is exactly what non-negative codes are for. The
+         * sign and the scale live in the GEMM epilogue, which is where
+         * upstream applies them, so folding them in here would diverge from
+         * the reference the parity gate compares against.
+         *
+         * Use sllm_i2s_dequant for the signed, scaled value.
+         */
         dst[k] = (float) sllm_i2s_code(p, k);
+    }
+}
+
+/*
+ * The reference's own map, verbatim:
+ *   static const float map2bit[4] = { -1.0f, 0.0f, 1.0f, 0.0f };
+ *
+ * Code 3 is not -2 or +2: it maps to ZERO. The converter only ever emits
+ * 0, 1 and 2, so this never fires on a well-formed model, which is why the
+ * 46-million-element cross-check passed even though the first version of this
+ * function used code - 1 and would have returned 2 * scale for a code of 3.
+ *
+ * Reproduced rather than tidied. A cleaner formula would be wrong on exactly
+ * the inputs nobody tests by hand.
+ */
+static const float sllm_i2s_map[4] = { -1.0f, 0.0f, 1.0f, 0.0f };
+
+void sllm_i2s_dequant(const void * packed, float * dst, size_t n) {
+    const float scale = sllm_i2s_scale(packed, n);
+    const uint8_t * p = (const uint8_t *) packed;
+    for (size_t k = 0; k < n; ++k) {
+        dst[k] = scale * sllm_i2s_map[sllm_i2s_code(p, k)];
     }
 }
 

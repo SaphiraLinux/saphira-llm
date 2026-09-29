@@ -95,7 +95,7 @@ bad-layout, known-but-unsupported versus not-a-type.
 | 0 | provenance, reference build, measured baseline, golden vectors | done |
 | 1 | container, ISA dispatch, first kernel, baseline proof | done |
 | 2 | tensor layer, vector kernels, threading, topology-aware affinity | done: no full-occupancy regression on representative workloads |
-| 3 | BitNet I2_S correctness: exact ports plus a scalar reference | golden-vector match |
+| 3 | BitNet I2_S correctness: exact ports plus a scalar reference | done: dequant over 46M real elements, and GEMV/GEMM matching the reference on real weights across two shapes |
 | 3.5 | gpt2 BPE tokenizer: load, encode, decode, golden vectors | tokeniser vectors match upstream |
 | 4 | forward pass and generation | **token-identical to the reference at t=0** |
 | 5 | chunked attention, KV save/load, state restore | mask correct across chunk boundaries |
@@ -106,6 +106,12 @@ bad-layout, known-but-unsupported versus not-a-type.
 
 Phases 0 through 8 are the critical path and are CPU-only. Phase 9 is
 deliberately last and deliberately optional; see docs/CUDA-FEASIBILITY.md.
+
+Defects found in each phase, and the ones that produced a confident wrong
+answer rather than a crash, are recorded in docs/EVIDENCE.md. It is written to
+be read by whoever adds the next gate, because the recurring lesson is that a
+gate which cannot fail is worse than no gate — one of ours did, and it cost
+more time than the bug it was hiding.
 
 ### The parity gate
 
@@ -194,3 +200,25 @@ The x86 kernel accumulates in int16 lanes through the *saturating*
 avoids it entirely by accumulating straight to int32, which is the concrete
 performance argument for Phase 6 and the reason the dispatch pattern was built
 in Phase 1.
+
+Note that VNNI's unsigned-first operand is *correct* here and was a bug in
+Phase 1. I2_S weight codes are non-negative, so the weight operand is
+genuinely unsigned; the bias-and-correction the signed int8 kernel needs would
+break parity if carried over. The dispatch was built in Phase 1 to make the
+Phase 3 choice obvious, and the two phases are deliberately not merged.
+
+### The layout, as verified
+
+Within a 128-element block, element `j` is field `j / 32` of byte `j % 32`, at
+bit shift `6 - 2 * (j / 32)`. A 1024-byte block is 4096 weights. The code map
+is `{-1, 0, +1, 0}` — code 3 is zero, not -1.
+
+Both of these are permutations or near-misses of the naive reading, so both
+produce plausible weights rather than an error. Neither is recoverable by
+inspection; both were settled by comparing every element of a real tensor
+against the reference. See docs/EVIDENCE.md.
+
+`quantize_i2_s` in the pinned reference uses a *different*, sequential layout
+and contradicts the dequantiser beside it. The reference is internally
+inconsistent here and the model on disk arbitrates: the transposed layout
+reproduces the reference's own dequantisation exactly. We follow the model.

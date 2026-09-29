@@ -28,27 +28,6 @@ static float frand(void) {
     return ((float) ((g_rng >> 8) & 0xffff) / 32768.0f) - 1.0f;
 }
 
-/* Bit-exact float comparison. Casting a float to an integer is undefined when
- * the value is negative or out of range, which UBSan flagged here: these
- * kernels are compared on values that are routinely negative. */
-static int same_bits(float x, float y) {
-    return memcmp(&x, &y, sizeof(float)) == 0;
-}
-
-#define CHECK_SAME_BITS(got, want) do { \
-    sllm_tests_run++; \
-    if (!same_bits((got), (want))) { \
-        sllm_tests_failed++; \
-        fprintf(stderr, "  FAIL %s:%d: got %.9g want %.9g\n", \
-                __FILE__, __LINE__, (double) (got), (double) (want)); \
-    } \
-} while (0)
-
-
-/* ------------------------------------------------------------------ */
-/* f16                                                                 */
-/* ------------------------------------------------------------------ */
-
 TEST(fp16_round_trip_covers_the_awkward_values) {
     /* Exact, special and subnormal values. A conversion that is wrong for
      * subnormals is wrong for real model data, and quietly so. */
@@ -95,35 +74,30 @@ TEST(fp16_round_trip_covers_the_awkward_values) {
 /* I2_S                                                                */
 /* ------------------------------------------------------------------ */
 
-TEST(i2s_layout_matches_the_reference_definition) {
+TEST(i2s_layout_matches_the_converter_definition) {
     /*
-     * Build a packed block whose code at weight k is k % 3, using the layout
-     * this implementation claims, then read it back. If the read disagrees
-     * with the write anywhere, the layout description is wrong, and the real
-     * model would be decoded into confident nonsense.
+     * This test used to derive the packing from sllm_i2s_code, which made it
+     * structurally unable to detect that the reader had the four two-bit fields
+     * backwards -- and it did not detect it, for two phases. It now packs with
+     * sllm_pack_i2s_like_converter, written from utils/convert-hf-to-gguf-bitnet.py
+     * rather than from the reader, so the two can disagree.
      */
     enum { N = 8192 };   /* two 4096-weight blocks */
-    uint8_t * packed = calloc(N / 4 + 32, 1);
-    CHECK(packed != NULL);
-    if (packed == NULL) { return; }
+    uint8_t * codes  = malloc(N);
+    uint8_t * packed = malloc(N / 4 + 32);
+    float * row = malloc(N * sizeof(float));
+    CHECK(codes && packed && row);
+    if (!codes || !packed || !row) { free(codes); free(packed); free(row); return; }
 
-    for (size_t k = 0; k < N; ++k) {
-        const size_t block = k / 4096u;
-        const size_t inblk = k % 4096u;
-        const size_t chunk = (inblk / 128u) % 32u;
-        const size_t byte_in_chunk = inblk % 32u;
-        const unsigned field = (unsigned) ((inblk % 128u) / 32u);
-        uint8_t * p = packed + block * 1024u + chunk * 32u + byte_in_chunk;
-        *p = (uint8_t) ((*p & ~(uint8_t) (3u << (field * 2u))) |
-                        (uint8_t) (((uint8_t) (k % 3u)) << (field * 2u)));
-    }
+    for (size_t k = 0; k < N; ++k) { codes[k] = (uint8_t) ((k * 7 + k / 128) % 3); }
+    sllm_pack_i2s_like_converter(packed, codes, N);
 
     int bad = 0;
     for (size_t k = 0; k < N; ++k) {
-        if (sllm_i2s_code(packed, k) != (uint8_t) (k % 3u)) {
+        if (sllm_i2s_code(packed, k) != codes[k]) {
             if (bad < 4) {
-                fprintf(stderr, "  FAIL i2s weight %zu: got %u want %zu\n",
-                        k, sllm_i2s_code(packed, k), k % 3u);
+                fprintf(stderr, "  FAIL i2s weight %zu: got %u want %u\n",
+                        k, sllm_i2s_code(packed, k), codes[k]);
             }
             ++bad;
         }
@@ -134,17 +108,11 @@ TEST(i2s_layout_matches_the_reference_definition) {
         fprintf(stderr, "  FAIL i2s layout: %d of %d weights misread\n", bad, N);
     }
 
-    /* The row reader must agree with the element reader. */
-    float * row = malloc(N * sizeof(float));
-    CHECK(row != NULL);
-    if (row != NULL) {
-        sllm_i2s_row(packed, row, N);
-        for (size_t k = 0; k < N; k += 97) {
-            CHECK_SAME_BITS(row[k], (float) (k % 3u));
-        }
-        free(row);
+    sllm_i2s_row(packed, row, N);
+    for (size_t k = 0; k < N; k += 97) {
+        CHECK_SAME_BITS(row[k], (float) codes[k]);
     }
-    free(packed);
+    free(codes); free(packed); free(row);
 }
 
 TEST(i2s_scale_sits_after_the_packed_weights) {
@@ -462,7 +430,7 @@ TEST(ops_get_rows_gathers_and_clamps_bad_indices) {
 void sllm_test_ops(void) {
     printf("ops\n");
     RUN(fp16_round_trip_covers_the_awkward_values);
-    RUN(i2s_layout_matches_the_reference_definition);
+    RUN(i2s_layout_matches_the_converter_definition);
     RUN(i2s_scale_sits_after_the_packed_weights);
     RUN(dequant_row_matches_a_scalar_reference);
     RUN(ops_add_mul_match_the_scalar_definition);

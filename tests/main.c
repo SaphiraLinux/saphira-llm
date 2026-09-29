@@ -13,6 +13,7 @@ void sllm_test_isa(void);
 void sllm_test_gguf(void);
 void sllm_test_thread(void);
 void sllm_test_ops(void);
+void sllm_test_i2s(void);
 
 int sllm_tests_run    = 0;
 int sllm_tests_failed = 0;
@@ -26,6 +27,7 @@ int main(void) {
     sllm_test_gguf();
     sllm_test_thread();
     sllm_test_ops();
+    sllm_test_i2s();
 
     printf("\n%d checks, %d failed\n", sllm_tests_run, sllm_tests_failed);
     return sllm_tests_failed == 0 ? 0 : 1;
