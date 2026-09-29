@@ -445,6 +445,93 @@ content, so stopping at one is unambiguous.
 
 ---
 
+## Phase 4
+
+### The two RoPE layouts were swapped, and a golden vector could not see it
+
+NEOX and NORMAL had their pairings exchanged from Phase 2 through Phase 4.
+
+    NEOX   pairs the two halves:  (k, k + n/2)
+    NORMAL pairs adjacent pairs: (2k, 2k+1)
+
+From ggml's `rotate_pairs`, called with `(n_dims, n_dims/2)` for NEOX and with
+`(n_dims, 1, scale=1)` for NORMAL. BitNet is NEOX, so every Q and K vector in
+the model was rotated in the wrong pairing.
+
+What makes this one worth writing down at length is that it **passed every test
+for two phases.** The Phase 2 RoPE golden vector asserts the rotation preserves
+each pair's norm. Both layouts preserve the norms of whatever pairs they
+rotate, so swapping them is a norm-preserving relabelling of the entire
+vector: every element is individually plausible, and the relative phase
+between dimensions -- which is the entire content of a positional encoding --
+is destroyed.
+
+The property being tested was simply not a property that distinguishes the two
+implementations. A golden vector is only as good as the property it asserts,
+and "is a rotation" does not survive a question of *which* rotation.
+
+The fix is in the pairing, and the test now asserts three things it did not
+before: the norm of each pair **as that layout defines it**, that the
+rotation actually happened at a nonzero position, and that the two layouts
+produce **different** output from the same input. That last one is the
+assertion that would have caught the swap immediately -- two encodings that
+claim to differ and produce identical bytes means one is implemented as the
+other.
+
+It was found by the Phase 4 logit gate, which is the first thing in this
+project that compares real end-to-end output against the reference. Everything
+before it was a property test.
+
+The symptom, for the record: tokenisation matched exactly, the argmax matched
+at 5 of 6 positions, and the logits were wrong by 0.4 to 1.0. Close enough to
+look like float noise, and not float noise at all.
+
+### A test's success message that reported success regardless
+
+Already recorded in Phase 3.5, and it happened again here in a new form: the
+forward test's completion line was gated on the number of cases compared rather
+than on the comparison passing, so it would have printed "all token-identical"
+with every case failing. The failing count is captured at entry and compared
+afterwards now.
+
+### A hardcoded prompt length that included the NUL
+
+The greedy-continuation test passed `"The capital of France is", 25` -- and the
+string is 24 characters, so the tokenizer received a trailing NUL byte. That
+changed the last prompt token and made all 8 continuation tokens disagree with
+the reference, which presented as a forward-pass bug and was entirely a test
+bug. `strlen` is used now, with a note saying why.
+
+### `sllm_ctx_reset` did not reset
+
+The KV cache is read up to `n_past` at every position and is never zeroed on
+write, so a context reused without a reset attends to the previous
+conversation's keys and values. The function existed, was called, and did
+nothing; its comment described clearing the live prefix, which it did not do.
+
+This is the same shape as the Phase 2 caller-starvation bug: correct output,
+no effect, and invisible unless you happen to reuse a context, which is the
+case a test is least likely to cover. The context now tracks `n_past`, the
+reset clears the live prefix, the forward pass refuses to rewind a position,
+and there is a test that generates twice around a reset and requires identical
+ids.
+
+### The float gap, and why the token gate is thinner than it looks
+
+Our logits sit 0.3 to 0.9 from the reference's. The tightest argmax margin
+across the two frozen prompts is 0.0427. **The deviation is larger than the
+smallest margin**, so token-identity over 16 positions is a real result and not
+a robust one; a slightly different prompt could flip an argmax, and in the
+generated continuation one already does, at the third token.
+
+That is the expected consequence of a reduction order we chose rather than
+copied, and the Phase 4 gate anticipates it: the hard gate is the argmax, the
+measured gate is the margin, and the two are reported together. Closing the gap
+means matching ggml's float reduction order in the attention and the lm_head,
+which is Phase 6 work with a real payoff and is not attempted here.
+
+---
+
 ## What these have in common
 
 Four of the kernel defects above — SiLU, NeoX RoPE, rms_norm, Q4_0, and the

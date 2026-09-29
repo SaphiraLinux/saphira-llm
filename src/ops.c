@@ -233,13 +233,21 @@ void sllm_rope_inplace(float * x, size_t n_rot, int32_t pos,
     /*
      * Two layouts, and they are not interchangeable:
      *
-     *   NEOX   pairs adjacent elements: (0,1), (2,3), (4,5), ...
-     *   NORMAL pairs the two halves:      (0, h), (1, h+1), ...
+     *   NEOX   pairs the two halves:  (0, h), (1, h+1), ...
+     *   NORMAL pairs adjacent pairs: (0,1), (2,3), (4,5), ...
      *
-     * where h = n_rot/2. Mixing them up does not crash and does not look
-     * wrong in any single element; it destroys the relative phase between
-     * dimensions, which is the entire content of the encoding. The golden
-     * vectors check the rotation preserves each pair's norm, which catches it.
+     * where h = n_rot/2. From ggml's rotate_pairs, called with
+     * (n_dims, n_dims/2) for NEOX and (n_dims, 1, scale=1) for NORMAL:
+     * NEOX reads src[ic] against src[ic + n/2] with ic = i0/2, NORMAL reads
+     * src[i0] against src[i0+1] with i0 stepping by two.
+     *
+     * These two were swapped here, and the golden vector could not see it: the
+     * test asserts the rotation preserves each pair's norm, and BOTH pairings
+     * preserve their pairs' norms perfectly. It is a norm-preserving relabelling
+     * of the whole vector, so every element looks right and the relative phase
+     * between dimensions -- which is the entire content of the encoding -- is
+     * destroyed. The only way to catch it is to compare against the reference
+     * on real data, which is what the Phase 4 logit gate is for.
      *
      * Note the argument order. The reference computes theta_i = base^(-2i/n)
      * and then scales the position, so the equivalent form is to divide theta
@@ -249,8 +257,8 @@ void sllm_rope_inplace(float * x, size_t n_rot, int32_t pos,
     const size_t half = n_rot / 2;
 
     for (size_t k = 0; k < half; ++k) {
-        const size_t a = (type == SLLM_ROPE_NEOX) ? (k * 2) : k;
-        const size_t b = (type == SLLM_ROPE_NEOX) ? (k * 2 + 1) : (k + half);
+        const size_t a = (type == SLLM_ROPE_NEOX) ? k : (k * 2);
+        const size_t b = (type == SLLM_ROPE_NEOX) ? (k + half) : (k * 2 + 1);
         if (b >= n_rot) {
             continue;
         }

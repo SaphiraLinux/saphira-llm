@@ -15,6 +15,7 @@ void sllm_test_thread(void);
 void sllm_test_ops(void);
 void sllm_test_i2s(void);
 void sllm_test_tokenizer(void);
+void sllm_test_forward(void);
 
 int sllm_tests_run    = 0;
 int sllm_tests_failed = 0;
@@ -30,6 +31,7 @@ int main(void) {
     sllm_test_ops();
     sllm_test_i2s();
     sllm_test_tokenizer();
+    sllm_test_forward();
 
     printf("\n%d checks, %d failed\n", sllm_tests_run, sllm_tests_failed);
     return sllm_tests_failed == 0 ? 0 : 1;

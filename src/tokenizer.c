@@ -511,6 +511,15 @@ sllm_pre_type sllm_tok_pre_type(const sllm_tok * t) {
     return t != NULL ? t->pre_type : SLLM_PRE_UNSUPPORTED;
 }
 
+const char * sllm_tok_pre_type_name(sllm_pre_type pre) {
+    switch (pre) {
+        case SLLM_PRE_UNSET:       return "default";
+        case SLLM_PRE_GPT2:        return "gpt-2";
+        case SLLM_PRE_UNSUPPORTED: return "unsupported";
+        default:                   return "unknown";
+    }
+}
+
 const char * sllm_tok_pre_declared(const sllm_tok * t) {
     return t != NULL ? t->pre_declared : "";
 }

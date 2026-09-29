@@ -76,6 +76,9 @@ bool sllm_tok_is_special(const sllm_tok * tok, int32_t id);
 /* The pre-tokeniser this model resolved to, for reporting and for tests. */
 sllm_pre_type sllm_tok_pre_type(const sllm_tok * tok);
 
+/* A short name for a pre-type, for logs and diagnostics. */
+const char * sllm_tok_pre_type_name(sllm_pre_type pre);
+
 /*
  * The `tokenizer.ggml.pre` value the model declared, or "" when the key is
  * absent. The distinction matters: "" here means DEFAULT, which is NOT GPT-2.

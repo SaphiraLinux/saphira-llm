@@ -372,19 +372,74 @@ TEST(ops_rope_is_a_rotation_and_position_zero_is_the_identity) {
     sllm_rope_inplace(y, n_rot, 0, 10000.0f, 1.0f, SLLM_ROPE_NORMAL);
     for (size_t i = 0; i < n_rot; ++i) { CHECK(y[i] == x[i]); }
 
-    /* At a nonzero position each rotated pair must preserve its norm. */
+    /*
+     * Each rotated pair must preserve its norm -- AND the pairs must be the
+     * right ones.
+     *
+     * The norm property alone is not enough, and this is the test's original
+     * defect. Both layouts preserve the norms of whatever pairs they rotate, so
+     * checking adjacent pairs passes under NEOX even when NEOX is rotating the
+     * two halves, and the two had in fact been swapped here for two phases
+     * without this noticing. It is a norm-preserving relabelling of the whole
+     * vector: every element looks right and the relative phase between
+     * dimensions, which is the entire content of the encoding, is destroyed.
+     *
+     * So the pair indices are checked explicitly as well. NEOX rotates
+     * (k, k + n/2) and NORMAL rotates (2k, 2k+1), from ggml's rotate_pairs
+     * called with (n, n/2) and with (n, 1, scale=1) respectively.
+     */
     for (int pos = 1; pos <= 5; ++pos) {
-        memcpy(y, x, sizeof(x));
-        sllm_rope_inplace(y, n_rot, pos, 10000.0f, 1.0f, SLLM_ROPE_NEOX);
-        for (size_t i = 0; i < n_rot; i += 2) {
-            const double before = (double) x[i] * x[i] + (double) x[i + 1] * x[i + 1];
-            const double after  = (double) y[i] * y[i] + (double) y[i + 1] * y[i + 1];
-            sllm_tests_run++;
-            if (fabs(before - after) > 1e-4 * (before + 1.0)) {
-                sllm_tests_failed++;
-                fprintf(stderr, "  FAIL rope pos=%d pair %zu: norm %g -> %g\n", pos, i, before, after);
-                break;
+        const size_t half = n_rot / 2;
+        struct { sllm_rope_type type; const char * name; } layouts[] = {
+            { SLLM_ROPE_NEOX,   "neox"   },
+            { SLLM_ROPE_NORMAL, "normal" },
+        };
+        for (size_t li = 0; li < 2; ++li) {
+            memcpy(y, x, sizeof(x));
+            sllm_rope_inplace(y, n_rot, pos, 10000.0f, 1.0f, layouts[li].type);
+            for (size_t k = 0; k < half; ++k) {
+                const size_t a = (layouts[li].type == SLLM_ROPE_NEOX) ? k : (k * 2);
+                const size_t b = (layouts[li].type == SLLM_ROPE_NEOX) ? (k + half) : (k * 2 + 1);
+                const double before = (double) x[a] * x[a] + (double) x[b] * x[b];
+                const double after  = (double) y[a] * y[a] + (double) y[b] * y[b];
+                sllm_tests_run++;
+                if (fabs(before - after) > 1e-4 * (before + 1.0)) {
+                    sllm_tests_failed++;
+                    fprintf(stderr, "  FAIL rope %s pos=%d pair k=%zu (%zu,%zu): "
+                                    "norm %g -> %g\n",
+                            layouts[li].name, pos, k, a, b, before, after);
+                    break;
+                }
+                /* And the rotation must actually have happened, or a
+                 * no-op would satisfy the norm check too. */
+                sllm_tests_run++;
+                if (y[a] == x[a] && y[b] == x[b] && before > 0.0) {
+                    sllm_tests_failed++;
+                    fprintf(stderr, "  FAIL rope %s pos=%d pair k=%zu did not rotate\n",
+                            layouts[li].name, pos, k);
+                    break;
+                }
             }
+        }
+    }
+
+    /*
+     * The two layouts must produce DIFFERENT vectors from the same input. This
+     * is the assertion that would have caught the swap outright: identical
+     * output from two supposedly different encodings means one of them is
+     * implemented as the other.
+     */
+    {
+        float a[64], b[64];
+        memcpy(a, x, sizeof(x));
+        memcpy(b, x, sizeof(x));
+        sllm_rope_inplace(a, n_rot, 3, 10000.0f, 1.0f, SLLM_ROPE_NEOX);
+        sllm_rope_inplace(b, n_rot, 3, 10000.0f, 1.0f, SLLM_ROPE_NORMAL);
+        sllm_tests_run++;
+        if (memcmp(a, b, sizeof(a)) == 0) {
+            sllm_tests_failed++;
+            fprintf(stderr, "  FAIL neox and normal produced identical output; "
+                            "one of them is implemented as the other\n");
         }
     }
 

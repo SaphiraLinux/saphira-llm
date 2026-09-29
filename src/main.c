@@ -6,18 +6,26 @@
  * Licensed under the MIT License — see LICENSE.
  * Part of Saphira Linux (https://saphira.vm2.uk).
  *
- * Phase 1 scope: the container layer and ISA dispatch. Model loading,
- * tokenisation and generation arrive in later phases; the interface is fixed
- * now so the user-facing shape does not churn.
+ * The interface was fixed in Phase 1 so the user-facing shape does not churn;
+ * model loading, tokenisation and greedy generation have since arrived.
  */
 
+#include <saphira_llm/forward.h>
 #include <saphira_llm/sllm.h>
+#include <saphira_llm/tokenizer.h>
 #include <saphira_llm/thread.h>
 #include <saphira_llm/topology.h>
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+
+static struct timespec now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts;
+}
 
 static void usage(FILE * out) {
     fprintf(out,
@@ -48,6 +56,8 @@ int main(int argc, char ** argv) {
     int  n_threads = 0;      /* 0 means "use the recommendation" */
     bool no_place   = false;
     bool calibrate  = true;
+    int32_t ctx_size = 0;     /* 0 = the model's trained context */
+    int32_t n_predict = 0;   /* 0 = the default continuation length */
 
     for (int i = 1; i < argc; ++i) {
         const char * a = argv[i];
@@ -113,17 +123,35 @@ int main(int argc, char ** argv) {
             continue;
         }
 
-        /* Options accepted for interface stability but not yet implemented.
-         * Rejecting them loudly beats silently ignoring a flag the user
-         * believes is having an effect. */
-        if (!strcmp(a, "-c") || !strcmp(a, "--ctx") ||
-            !strcmp(a, "--temp") ||
-            !strcmp(a, "-n") || !strcmp(a, "--n-predict") ||
-            !strcmp(a, "--seed")) {
+        if (!strcmp(a, "-c") || !strcmp(a, "--ctx")) {
+            if (!v) { fprintf(stderr, "%s needs a value\n", a); return 2; }
+            ctx_size = (int32_t) atoi(v);
+            if (ctx_size < 1) {
+                fprintf(stderr, "%s must be at least 1, got '%s'\n", a, v);
+                return 2;
+            }
+            i++;
+            continue;
+        }
+        if (!strcmp(a, "-n") || !strcmp(a, "--n-predict")) {
+            if (!v) { fprintf(stderr, "%s needs a value\n", a); return 2; }
+            n_predict = (int32_t) atoi(v);
+            if (n_predict < 1) {
+                fprintf(stderr, "%s must be at least 1, got '%s'\n", a, v);
+                return 2;
+            }
+            i++;
+            continue;
+        }
+
+        /* Still accepted for interface stability but not implemented. Rejecting
+         * them loudly beats silently ignoring a flag the user believes is
+         * having an effect. */
+        if (!strcmp(a, "--temp") || !strcmp(a, "--seed")) {
             if (!v) { fprintf(stderr, "%s needs a value\n", a); return 2; }
             fprintf(stderr,
                 "saphira-llm: %s is accepted but not implemented yet "
-                "(arrives with model execution)\n", a);
+                "(sampling beyond greedy arrives with a later phase)\n", a);
             return 2;
         }
 
@@ -226,20 +254,135 @@ int main(int argc, char ** argv) {
         sllm_log(SLLM_LOG_INFO, "architecture: %s", arch);
     }
 
-    /*
-     * Model execution is not built yet. Saying so plainly is better than
-     * exiting zero, and better than pretending to generate text.
-     */
     if (prompt == NULL) {
-        sllm_log(SLLM_LOG_INFO,
-            "container parsed; model execution arrives in a later phase "
-            "(no prompt given, nothing to run)");
-    } else {
-        sllm_log(SLLM_LOG_INFO,
-            "container parsed; model execution arrives in a later phase "
-            "(prompt accepted but not yet run)");
+        sllm_log(SLLM_LOG_INFO, "container parsed; nothing to run (no -p)");
+        sllm_gguf_close(&g);
+        sllm_pool_destroy(pool);
+        return 0;
     }
 
+    /* --- model, tokenizer, context --- */
+    sllm_model * model_h = NULL;
+    sllm_status rc = sllm_model_load(&g, &model_h);
+    if (rc != SLLM_OK) {
+        fprintf(stderr, "saphira-llm: cannot load this model: %s\n",
+                sllm_status_string(rc));
+        sllm_gguf_close(&g);
+        sllm_pool_destroy(pool);
+        return 1;
+    }
+    sllm_tok * tok = NULL;
+    rc = sllm_tok_load(&g, &tok);
+    if (rc != SLLM_OK) {
+        fprintf(stderr, "saphira-llm: cannot load the tokenizer: %s\n",
+                sllm_status_string(rc));
+        sllm_model_free(model_h);
+        sllm_gguf_close(&g);
+        sllm_pool_destroy(pool);
+        return 1;
+    }
+    sllm_log(SLLM_LOG_INFO, "pre-tokeniser: %s (declared \"%s\")",
+             sllm_tok_pre_type_name(sllm_tok_pre_type(tok)),
+             sllm_tok_pre_declared(tok));
+
+    const int32_t n_ctx = ctx_size > 0 ? ctx_size : 4096;
+    sllm_ctx * c = NULL;
+    rc = sllm_ctx_new(model_h, n_ctx, &c);
+    if (rc != SLLM_OK) {
+        fprintf(stderr, "saphira-llm: cannot create a context: %s\n",
+                sllm_status_string(rc));
+        sllm_tok_free(tok);
+        sllm_model_free(model_h);
+        sllm_gguf_close(&g);
+        sllm_pool_destroy(pool);
+        return 1;
+    }
+
+    const size_t max_tok = (size_t) n_ctx;
+    int32_t * ids = (int32_t *) malloc(max_tok * sizeof(int32_t));
+    if (ids == NULL) {
+        fprintf(stderr, "saphira-llm: out of memory\n");
+        sllm_ctx_free(c); sllm_tok_free(tok); sllm_model_free(model_h);
+        sllm_gguf_close(&g); sllm_pool_destroy(pool);
+        return 1;
+    }
+    const int32_t n_prompt = sllm_tok_encode(tok, prompt, strlen(prompt),
+                                             true, true, ids, (int32_t) max_tok);
+    if (n_prompt < 0) {
+        fprintf(stderr, "saphira-llm: tokenize failed: %s\n",
+                sllm_status_string((sllm_status) n_prompt));
+        free(ids);
+        sllm_ctx_free(c); sllm_tok_free(tok); sllm_model_free(model_h);
+        sllm_gguf_close(&g); sllm_pool_destroy(pool);
+        return 1;
+    }
+
+    const int32_t n_new = n_predict > 0 ? n_predict : 64;
+    if ((size_t) n_prompt + (size_t) n_new > max_tok) {
+        fprintf(stderr, "saphira-llm: %d prompt tokens plus %d new exceeds "
+                "the %d context\n", (int) n_prompt, (int) n_new, n_ctx);
+        free(ids);
+        sllm_ctx_free(c); sllm_tok_free(tok); sllm_model_free(model_h);
+        sllm_gguf_close(&g); sllm_pool_destroy(pool);
+        return 1;
+    }
+
+    int32_t * gen = (int32_t *) malloc((size_t) n_new * sizeof(int32_t));
+    if (gen == NULL) {
+        fprintf(stderr, "saphira-llm: out of memory\n");
+        free(ids);
+        sllm_ctx_free(c); sllm_tok_free(tok); sllm_model_free(model_h);
+        sllm_gguf_close(&g); sllm_pool_destroy(pool);
+        return 1;
+    }
+
+    /*
+     * Generation is single-threaded in Phase 4. The pool exists and is measured,
+     * but the forward pass does not use it yet, and reporting a thread count
+     * that the forward pass ignores would be a lie told by a benchmark. Phase 6
+     * is where the forward is parallelised and the thread count becomes real.
+     */
+    const struct timespec t0 = now();
+    rc = sllm_generate_greedy(model_h, c, ids, n_prompt, n_new, gen);
+    const struct timespec t1 = now();
+    if (rc != SLLM_OK) {
+        fprintf(stderr, "saphira-llm: generation failed: %s\n",
+                sllm_status_string(rc));
+        free(gen); free(ids);
+        sllm_ctx_free(c); sllm_tok_free(tok); sllm_model_free(model_h);
+        sllm_gguf_close(&g); sllm_pool_destroy(pool);
+        return 1;
+    }
+
+    const double secs = (double) (t1.tv_sec - t0.tv_sec) +
+                        (double) (t1.tv_nsec - t0.tv_nsec) / 1e9;
+    const double tps = secs > 0.0 ? (double) n_new / secs : 0.0;
+
+    /*
+     * The continuation is decoded, not printed as pieces. A piece is the
+     * byte-encoded form, so a space is U+0120 and printing it raw produces
+     * "The capital is a small town" with the separator glyphs still in it.
+     * Decoding is also the check that decode works on real generated ids
+     * rather than only on ids the encoder produced.
+     */
+    {
+        char * text = (char *) malloc((size_t) (n_new + 1) * 64 + 1);
+        if (text != NULL) {
+            const int32_t len = sllm_tok_decode(tok, gen, n_new, true,
+                                                text, (int32_t) ((size_t) (n_new + 1) * 64 + 1));
+            if (len > 0) { fputs(text, stdout); }
+            putchar('\n');
+            free(text);
+        }
+    }
+
+    sllm_log(SLLM_LOG_INFO, "prompt %d tokens, generated %d in %.3f s = %.2f t/s",
+             (int) n_prompt, (int) n_new, secs, tps);
+    printf("sllm_bench tg n_predict %d time %.4f s tps %.2f threads %d\n",
+           (int) n_new, secs, tps, 1);
+
+    free(gen); free(ids);
+    sllm_ctx_free(c); sllm_tok_free(tok); sllm_model_free(model_h);
     sllm_gguf_close(&g);
     sllm_pool_destroy(pool);
     return 0;

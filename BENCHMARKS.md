@@ -317,6 +317,74 @@ The measured-tolerance argument in the parity gate above does not apply here.
 That tolerance exists for float accumulation across a 30-layer forward pass,
 which does not exist yet. A gate that can only pass is not a gate.
 
+## Forward-pass parity and end-to-end generation, Phase 4
+
+### The gate
+
+| | |
+| --- | --- |
+| prompt positions compared | 16 (6 + 10) |
+| argmax matching the reference | **16 / 16** |
+| tightest reference argmax margin | 0.0427 |
+| greedy continuation tokens matching | 7 / 8 |
+| logit deviation from the reference | 0.3 to 0.9 |
+
+Token-identical at every prompt position on both frozen prompts. Read the
+manifest's per-position argmax out of the raw `.f32` rather than the prose, so
+the test and the fixture cannot disagree about formatting.
+
+### The margin, and why the row above it is thinner than it looks
+
+The tightest reference argmax margin is **0.0427** and our logit deviation is
+**0.3 to 0.9**. The deviation is an order of magnitude larger than the margin,
+so the 16/16 is a real result and not a comfortable one: the argmax wins
+because the model's top-2 separation happens to exceed our float error at every
+position in the frozen set, and one token of the generated continuation already
+flips, at the third.
+
+Generated text diverges at exactly one word and re-converges:
+
+    ours      a small town, and the capital of France is a small
+    reference a small city, and the capital of France is a small
+
+The cause is not a bug in the graph. 210 of the 211 weight tensors are I2_S, so
+every per-layer projection is integer arithmetic with no float error at all;
+the entire deviation comes from the attention products and the 2560-wide
+lm_head reduction, where our summation order is our own. That is a deliberate
+choice -- bit equality there would mean copying upstream's thread
+partitioning -- and it is also the thing to attack in Phase 6, where closing
+the gap has a measurable payoff in robustness and not only in speed.
+
+### `tg128`, end-to-end, measured for the first time
+
+The first point at which an end-to-end generation measurement is possible.
+`tg128` means 128 tokens generated, prompt processing excluded.
+
+| configuration | t/s |
+| --- | ---: |
+| saphira-llm, single-threaded forward, run 1 | 2.76 |
+| saphira-llm, single-threaded forward, run 2 | 2.74 |
+| saphira-llm, single-threaded forward, run 3 | 2.83 |
+| reference, 1 thread | 11.05 |
+| reference, 22 threads (its best) | 28.45 |
+| reference, 28 threads | **1.16** |
+
+**The 28-thread row is not comparable yet, and no conclusion is drawn from
+it.** The forward pass is single-threaded in Phase 4: the thread pool exists
+and is measured, but nothing in the forward pass uses it yet. So there is no
+28-thread saphira-llm number to place next to the reference's 1.16, and
+placing the single-threaded figure there would compare a different thing.
+
+What this does establish is that the end-to-end path works at all: 128 real
+tokens from a real prompt, decoded, at a rate a human would wait for. The
+reference is faster single-threaded because its kernels are vectorised and
+ours are not yet, which is Phase 6.
+
+The 28-thread end-to-end measurement is carried forward to Phase 6, where the
+forward pass is parallelised and the number can actually mean something. The
+Phase 2 scheduler result remains a microbench until then, and the collapse is
+still **not** claimed fixed.
+
 ## Reproducing
 
 ```sh

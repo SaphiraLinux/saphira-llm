@@ -21,8 +21,8 @@ extern "C" {
 /* Which RoPE layout. Both are used in the wild and they are not
  * interchangeable, so the caller states which one it has. */
 typedef enum sllm_rope_type {
-    SLLM_ROPE_NEOX = 0,  /* pairs of adjacent dimensions                */
-    SLLM_ROPE_NORMAL = 1,/* the first and second halves of the head     */
+    SLLM_ROPE_NEOX = 0,  /* pairs the two halves: (i, i + n/2)          */
+    SLLM_ROPE_NORMAL = 1,/* pairs adjacent dimensions: (2i, 2i+1)        */
     SLLM_ROPE_COUNT
 } sllm_rope_type;
 
