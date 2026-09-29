@@ -40,6 +40,37 @@ typedef struct {
     const char * prompt;
 } case_desc;
 
+/*
+ * The named known divergence.
+ *
+ * Phase 4 is sealed with this outstanding, and this is the record of it. It is
+ * data rather than literals inside a comparison so that the number has a name
+ * that can be referenced from a commit, a review and this file, and so that it
+ * is greppable from anywhere.
+ *
+ * It is a near-tie, not a semantic failure: the reference's top-1 and our
+ * top-1 are separated by less than our logit deviation at that position, and
+ * the two sequences re-converge on the next token. The float floor that
+ * permits it is the reference's tinyBLAS path, which is out of scope by
+ * decision. See docs/PHASE4-ACCEPTANCE.md.
+ */
+typedef struct {
+    int32_t     index;      /* position in the continuation, 0-based */
+    int32_t     ours;
+    int32_t     reference;
+    const char * ours_text;
+    const char * reference_text;
+} sllm_known_divergence;
+
+static const sllm_known_divergence SLLM_KNOWN_DIVERGENCE = {
+    2, 6424, 3363, "town", "city"
+};
+
+/* The first tokens that must always match, whatever happens to the divergence
+ * above. If these stop matching the change is not a near-tie boundary moving,
+ * it is a regression, and it is a different failure. */
+static const int32_t SLLM_STABLE_CONTINUATION_PREFIX = 2;
+
 static const case_desc cases[] = {
     { "bitnet2b-capitol", "The capital of France is" },
     { "bitnet2b-save",    "The name of the capital city of France is" },
@@ -231,16 +262,18 @@ TEST(forward_generates_and_the_first_tokens_match_the_reference) {
     int32_t gen[32];
     CHECK_STATUS(sllm_generate_greedy(m, c, ids, np, n_want, gen), SLLM_OK);
 
-    /* The first two continuation tokens are comfortably separated in the
-     * reference and must match. The third is the first genuine near-tie and is
-     * reported rather than asserted: see the divergence note in BENCHMARKS.md.
-     * Asserting it would mean asserting a float reduction order we have
-     * deliberately not copied. */
-    sllm_tests_run++;
-    if (gen[0] != want[0] || gen[1] != want[1]) {
-        sllm_tests_failed++;
-        fprintf(stderr, "  FAIL greedy: got %d %d, reference %d %d\n",
-                (int) gen[0], (int) gen[1], (int) want[0], (int) want[1]);
+    /* The tokens before the divergence are comfortably separated in the
+     * reference and must always match. If they stop matching, the change is a
+     * regression rather than the characterised boundary moving. */
+    for (int32_t i = 0; i < SLLM_STABLE_CONTINUATION_PREFIX; ++i) {
+        sllm_tests_run++;
+        if (gen[i] != want[i]) {
+            sllm_tests_failed++;
+            fprintf(stderr, "  FAIL greedy prefix token %d: got %d, reference %d. "
+                            "The stable prefix moved, which is a regression and "
+                            "not the known divergence.\n",
+                    (int) i, (int) gen[i], (int) want[i]);
+        }
     }
 
     int agree = 0;
@@ -256,30 +289,40 @@ TEST(forward_generates_and_the_first_tokens_match_the_reference) {
     }
 
     /*
-     * The known divergence, preserved deliberately.
+     * The named known divergence, asserted in BOTH directions.
      *
-     * The reference's third continuation token is 3363 ("city"); we emit
-     * <the token id for "town">, and then the two sequences re-converge on
-     * ", and the capital of France is a". That token is a near-tie whose margin
-     * is smaller than our logit deviation, and it is the single place where the
-     * frozen prompts are not token-identical.
-     *
-     * This is pinned as a REGRESSION CASE rather than left to be rediscovered.
-     * If a later change closes the gap, this assertion fails and the fact is
-     * recorded in the commit. If a later change makes the divergence WORSE --
-     * more tokens differing, or the first two no longer matching -- this fails
-     * too, which is the direction that actually matters.
+     * If it disappears, that is not a pass. It means the float floor moved, the
+     * boundary recorded in docs/PHASE4-ACCEPTANCE.md no longer describes the
+     * build, and somebody has to decide what to do about tinyBLAS. Silence
+     * there would let the accepted boundary drift without anyone noticing, so
+     * the test fails and says so.
      */
+    const sllm_known_divergence * kd = &SLLM_KNOWN_DIVERGENCE;
     sllm_tests_run++;
-    if (gen[2] == want[2]) {
+    if (gen[kd->index] == want[kd->index]) {
         sllm_tests_failed++;
-        fprintf(stderr, "  FAIL the known continuation divergence at token 2 has "
-                        "DISAPPEARED (now %d, reference %d). The float gap is "
-                        "closed; update this test and BENCHMARKS.md rather than "
-                        "leaving a stale expectation.\n", (int) gen[2], (int) want[2]);
+        fprintf(stderr, "  FAIL the named known divergence at continuation token %d "
+                        "has DISAPPEARED (we now emit %d \"%s\", the reference's %d "
+                        "\"%s\").\n"
+                        "  The float floor moved. Reopen docs/PHASE4-ACCEPTANCE.md "
+                        "and decide whether that is now in scope, rather than "
+                        "leaving a stale expectation in the test.\n",
+                (int) kd->index, (int) gen[kd->index], kd->ours_text,
+                (int) want[kd->index], kd->reference_text);
     } else {
-        printf("    known divergence preserved: token 2 is %d, reference %d "
-               "(a near-tie inside our logit deviation)\n", (int) gen[2], (int) want[2]);
+        sllm_tests_run++;
+        if (gen[kd->index] != kd->ours) {
+            sllm_tests_failed++;
+            fprintf(stderr, "  FAIL the named divergence moved: continuation token %d "
+                            "is now %d, the recorded divergence is %d \"%s\". "
+                            "A different token diverging is a different boundary.\n",
+                    (int) kd->index, (int) gen[kd->index], (int) kd->ours, kd->ours_text);
+        } else {
+            printf("    known divergence SLLM_KNOWN_DIVERGENCE: token %d is %d \"%s\" "
+                   "against the reference's %d \"%s\"; sequences re-converge\n",
+                   (int) kd->index, (int) kd->ours, kd->ours_text,
+                   (int) want[kd->index], kd->reference_text);
+        }
     }
 
     sllm_ctx_free(c); sllm_tok_free(tok); sllm_model_free(m); sllm_gguf_close(&g);

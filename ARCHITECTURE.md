@@ -97,8 +97,8 @@ bad-layout, known-but-unsupported versus not-a-type.
 | 2 | tensor layer, vector kernels, threading, topology-aware affinity | done: no full-occupancy regression on representative workloads |
 | 3 | BitNet I2_S correctness: exact ports plus a scalar reference | done: dequant over 46M real elements, and GEMV/GEMM matching the reference on real weights across two shapes |
 | 3.5 | gpt2 BPE tokenizer: load, encode, decode, golden vectors | done: 80 prompts token-identical to the reference, and every one round trips |
-| 4 | forward pass and generation | done: argmax token-identical at all 16 frozen prompt positions; 7 of 8 greedy continuation tokens |
-| 5 | chunked attention, KV save/load, state restore | mask correct across chunk boundaries |
+| 4 | forward pass and generation | **sealed**: argmax 16/16 with every deviation inside the reference margin; 7/8 continuation, one named near-tie. See docs/PHASE4-ACCEPTANCE.md |
+| 5 | chunked attention, KV save/load, state restore | in progress: mask correct across chunk boundaries |
 | 6 | measured optimisation | full metric table on this machine |
 | 7 | ordinary GGUF, `arch_llama` | correct, with a credible path to llama.cpp-class CPU perf |
 | 8 | OpenAI-compatible server | streaming, prefix KV reuse |
@@ -107,8 +107,10 @@ bad-layout, known-but-unsupported versus not-a-type.
 Phases 0 through 8 are the critical path and are CPU-only. Phase 9 is
 deliberately last and deliberately optional; see docs/CUDA-FEASIBILITY.md.
 
-Defects found in each phase, and the ones that produced a confident wrong
-answer rather than a crash, are recorded in docs/EVIDENCE.md. It is written to
+Phase 4 is sealed, with its accepted boundary -- including the float floor it
+does not cross -- in docs/PHASE4-ACCEPTANCE.md. Defects found in each phase,
+and the ones that produced a confident wrong answer rather than a crash, are
+recorded in docs/EVIDENCE.md. It is written to
 be read by whoever adds the next gate, because the recurring lesson is that a
 gate which cannot fail is worse than no gate — one of ours did, and it cost
 more time than the bug it was hiding.
