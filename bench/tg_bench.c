@@ -52,6 +52,30 @@ static double now_s(void) {
     return (double) t.tv_sec + (double) t.tv_nsec / 1e9;
 }
 
+/*
+ * The machine is shared, and that has to be in the record.
+ *
+ * Three other agent sessions and a long-running python3 sit on this host, and
+ * the instantaneous load average was measured at 11.6 while these benchmarks
+ * ran. That is not a footnote: a 28-thread sweep on a box with eleven other
+ * runnable threads is oversubscribing against real work, and the cost shows
+ * up precisely where this phase cares most -- at high thread counts, where
+ * every extra worker competes for a logical CPU and for the scheduler. It is
+ * the most likely reason the 28-thread row moved between runs here when it did
+ * not move on the quieter machine the reference table was taken on.
+ *
+ * So the load is recorded with every run, and throughput is reported as best
+ * of N rather than mean, because under external interference the minimum is
+ * the estimate closest to the unloaded one and the mean is mostly a measure of
+ * the other tenants.
+ */
+static double loadavg1(void) {
+    FILE * f = fopen("/proc/loadavg", "r");
+    double v = -1.0;
+    if (f != NULL) { if (fscanf(f, "%lf", &v) != 1) { v = -1.0; } fclose(f); }
+    return v;
+}
+
 static int cmp_double(const void * a, const void * b) {
     const double x = *(const double *) a;
     const double y = *(const double *) b;
@@ -206,6 +230,10 @@ int main(int argc, char ** argv) {
     printf("topology         %s\n", topo_desc);
     printf("i2s_dot          %s (level %d)\n", i2s_isa, (int) sllm_i2s_dot_isa());
     printf("timing           generation only, prefill excluded, monotonic\n");
+    printf("estimator        best of %d; the minimum is the closest estimate to\n"
+           "                 the unloaded machine when other tenants are busy\n", reps);
+    printf("loadavg_at_start %.2f  (this host is shared; re-read per row)\n",
+           loadavg1());
 #ifdef SLLM_BUILD_ID
     printf("build            %s\n", SLLM_BUILD_ID);
 #endif
@@ -225,8 +253,8 @@ int main(int argc, char ** argv) {
         return 1;
     }
     printf("prompt_tokens    %d\n", (int) n_prompt);
-    printf("\n%-4s %-4s %9s %9s %8s %9s %20s\n",
-           "th", "eff", "best", "median", "spread", "GB/s", "checksum");
+    printf("\n%-4s %-4s %9s %9s %8s %9s %8s %20s\n",
+           "th", "eff", "best", "median", "spread", "GB/s", "load", "checksum");
 
     int plan[SLLM_MAX_CPUS];
     const int plan_n = no_place ? 0 : sllm_topology_plan(&topo, topo.n_cpus, plan, SLLM_MAX_CPUS);
@@ -246,6 +274,7 @@ int main(int argc, char ** argv) {
         };
         sllm_pool * pool = sllm_pool_create(&pcfg);
         const int eff = sllm_pool_threads(pool);
+        sllm_ctx_set_pool(ctx, pool);
 
         for (int w = 0; w < warmup; ++w) {
             sllm_ctx_reset(ctx);
@@ -284,9 +313,10 @@ int main(int argc, char ** argv) {
         const double best = tps[reps - 1];
         const double med  = tps[reps / 2];
         const double spread = best > 0.0 ? (best - tps[0]) / best * 100.0 : 0.0;
-        printf("%-4d %-4d %9.2f %9.2f %7.1f%% %9.2f %20llu%s\n",
+        printf("%-4d %-4d %9.2f %9.2f %7.1f%% %9.2f %7.2f %20llu%s\n",
                threads[ti], eff, best, med, spread,
-               best * (double) wbytes / 1e9, (unsigned long long) checksum,
+               best * (double) wbytes / 1e9, loadavg1(),
+               (unsigned long long) checksum,
                (checksum == ref_checksum) ? "" : "  <-- TOKENS DIFFER");
         if (checksum != ref_checksum) { witness_ok = 0; }
 

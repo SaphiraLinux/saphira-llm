@@ -40,6 +40,18 @@
 /* The number of chunks handed out per element of work. Small enough to keep
  * the tail busy, large enough that the atomic cursor is not the bottleneck. */
 #define SLLM_CHUNKS_PER_THREAD 16
+
+/*
+ * How long a worker looks for a new region before it sleeps.
+ *
+ * Sized from a measurement rather than picked: decode posts a region every few
+ * tens of microseconds, so a budget in the tens of thousands of pause
+ * instructions covers several regions and turns most wakeups into an atomic
+ * load. It is bounded on purpose -- an unbounded spin is the reference's bug,
+ * not a fix for it -- and a worker that exhausts it falls through to the
+ * condition variable exactly as before.
+ */
+#define SLLM_WORKER_SPIN 40000
 #define SLLM_MIN_CHUNK 1
 
 typedef struct sllm_worker sllm_worker;
@@ -144,11 +156,34 @@ static void run_chunks(sllm_pool * pool) {
  * the instant it is signalled -- which is why the placed numbers looked fine
  * while the unplaced ones were pinned at exactly single-thread throughput.
  *
- * The caller now waits until the workers have actually arrived before it
- * starts. That is one condition-variable rendezvous per region, not per chunk
- * and not a spin, so it costs nothing like what it replaces and it cannot
- * starve at full occupancy: cond_var wait puts the thread to sleep rather than
- * burning a logical CPU spinning.
+ * The caller waits until the workers have actually arrived before it starts,
+ * which fixed the starvation above. The reasoning recorded here was that this
+ * "costs nothing like what it replaces and it cannot starve at full
+ * occupancy".
+ *
+ * The second half of that was wrong, and the decode path is what proved it.
+ * cond_var wait does avoid burning a CPU, but it also means a woken worker has
+ * to be *scheduled* before it can arrive. On a machine where every logical CPU
+ * already has a runnable thread on it, nothing is scheduled until something
+ * yields, so the arrival wait becomes a full-occupancy rendezvous -- the exact
+ * pathology this file was written to claim was impossible by construction.
+ *
+ * The Phase 2 microbenchmarks never saw it because their regions are few and
+ * large, so a rendezvous per region is amortised over a lot of work. Decode
+ * issues 211 regions per generated token, one per projection per layer plus
+ * the output projection, each only tens of microseconds long. At 28 threads
+ * that is roughly 5900 wake-and-arrive round trips per token, and measured
+ * end-to-end throughput fell from 21.6 t/s at 4 threads to 6.25 t/s at 28 --
+ * monotonically worse with every extra thread, which is the opposite of what a
+ * bandwidth limit does.
+ *
+ * So the rendezvous stays, because removing it reintroduces the starvation
+ * this comment was written about, but the workers now spin briefly for a new
+ * region before sleeping. Regions arrive back to back, so a worker that is
+ * still spinning when the next one is posted claims a chunk immediately and
+ * the rendezvous costs nothing. The spin is bounded and falls back to the
+ * condition variable, so it cannot become the indefinite barrier that destroys
+ * the reference implementation.
  */
 static void worker_arrived(sllm_pool * pool) {
     pthread_mutex_lock(&pool->mtx);
@@ -173,6 +208,23 @@ static void * worker_main(void * arg) {
 
     int seen_generation = 0;
     for (;;) {
+        /*
+         * Bounded spin for the next region before sleeping.
+         *
+         * Read with acquire so the job, context and cursor published by the
+         * caller are visible, and without the mutex so waking costs an atomic
+         * load rather than a futex round trip. The loop is bounded, so a
+         * worker that finds no work parks in cond_wait as before.
+         */
+        for (int spin = 0; spin < SLLM_WORKER_SPIN; ++spin) {
+            if (__atomic_load_n(&pool->shutdown, __ATOMIC_ACQUIRE)) { break; }
+            if (__atomic_load_n(&pool->dispatch, __ATOMIC_ACQUIRE) &&
+                __atomic_load_n(&pool->job_generation, __ATOMIC_ACQUIRE) != seen_generation) {
+                break;
+            }
+            __builtin_ia32_pause();
+        }
+
         pthread_mutex_lock(&pool->mtx);
 
         /*
@@ -360,8 +412,8 @@ void sllm_parallel_for(sllm_pool * pool, sllm_job_fn fn, void * ctx,
     pool->cursor       = 0;
     pool->arrived      = 0;
     pool->outstanding  = pool->n_threads + 1;   /* workers plus this thread */
-    pool->dispatch     = true;
-    pool->job_generation++;
+    __atomic_store_n(&pool->dispatch, true, __ATOMIC_RELEASE);
+    __atomic_store_n(&pool->job_generation, pool->job_generation + 1, __ATOMIC_RELEASE);
     pthread_cond_broadcast(&pool->work_ready);
 
     /*

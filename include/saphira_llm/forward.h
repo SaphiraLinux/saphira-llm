@@ -16,6 +16,7 @@
 #define SAPHIRA_LLM_FORWARD_H
 
 #include "saphira_llm/gguf.h"
+#include "saphira_llm/thread.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -45,6 +46,22 @@ void        sllm_ctx_free(sllm_ctx * c);
 
 /* Drop the KV cache, keeping the buffers. */
 void sllm_ctx_reset(sllm_ctx * c);
+
+/*
+ * Give this context a thread pool to split its row loops across, or NULL to
+ * run sequentially.
+ *
+ * The pool is borrowed, not owned: it must outlive the context, and the caller
+ * destroys it. Set it before the first forward and leave it alone; it is read
+ * by every worker thread, so changing it mid-generation is a race and is not
+ * something this API supports.
+ *
+ * Every region the forward pass splits is a loop over independent rows, so
+ * the number of threads cannot change the result. This is a performance knob
+ * and provably nothing else -- see the note above sllm_gemv_rows in
+ * src/forward.c, which is the reason that is true rather than a hope.
+ */
+void sllm_ctx_set_pool(sllm_ctx * c, sllm_pool * pool);
 
 /*
  * The logits of the most recent position, valid once anything has been

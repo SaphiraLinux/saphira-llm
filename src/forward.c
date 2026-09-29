@@ -34,6 +34,7 @@
 #include "saphira_llm/ops.h"
 #include "saphira_llm/quant.h"
 #include "saphira_llm/status.h"
+#include "saphira_llm/thread.h"
 #include "saphira_llm/tokenizer.h"
 
 #include <math.h>
@@ -106,7 +107,130 @@ struct sllm_ctx {
     int32_t   n_layer;  /* the model this cache was sized for       */
 
     size_t    kv_head_stride;  /* n_ctx * n_embd_head, per kv head    */
+
+    /*
+     * The pool the forward pass splits its row loops across, or NULL for the
+     * sequential path. Owned by the caller and borrowed, not copied: a context
+     * must not be able to outlive or destroy the pool underneath a generation.
+     *
+     * Set once, before the first forward, and read by every worker from then
+     * on. That is why it lives on the context rather than being threaded
+     * through every call: the alternative is a pool argument on the public
+     * forward signature, and the public signature is already long enough.
+     */
+    sllm_pool * pool;
 };
+
+/* ------------------------------------------------------------------ */
+/* row-parallel helpers                                                 */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Every parallel region in the forward pass is a loop over independent rows.
+ *
+ * That is a deliberate constraint, not a convenient accident. Splitting rows
+ * keeps each row's reduction entirely inside one thread, so no partial sums
+ * are ever combined across threads and the floating-point result cannot depend
+ * on the thread count. Parallelising the reduction instead would be faster to
+ * write and would make the output a function of how many workers ran, which
+ * would put every Phase 4 parity result in this file in doubt.
+ *
+ * So a change in thread count here is a performance change and provably
+ * nothing else. The benchmark's per-row token checksum is the standing check.
+ */
+
+/* Smallest row count worth handing to a worker. Below this the atomic cursor
+ * and the wakeup cost more than the work. Measured, not guessed: see
+ * BENCHMARKS.md for the sweep. */
+#ifndef SLLM_ROW_GRAIN
+#define SLLM_ROW_GRAIN 64u
+#endif
+
+/*
+ * Rows a worker must be given for a region to be worth distributing at all.
+ *
+ * The grain above decides how work is chopped once a region *is* distributed.
+ * This decides whether to distribute it, and it exists because of the 28-thread
+ * measurement rather than from theory.
+ *
+ * Every distributed region costs one arrival rendezvous plus one completion
+ * rendezvous, and a rendezvous costs more the more threads there are: each
+ * worker has to be woken and scheduled, and on a machine where every logical
+ * CPU is already busy some of them cannot be. Decode posts 211 regions per
+ * token -- seven projections per layer for thirty layers, plus the output
+ * projection -- and the seven per layer are 2560 or 6912 rows, which at 28
+ * threads is a few tens of microseconds of work behind 56 wakeups.
+ *
+ * So a region is only distributed when each worker gets enough rows to be
+ * worth a wakeup. Below the line the caller does the work itself, which is
+ * strictly better than paying to hand it out. Note this only reduces the thread
+ * count used for small regions; the output projection, at 128256 rows, is
+ * always distributed, so the machine is still fully used for the largest part
+ * of the token.
+ */
+#ifndef SLLM_ROWS_PER_THREAD
+#define SLLM_ROWS_PER_THREAD 512u
+#endif
+
+static size_t min_rows_to_distribute(const sllm_ctx * c) {
+    if (c == NULL || c->pool == NULL) { return (size_t) -1; }
+    const int t = sllm_pool_threads(c->pool);
+    if (t < 2) { return (size_t) -1; }
+    return (size_t) SLLM_ROWS_PER_THREAD * (size_t) t;
+}
+
+typedef struct {
+    const uint8_t * w;
+    size_t          row_bytes;
+    size_t          n;
+    const int8_t  * q;
+    int32_t       * out;
+} sllm_gemv_job;
+
+static void sllm_gemv_rows(void * vctx, size_t begin, size_t end) {
+    const sllm_gemv_job * j = (const sllm_gemv_job *) vctx;
+    sllm_i2s_gemv(j->w + begin * j->row_bytes, end - begin, j->n,
+                  j->q, j->out + begin);
+}
+
+static void sllm_gemv(const sllm_ctx * c, const uint8_t * w, size_t n_rows,
+                      size_t n, const int8_t * q, int32_t * out) {
+    if (n_rows < min_rows_to_distribute(c) || n_rows < 2u * SLLM_ROW_GRAIN) {
+        sllm_i2s_gemv(w, n_rows, n, q, out);
+        return;
+    }
+    const sllm_gemv_job j = { w, n / 4u, n, q, out };
+    sllm_parallel_rows(c->pool, sllm_gemv_rows, (void *) &j, n_rows,
+                       SLLM_ROW_GRAIN);
+}
+
+/*
+ * The output projection, flattened over (token, vocab) rather than nested.
+ *
+ * For decode there is one token, so this is just a loop over n_vocab. For a
+ * prefill chunk it is n * n_vocab, and flattening it into one region instead
+ * of spawning a region per token is what keeps the per-region overhead from
+ * scaling with the prompt length.
+ */
+typedef struct {
+    const uint16_t * embd;
+    const float    * xn;      /* n * n_embd  */
+    float          * out;     /* n * n_vocab */
+    int32_t          n_embd;
+    int32_t          n_vocab;
+} sllm_lm_job;
+
+static void sllm_lm_rows(void * vctx, size_t begin, size_t end) {
+    const sllm_lm_job * j = (const sllm_lm_job *) vctx;
+    const size_t nv = (size_t) j->n_vocab;
+    for (size_t i = begin; i < end; ++i) {
+        const size_t t = i / nv;
+        const size_t v = i - t * nv;
+        j->out[i] = sllm_dot_f16_f32(j->embd + v * (size_t) j->n_embd,
+                                     j->xn + t * (size_t) j->n_embd,
+                                     (size_t) j->n_embd);
+    }
+}
 
 /* ------------------------------------------------------------------ */
 /* f16                                                                  */
@@ -318,6 +442,7 @@ sllm_status sllm_ctx_new(const sllm_model * m, int32_t n_ctx, sllm_ctx ** out) {
     c->n_ctx = n_ctx;
     c->n_past = 0;
     c->n_layer = m->n_layer;
+    c->pool = NULL;
     c->kv_head_stride = (size_t) m->n_head_kv * (size_t) n_ctx * (size_t) m->n_embd_head;
 
     const size_t kv_per_layer = (size_t) m->n_head_kv * (size_t) n_ctx * (size_t) m->n_embd_head;
@@ -490,17 +615,17 @@ sllm_status sllm_forward_chunk(const sllm_model * m, sllm_ctx * c,
 
             sllm_i2s_act act;
             sllm_i2s_quant_act(src, (size_t) n_embd, qbuf, &act);
-            sllm_i2s_gemv(L->wq, (size_t) n_embd, (size_t) n_embd, qbuf, dbuf);
+            sllm_gemv(c, L->wq, (size_t) n_embd, (size_t) n_embd, qbuf, dbuf);
             const float pq = ws_q / act.scale;
             float * o = c->cq + (size_t) t * n_embd;
             for (int32_t r = 0; r < n_embd; ++r) { o[r] = ((float) (dbuf[r] - act.sum)) * pq; }
 
-            sllm_i2s_gemv(L->wk, (size_t) m->n_embd_gqa, (size_t) n_embd, qbuf, dbuf);
+            sllm_gemv(c, L->wk, (size_t) m->n_embd_gqa, (size_t) n_embd, qbuf, dbuf);
             const float pk = ws_k / act.scale;
             o = c->ck + (size_t) t * m->n_embd_gqa;
             for (int32_t r = 0; r < m->n_embd_gqa; ++r) { o[r] = ((float) (dbuf[r] - act.sum)) * pk; }
 
-            sllm_i2s_gemv(L->wv, (size_t) m->n_embd_gqa, (size_t) n_embd, qbuf, dbuf);
+            sllm_gemv(c, L->wv, (size_t) m->n_embd_gqa, (size_t) n_embd, qbuf, dbuf);
             const float pv = ws_v / act.scale;
             o = c->cv + (size_t) t * m->n_embd_gqa;
             for (int32_t r = 0; r < m->n_embd_gqa; ++r) { o[r] = ((float) (dbuf[r] - act.sum)) * pv; }
@@ -576,7 +701,7 @@ sllm_status sllm_forward_chunk(const sllm_model * m, sllm_ctx * c,
             int32_t * dbuf = c->dots + (size_t) t * big;
             sllm_i2s_act act;
             sllm_i2s_quant_act(c->cxn + (size_t) t * n_embd, (size_t) n_embd, qbuf, &act);
-            sllm_i2s_gemv(L->wo, (size_t) n_embd, (size_t) n_embd, qbuf, dbuf);
+            sllm_gemv(c, L->wo, (size_t) n_embd, (size_t) n_embd, qbuf, dbuf);
             const float po = ws_o / act.scale;
             float * o = c->cproj + (size_t) t * n_embd;
             for (int32_t r = 0; r < n_embd; ++r) { o[r] = ((float) (dbuf[r] - act.sum)) * po; }
@@ -603,12 +728,12 @@ sllm_status sllm_forward_chunk(const sllm_model * m, sllm_ctx * c,
             sllm_i2s_act act;
             sllm_i2s_quant_act(c->cxn + (size_t) t * n_embd, (size_t) n_embd, qbuf, &act);
 
-            sllm_i2s_gemv(L->ffn_gate, (size_t) n_ff, (size_t) n_embd, qbuf, dbuf);
+            sllm_gemv(c, L->ffn_gate, (size_t) n_ff, (size_t) n_embd, qbuf, dbuf);
             const float pg = ws_g / act.scale;
             float * og = c->cffn_g + (size_t) t * n_ff;
             for (int32_t r = 0; r < n_ff; ++r) { og[r] = ((float) (dbuf[r] - act.sum)) * pg; }
 
-            sllm_i2s_gemv(L->ffn_up, (size_t) n_ff, (size_t) n_embd, qbuf, dbuf);
+            sllm_gemv(c, L->ffn_up, (size_t) n_ff, (size_t) n_embd, qbuf, dbuf);
             const float pu = ws_u / act.scale;
             float * ou = c->cffn_u + (size_t) t * n_ff;
             for (int32_t r = 0; r < n_ff; ++r) { ou[r] = ((float) (dbuf[r] - act.sum)) * pu; }
@@ -627,7 +752,7 @@ sllm_status sllm_forward_chunk(const sllm_model * m, sllm_ctx * c,
             int32_t * dbuf = c->dots + (size_t) t * big;
             sllm_i2s_act act;
             sllm_i2s_quant_act(hcol, (size_t) n_ff, qbuf, &act);
-            sllm_i2s_gemv(L->ffn_down, (size_t) n_embd, (size_t) n_ff, qbuf, dbuf);
+            sllm_gemv(c, L->ffn_down, (size_t) n_embd, (size_t) n_ff, qbuf, dbuf);
             const float pd = ws_d / act.scale;
             float * o = c->cproj + (size_t) t * n_embd;
             for (int32_t r = 0; r < n_embd; ++r) { o[r] = ((float) (dbuf[r] - act.sum)) * pd; }
@@ -647,10 +772,23 @@ sllm_status sllm_forward_chunk(const sllm_model * m, sllm_ctx * c,
         float * xcol = c->cx + (size_t) t * n_embd;
         sllm_rms_norm(c->cxn + (size_t) t * n_embd, xcol,
                       m->output_norm, (size_t) n_embd, m->f_rms_eps);
-        const float * xn = c->cxn + (size_t) t * n_embd;
-        float * out = logits_out + (size_t) t * m->n_vocab;
-        for (int32_t v = 0; v < m->n_vocab; ++v) {
-            out[v] = sllm_dot_f16_f32(m->tok_embd + (size_t) v * n_embd, xn, n_embd);
+    }
+
+    /*
+     * The output projection is the largest single region in decode: 128256
+     * rows of 2560, against 6912 rows of 2560 for one FFN projection. It is
+     * also the one that parallelises most cleanly, because every row is an
+     * independent dot product over a shared activation vector -- the ideal
+     * shape for streaming weights off many cores at once.
+     */
+    {
+        const sllm_lm_job j = { m->tok_embd, c->cxn, logits_out,
+                                n_embd, m->n_vocab };
+        const size_t rows = (size_t) n * (size_t) m->n_vocab;
+        if (rows >= min_rows_to_distribute(c)) {
+            sllm_parallel_rows(c->pool, sllm_lm_rows, (void *) &j, rows, 1u);
+        } else {
+            sllm_lm_rows((void *) &j, 0, rows);
         }
     }
 
@@ -660,6 +798,11 @@ sllm_status sllm_forward_chunk(const sllm_model * m, sllm_ctx * c,
            (size_t) m->n_vocab * sizeof(float));
 
     return SLLM_OK;
+}
+
+void sllm_ctx_set_pool(sllm_ctx * c, sllm_pool * pool) {
+    if (c == NULL) { return; }
+    c->pool = pool;
 }
 
 const float * sllm_ctx_last_logits(const sllm_ctx * c) {

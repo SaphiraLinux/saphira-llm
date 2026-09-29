@@ -336,11 +336,13 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
+    sllm_ctx_set_pool(c, pool);
+
     /*
-     * Generation is single-threaded in Phase 4. The pool exists and is measured,
-     * but the forward pass does not use it yet, and reporting a thread count
-     * that the forward pass ignores would be a lie told by a benchmark. Phase 6
-     * is where the forward is parallelised and the thread count becomes real.
+     * The forward pass splits its row loops across this pool. Because every
+     * region is a loop over independent rows, the thread count changes the
+     * speed and not the numbers -- which is what makes the token checksum in
+     * the benchmark a meaningful check rather than a formality.
      */
     const struct timespec t0 = now();
     rc = sllm_generate_greedy(model_h, c, ids, n_prompt, n_new, gen);
