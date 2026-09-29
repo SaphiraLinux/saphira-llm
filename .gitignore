@@ -4,6 +4,7 @@ __pycache__/
 build/
 out/
 
+opencode.*
 # built binaries
 /saphira-llm
 /saphira-llm-test

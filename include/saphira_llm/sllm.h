@@ -20,9 +20,9 @@
 #include <saphira_llm/i2s_gemm.h>
 
 #define SLLM_VERSION_MAJOR 0
-#define SLLM_VERSION_MINOR 1
+#define SLLM_VERSION_MINOR 0
 #define SLLM_VERSION_PATCH 1
-#define SLLM_VERSION_STRING "0.2.0"
+#define SLLM_VERSION_STRING "0.0.1"
 
 /*
  * The ISA baseline this build assumes. Not a claim about the host: the host

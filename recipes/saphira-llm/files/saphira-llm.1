@@ -1,0 +1,86 @@
+.\" saphira-llm(1) - native GGUF inference for BitNet b1.58
+.TH SAPHIRA-LLM 1 "2026" "saphira-llm 0.0.1" "User Commands"
+.SH NAME
+saphira\-llm \- native C11 GGUF inference runtime for BitNet b1.58 (CPU, x86-64-v3)
+.SH SYNOPSIS
+.B saphira\-llm
+.B \-m
+.I MODEL
+.B \-p
+.I PROMPT
+.RI [ options ]
+.SH DESCRIPTION
+.B saphira\-llm
+loads a GGUF model, encodes a prompt, generates a continuation greedily and
+writes the decoded text to standard output.
+.PP
+The runtime is self-contained: the container reader, the tensor layer, the
+vector kernels, the thread pool and the CPU ISA dispatch are all in this
+binary. There is no Python, no BLAS, and no launcher around another engine.
+.SH OPTIONS
+.TP
+.BI \-m " MODEL" "\fR, \fP" \-\-model= MODEL
+Path to a GGUF model. Required for anything beyond container inspection.
+.TP
+.BI \-p " PROMPT" "\fR, \fP" \-\-prompt= PROMPT
+Prompt text to condition on.
+.TP
+.BI \-n " N" "\fR, \fP" \-\-n\-predict= N
+Tokens to generate. Default 64.
+.TP
+.BI \-c " N" "\fR, \fP" \-\-ctx= N
+Context size in tokens. Default 4096.
+.TP
+.BI \-t " N" "\fR, \fP" \-\-threads= N
+Worker threads. 0 is not accepted; pass a value.
+.TP
+.B \-\-no\-place
+Do not pin threads to a placement plan, for measuring the placement contrast.
+.TP
+.BI \-\-isa " LEVEL"
+Force an ISA floor:
+.BR v3 ", " vnni ", " avx512 ", " amx " or " auto .
+Requesting a level this CPU does not have is a hard error, never a silent
+downgrade.
+.TP
+.BI \-\-log " LEVEL"
+.BR quiet ", " error ", " warn ", " info " (default) " or " debug .
+.TP
+.B \-V, \-\-version
+Print the version and the compiled ISA baseline.
+.TP
+.B \-h, \-\-help
+Print usage.
+.SH LIMITS
+One prompt per invocation. There is no interactive mode and no chat template,
+so a question is treated as text to continue rather than as an instruction to
+follow; a base model given a question will often repeat it.
+.PP
+Generation is greedy: argmax at every step. There is no temperature, top\-p,
+top\-k or repetition penalty, and no seed. Greedy output is deterministic, so
+the same prompt and model always give the same tokens.
+.PP
+The 2B BitNet b1.58 2B\-4T GGUF is not packaged. Supply your own via
+.BR \-m .
+.SH MODELS
+Only architecture
+.B bitnet\-b1.58
+is implemented. A GGUF of any other architecture is refused with
+.I unsupported\-architecture
+rather than loaded and mis-executed. Weights may be I2_S ternary, F32, F16,
+BF16, Q8_0 or Q4_0; the K\-quants are recognised and refused by name.
+.SH ENVIRONMENT
+.TP
+.B MODEL
+Default model path used by
+.BR saphira\-llm-testsuite .
+.TP
+.B THREADS
+Default thread count for
+.BR saphira\-llm-testsuite .
+.SH SEE ALSO
+.BR saphira\-llm\-tgbench (1),
+.BR saphira\-llm\-kernelbench (1),
+.BR saphira\-llm\-testsuite (1)
+.SH LICENSE
+MIT.
