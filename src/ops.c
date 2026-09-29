@@ -153,6 +153,64 @@ void sllm_rms_norm(float * dst, const float * x, const float * weight,
     }
 }
 
+/*
+ * expf, as the reference computes it.
+ *
+ * This is ggml_v_expf's AVX2 polynomial, transcribed. It is NOT libm's expf,
+ * and the two differ by a couple of ulps per element.
+ *
+ * That matters more than it looks. expf feeds softmax and SiLU, both of which
+ * feed the activation quantiser, and the model is thirty stages of int8
+ * quantisation deep. A one-ulp difference in an exponential is a systematic
+ * bias across every element of the softmax, not noise that averages out, and it
+ * is amplified at every layer boundary. Using libm here was the largest
+ * remaining contributor to the Phase 4 logit gap.
+ *
+ * The code is deliberately a transcription rather than a rewrite: the exact
+ * sequence of fused multiply-adds is the specification, and reassociating any
+ * of it changes the result.
+ */
+#if defined(SLLM_X86)
+static inline __m256 ggml_v_expf(__m256 x) {
+  const __m256 r = _mm256_set1_ps(0x1.8p23f);
+  const __m256 z = _mm256_fmadd_ps(x, _mm256_set1_ps(0x1.715476p+0f), r);
+  const __m256 n = _mm256_sub_ps(z, r);
+  const __m256 b = _mm256_fnmadd_ps(n, _mm256_set1_ps(0x1.7f7d1cp-20f),
+                                    _mm256_fnmadd_ps(n, _mm256_set1_ps(0x1.62e4p-1f), x));
+  const __m256i e = _mm256_slli_epi32(_mm256_castps_si256(z), 23);
+  const __m256 k = _mm256_castsi256_ps(
+      _mm256_add_epi32(e, _mm256_castps_si256(_mm256_set1_ps(1))));
+  const __m256i c = _mm256_castps_si256(
+      _mm256_cmp_ps(_mm256_andnot_ps(_mm256_set1_ps(-0.f), n),
+                    _mm256_set1_ps(126), _CMP_GT_OQ));
+  const __m256 u = _mm256_mul_ps(b, b);
+  const __m256 j = _mm256_fmadd_ps(_mm256_fmadd_ps(_mm256_fmadd_ps(_mm256_set1_ps(0x1.0e4020p-7f), b,
+                                                                   _mm256_set1_ps(0x1.573e2ep-5f)), u,
+                                                   _mm256_fmadd_ps(_mm256_set1_ps(0x1.555e66p-3f), b,
+                                                                   _mm256_set1_ps(0x1.fffdb6p-2f))),
+                                   u, _mm256_mul_ps(_mm256_set1_ps(0x1.ffffecp-1f), b));
+  if (!_mm256_movemask_ps(_mm256_castsi256_ps(c)))
+    return _mm256_fmadd_ps(j, k, k);
+  const __m256i g = _mm256_and_si256(
+      _mm256_castps_si256(_mm256_cmp_ps(n, _mm256_setzero_ps(), _CMP_LE_OQ)),
+      _mm256_set1_epi32(0x82000000u));
+  const __m256 s1 =
+      _mm256_castsi256_ps(_mm256_add_epi32(g, _mm256_set1_epi32(0x7f000000u)));
+  const __m256 s2 = _mm256_castsi256_ps(_mm256_sub_epi32(e, g));
+  const __m256i d = _mm256_castps_si256(
+      _mm256_cmp_ps(_mm256_andnot_ps(_mm256_set1_ps(-0.f), n),
+                    _mm256_set1_ps(192), _CMP_GT_OQ));
+  return _mm256_or_ps(
+      _mm256_and_ps(_mm256_castsi256_ps(d), _mm256_mul_ps(s1, s1)),
+      _mm256_andnot_ps(
+          _mm256_castsi256_ps(d),
+          _mm256_or_ps(
+              _mm256_and_ps(_mm256_castsi256_ps(c),
+                            _mm256_mul_ps(_mm256_fmadd_ps(s2, j, s2), s1)),
+              _mm256_andnot_ps(_mm256_castsi256_ps(c), _mm256_fmadd_ps(k, j, k)))));
+}
+#endif /* SLLM_X86 */
+
 /* ------------------------------------------------------------------ */
 /* softmax                                                             */
 /* ------------------------------------------------------------------ */
@@ -168,7 +226,23 @@ void sllm_softmax_inplace(float * x, size_t n) {
         }
     }
     double sum = 0.0;
-    for (size_t i = 0; i < n; ++i) {
+    size_t i = 0;
+#if defined(SLLM_X86)
+    /* The reference's exp, its 8-wide reduction, and the same double sum in the
+     * same order. ggml_vec_soft_max_f32 adds the per-vector partial sums into a
+     * ggml_float (double) accumulator, and the reciprocal is 1.0/sum in double
+     * before being narrowed to float -- which is what happens here. */
+    for (; i + 7 < n; i += 8) {
+        const __m256 v = ggml_v_expf(_mm256_sub_ps(_mm256_loadu_ps(x + i),
+                                                   _mm256_set1_ps(max)));
+        _mm256_storeu_ps(x + i, v);
+        double t[4];
+        _mm256_storeu_pd(t, _mm256_add_pd(_mm256_cvtps_pd(_mm256_castps256_ps128(v)),
+                                          _mm256_cvtps_pd(_mm256_extractf128_ps(v, 1))));
+        sum += t[0] + t[1] + t[2] + t[3];
+    }
+#endif
+    for (; i < n; ++i) {
         const float e = expf(x[i] - max);
         x[i] = e;
         sum += (double) e;
@@ -193,21 +267,24 @@ void sllm_silu_inplace(float * x, size_t n) {
      * element, and the discrepancy was enormous (164.9 against 3.69) precisely
      * because the two formulas agree nowhere except near zero.
      *
-     * exp is evaluated through libm per lane, and the point of the vector
-     * path is the memory traffic and the branch-free form, not pretending
-     * AVX2 has a transcendental it does not have.
+     * The vector path uses the reference's polynomial exp, ggml_v_expf, and the
+     * same x / (1 + exp(-x)) shape as ggml_v_silu. Using libm's expf here was
+     * a systematic bias across all 6912 elements of every layer's FFN, which
+     * the int8 activation quantiser then amplified at every layer boundary.
+     * It is not the only thing that was wrong -- see PHASE4-GAP.md -- but it is
+     * the largest single contributor, and it is free to fix.
+     *
+     * The loop bound is `i + 7 < n`, matching the reference's, so the same
+     * elements go through the same code. A different bound would leave a tail
+     * computed by a different expression, which is a subtle way to be wrong
+     * only at the end of an array.
      */
     size_t i = 0;
 #if defined(SLLM_X86)
-    if (n >= 8) {
-        for (; i + 8 <= n; i += 8) {
-            float t[8];
-            _mm256_storeu_ps(t, _mm256_loadu_ps(x + i));
-            for (int k = 0; k < 8; ++k) {
-                t[k] = t[k] / (1.0f + expf(-t[k]));
-            }
-            _mm256_storeu_ps(x + i, _mm256_loadu_ps(t));
-        }
+    for (; i + 7 < n; i += 8) {
+        const __m256 v = _mm256_loadu_ps(x + i);
+        const __m256 e = ggml_v_expf(_mm256_sub_ps(_mm256_setzero_ps(), v));
+        _mm256_storeu_ps(x + i, _mm256_div_ps(v, _mm256_add_ps(_mm256_set1_ps(1.0f), e)));
     }
 #endif
     for (; i < n; ++i) {
@@ -256,6 +333,34 @@ void sllm_rope_inplace(float * x, size_t n_rot, int32_t pos,
      */
     const size_t half = n_rot / 2;
 
+    /*
+     * The angle is built by REPEATED MULTIPLICATION, exactly as the reference
+     * builds its rope cache, and not as pos * powf(theta, -2k/n).
+     *
+     *   ggml_rope_cache_init, ops.cpp:5804
+     *       float theta = theta_base;              // theta_base is the position
+     *       for (i0 = 0; i0 < ne0; i0 += 2) {
+     *           rope_yarn(theta/ff, ...);          // theta = freq_scale * theta
+     *           theta *= theta_scale;             // theta_scale = powf(freq_base, -2/n_dims)
+     *       }
+     *
+     * So the k-th angle is pos * (powf(freq_base, -2/n))^k, accumulated one
+     * multiplication at a time. Computing it directly as
+     * pos * powf(freq_base, -2k/n) is a different float: same mathematics,
+     * different rounding, and the difference is a systematic bias in every
+     * rotated dimension rather than noise.
+     *
+     * That bias is what the Phase 4 logit gap turned out to be. Q and K come
+     * out of the integer projections exactly, so a one-ulp angle error here is
+     * the only error entering the residual stream, and the 30 stages of int8
+     * quantisation downstream amplify it. Running the attention and lm_head in
+     * double precision moved the worst-case logit deviation by 0.03 out of
+     * 0.92, which is what identified this as a systematic error rather than
+     * float reordering.
+     */
+    const float theta_scale = powf(theta, -2.0f / (float) n_rot);
+    float theta_k = (float) pos;
+
     for (size_t k = 0; k < half; ++k) {
         const size_t a = (type == SLLM_ROPE_NEOX) ? k : (k * 2);
         const size_t b = (type == SLLM_ROPE_NEOX) ? (k + half) : (k * 2 + 1);
@@ -263,10 +368,12 @@ void sllm_rope_inplace(float * x, size_t n_rot, int32_t pos,
             continue;
         }
 
-        const float inv_freq = powf(theta, -2.0f * (float) k / (float) n_rot);
-        const float f = ((float) pos * inv_freq) / freq_scale;
+        /* rope_yarn: theta = freq_scale * theta_extrap, and with no ext_factor
+         * the ramp is skipped, so this is the whole transform. */
+        const float f = freq_scale * theta_k;
         const float c = cosf(f);
         const float s = sinf(f);
+        theta_k *= theta_scale;
 
         const float xa = x[a];
         const float xb = x[b];

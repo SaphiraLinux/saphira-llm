@@ -443,19 +443,30 @@ TEST(ops_rope_is_a_rotation_and_position_zero_is_the_identity) {
         }
     }
 
-    /* freq_scale divides the frequency, so a scale of 2 is the same as
-     * doubling the position. */
+    /*
+     * freq_scale MULTIPLIES the angle: rope_yarn computes
+     * theta_interp = freq_scale * theta_extrap, and the reference derives the
+     * factor as 1/rope.scale_linear so that a scale of 2 in the metadata
+     * becomes a factor below 1 and the rotation slows down for extrapolation.
+     *
+     * This test asserted the opposite -- that freq_scale divides, so a scale of
+     * 2 equals doubling the position -- and it passed for two phases, because
+     * it was never checked against the reference. It is the same lesson as the
+     * NEOX/NORMAL swap: an assumption that reads as reasonable and is never
+     * tested against the thing it is supposed to mirror.
+     */
     float a[64], b[64];
     memcpy(a, x, sizeof(x));
     memcpy(b, x, sizeof(x));
     sllm_rope_inplace(a, n_rot, 4, 10000.0f, 1.0f, SLLM_ROPE_NEOX);
-    sllm_rope_inplace(b, n_rot, 8, 10000.0f, 2.0f, SLLM_ROPE_NEOX);
+    sllm_rope_inplace(b, n_rot, 2, 10000.0f, 2.0f, SLLM_ROPE_NEOX);
     for (size_t i = 0; i < n_rot; ++i) {
         sllm_tests_run++;
-        if (fabsf(a[i] - b[i]) > 1e-4f) {
+        if (fabs((double) a[i] - (double) b[i]) > 1e-5) {
             sllm_tests_failed++;
-            fprintf(stderr, "  FAIL rope freq_scale: element %zu %g vs %g\n",
-                    i, (double) a[i], (double) b[i]);
+            fprintf(stderr, "  FAIL freq_scale should multiply the angle: "
+                            "pos=4,scale=1 gave %g, pos=2,scale=2 gave %g\n",
+                    (double) a[i], (double) b[i]);
             break;
         }
     }
@@ -482,6 +493,62 @@ TEST(ops_get_rows_gathers_and_clamps_bad_indices) {
     for (int c = 0; c < COLS; ++c) { CHECK_SAME_BITS(dst[c], src[c]); }
 }
 
+/*
+ * Known-output RoPE vectors, for both layouts.
+ *
+ * The layout swap that Phase 4 found -- NEOX and NORMAL exchanging pairings --
+ * survived two phases of property-based testing, because "the rotation
+ * preserves each pair's norm" is true of BOTH pairings. A property cannot
+ * distinguish two implementations when both satisfy it.
+ *
+ * These are literal expected outputs, computed from the reference's own
+ * algorithm: the angle cache built by repeated multiplication in
+ * ggml_rope_cache_init, then rotate_pairs with that layout's offsets. They are
+ * for n_rot = 8, position 3, theta 10000, freq_scale 1, on the input x[i] = 1+i.
+ *
+ * They are not derived from our implementation, which is the point. If someone
+ * exchanges the two pairings again, the numerics still look reasonable and
+ * every norm still holds, but these constants do not move and the test fails.
+ */
+TEST(ops_rope_matches_known_output_for_both_layouts) {
+    float x[8];
+    for (int i = 0; i < 8; ++i) { x[i] = 1.0f + (float) i; }
+
+    static const float ROPE_NEOX_GOLD[8] = {
+        -1.69559252f, 0.137551665f, 2.78868151f, 3.97598219f,
+        -4.80884266f, 6.32305956f, 7.08683681f, 8.01196384f
+    };
+    static const float ROPE_NORMAL_GOLD[8] = {
+        -1.27223253f, -1.83886504f, 1.68392873f, 4.70790672f,
+        4.81777716f, 6.14727783f, 6.97596884f, 8.02096462f
+    };
+
+    float neox[8], normal[8];
+    memcpy(neox, x, sizeof(x));
+    memcpy(normal, x, sizeof(x));
+    sllm_rope_inplace(neox, 8, 3, 10000.0f, 1.0f, SLLM_ROPE_NEOX);
+    sllm_rope_inplace(normal, 8, 3, 10000.0f, 1.0f, SLLM_ROPE_NORMAL);
+
+    for (int i = 0; i < 8; ++i) {
+        sllm_tests_run++;
+        if (fabs((double) neox[i] - (double) ROPE_NEOX_GOLD[i]) > 1e-5) {
+            sllm_tests_failed++;
+            fprintf(stderr, "  FAIL neox known output, element %d: %g, expected %g\n",
+                    i, (double) neox[i], (double) ROPE_NEOX_GOLD[i]);
+            break;
+        }
+    }
+    for (int i = 0; i < 8; ++i) {
+        sllm_tests_run++;
+        if (fabs((double) normal[i] - (double) ROPE_NORMAL_GOLD[i]) > 1e-5) {
+            sllm_tests_failed++;
+            fprintf(stderr, "  FAIL normal known output, element %d: %g, expected %g\n",
+                    i, (double) normal[i], (double) ROPE_NORMAL_GOLD[i]);
+            break;
+        }
+    }
+}
+
 void sllm_test_ops(void) {
     printf("ops\n");
     RUN(fp16_round_trip_covers_the_awkward_values);
@@ -493,5 +560,6 @@ void sllm_test_ops(void) {
     RUN(ops_softmax_sums_to_one_and_is_finite);
     RUN(ops_silu_matches_the_scalar_definition);
     RUN(ops_rope_is_a_rotation_and_position_zero_is_the_identity);
+    RUN(ops_rope_matches_known_output_for_both_layouts);
     RUN(ops_get_rows_gathers_and_clamps_bad_indices);
 }

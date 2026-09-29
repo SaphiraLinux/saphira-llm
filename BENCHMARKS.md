@@ -325,35 +325,75 @@ which does not exist yet. A gate that can only pass is not a gate.
 | --- | --- |
 | prompt positions compared | 16 (6 + 10) |
 | argmax matching the reference | **16 / 16** |
-| tightest reference argmax margin | 0.0427 |
+| positions where deviation < reference argmax margin | **16 / 16** |
+| tightest case (position 1) | deviation 0.338 vs margin 0.484 |
 | greedy continuation tokens matching | 7 / 8 |
-| logit deviation from the reference | 0.3 to 0.9 |
+| logit deviation from the reference | 0.001 to 0.338 |
 
 Token-identical at every prompt position on both frozen prompts. Read the
 manifest's per-position argmax out of the raw `.f32` rather than the prose, so
 the test and the fixture cannot disagree about formatting.
 
-### The margin, and why the row above it is thinner than it looks
+### The gate is a margin comparison, not a tolerance
 
-The tightest reference argmax margin is **0.0427** and our logit deviation is
-**0.3 to 0.9**. The deviation is an order of magnitude larger than the margin,
-so the 16/16 is a real result and not a comfortable one: the argmax wins
-because the model's top-2 separation happens to exceed our float error at every
-position in the frozen set, and one token of the generated continuation already
-flips, at the third.
+The argmax flips only if our perturbation crosses the gap between the top two
+logits. So the gate is not "within N of the reference" -- N would be arbitrary
+-- but:
 
-Generated text diverges at exactly one word and re-converges:
+> at every position, our top-1 deviation is smaller than the reference's
+> top-1-to-top-2 margin.
+
+That holds at **16 of 16**. The tightest is position 1 of the capitol prompt,
+where the deviation is 0.338 against a margin of 0.484: 70 percent of the
+margin, so the argmax holds with 30 percent headroom. That is the honest
+number. It is not comfortable, and it is measured rather than chosen.
+
+The test asserts the comparison per position, so a change that pushes the
+deviation past a margin fails naming the position responsible.
+
+### Getting here: the gap was six bugs, not float reordering
+
+The first cut of this section blamed our reduction order. That was wrong, and
+checking it is the point. A 2-to-4 percent deviation is not reordering noise --
+over 2560 elements that is about 1e-4. Running the attention products and the
+lm_head in double precision moved the worst deviation from 0.917 to 0.883;
+reordering error would have collapsed. It was systematic, and systematic errors
+can be found.
+
+Six were found and fixed, all listed in docs/PHASE4-GAP.md. The two that
+mattered most: the RoPE angle was built with a single `powf` instead of the
+reference's running multiplication, and SiLU used 6912 libm `expf` per layer
+instead of the reference's AVX2 polynomial `ggml_v_expf`, which is a different
+function, not a faster one. Position-2/4/5 top-1 deviations went from
+0.34/0.16/0.40 to 0.048/0.013/0.063.
+
+### The residual is a design position
+
+`GGML_LLAMAFILE=ON`: the reference's QK^T, P@V and lm_head all run through
+tinyBLAS's blocked SIMD GEMM. And this model amplifies any float difference,
+including one ulp, to O(0.1) -- it is a chain of 30 int8 quantisers, and a
+perturbation that crosses a rounding boundary moves a whole quantisation step.
+
+So the deviation cannot be driven to zero without porting tinyBLAS, which
+`ARCHITECTURE.md` declines for the same reason it declines to copy the thread
+partitioning: the parity rule is about the model, not about copying the
+implementation. The margin comparison is what makes that position safe rather
+than merely defensible.
+
+### The generated continuation
 
     ours      a small town, and the capital of France is a small
     reference a small city, and the capital of France is a small
 
-The cause is not a bug in the graph. 210 of the 211 weight tensors are I2_S, so
-every per-layer projection is integer arithmetic with no float error at all;
-the entire deviation comes from the attention products and the 2560-wide
-lm_head reduction, where our summation order is our own. That is a deliberate
-choice -- bit equality there would mean copying upstream's thread
-partitioning -- and it is also the thing to attack in Phase 6, where closing
-the gap has a measurable payoff in robustness and not only in speed.
+Seven of eight continuation tokens match. Token 2 is a near-tie inside our
+deviation, and the sequences re-converge immediately afterwards. The
+continuation is *not* covered by the margin argument, because once a token
+differs both models condition on different transcripts, so comparing margins
+past the divergence is not meaningful.
+
+Pinned as a regression case in `test_forward.c` in both directions: if a later
+change closes the gap the test fails and says so, and if it makes the
+divergence worse it also fails.
 
 ### `tg128`, end-to-end, measured for the first time
 

@@ -39,9 +39,23 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define SLLM_LAYER_MAX 64
+
+/* Diagnostic only: set SLLM_F64=1 to run the float attention products and the
+ * lm_head reduction in double. If the logit deviation collapses under double
+ * precision then the gap is amplified float noise; if it barely moves, there is
+ * a systematic error somewhere and precision is not the story. */
+static int g_f64 = -1;
+static int use_f64(void) {
+    if (g_f64 < 0) {
+        const char * e = getenv("SLLM_F64");
+        g_f64 = (e != NULL && e[0] == '1') ? 1 : 0;
+    }
+    return g_f64;
+}
 
 typedef struct {
     const uint8_t  * wq, *wk, *wv, *wo;
@@ -476,11 +490,20 @@ sllm_status sllm_forward(const sllm_model * m, sllm_ctx * c,
             const float * vcache = c->v_cache + (size_t) il * kv_per_layer +
                                    (size_t) kvh * c->n_ctx * hd;
 
+            if (use_f64()) {
+                for (int32_t s = 0; s < npast; ++s) {
+                    const float * ks = kcache + (size_t) s * hd;
+                    double acc = 0.0;
+                    for (int32_t d = 0; d < hd; ++d) { acc += (double) qh[d] * (double) ks[d]; }
+                    c->scores[s] = (float) (acc * (double) attn_scale);
+                }
+            } else {
             for (int32_t s = 0; s < npast; ++s) {
                 const float * ks = kcache + (size_t) s * hd;
                 float acc = 0.0f;
                 for (int32_t d = 0; d < hd; ++d) { acc += qh[d] * ks[d]; }
                 c->scores[s] = acc * attn_scale;
+            }
             }
             sllm_softmax_inplace(c->scores, (size_t) npast);
 
@@ -529,11 +552,22 @@ sllm_status sllm_forward(const sllm_model * m, sllm_ctx * c,
 
     /* output_norm, then the tied lm_head. */
     sllm_rms_norm(c->xn, c->x, m->output_norm, (size_t) n_embd, m->f_rms_eps);
+    if (use_f64()) {
+        for (int32_t v = 0; v < m->n_vocab; ++v) {
+            const uint16_t * row = m->tok_embd + (size_t) v * n_embd;
+            double acc = 0.0;
+            for (int32_t d = 0; d < n_embd; ++d) {
+                acc += (double) f16_to_f32(row[d]) * (double) c->xn[d];
+            }
+            logits[v] = (float) acc;
+        }
+    } else {
     for (int32_t v = 0; v < m->n_vocab; ++v) {
         const uint16_t * row = m->tok_embd + (size_t) v * n_embd;
         float acc = 0.0f;
         for (int32_t d = 0; d < n_embd; ++d) { acc += f16_to_f32(row[d]) * c->xn[d]; }
         logits[v] = acc;
+    }
     }
 
     return SLLM_OK;

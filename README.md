@@ -77,6 +77,8 @@ worse than no check.
 | PROVENANCE.md | every upstream revision and licence consulted |
 | docs/CUDA-FEASIBILITY.md | why there is no Saphira CUDA path |
 | docs/EVIDENCE.md | every defect found, and why the gate missed it |
+| docs/PHASE4-CONTRACT.md | the forward graph as read from the pinned source |
+| docs/PHASE4-GAP.md | the logit gap: what it was, what is fixed, and its floor |
 | tools/reference/README.md | the reference-only golden-vector tooling |
 | tests/golden/README.md | the fixtures and the rules for regenerating them |
 

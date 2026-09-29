@@ -255,6 +255,33 @@ TEST(forward_generates_and_the_first_tokens_match_the_reference) {
                 (int) agree, (int) n_want);
     }
 
+    /*
+     * The known divergence, preserved deliberately.
+     *
+     * The reference's third continuation token is 3363 ("city"); we emit
+     * <the token id for "town">, and then the two sequences re-converge on
+     * ", and the capital of France is a". That token is a near-tie whose margin
+     * is smaller than our logit deviation, and it is the single place where the
+     * frozen prompts are not token-identical.
+     *
+     * This is pinned as a REGRESSION CASE rather than left to be rediscovered.
+     * If a later change closes the gap, this assertion fails and the fact is
+     * recorded in the commit. If a later change makes the divergence WORSE --
+     * more tokens differing, or the first two no longer matching -- this fails
+     * too, which is the direction that actually matters.
+     */
+    sllm_tests_run++;
+    if (gen[2] == want[2]) {
+        sllm_tests_failed++;
+        fprintf(stderr, "  FAIL the known continuation divergence at token 2 has "
+                        "DISAPPEARED (now %d, reference %d). The float gap is "
+                        "closed; update this test and BENCHMARKS.md rather than "
+                        "leaving a stale expectation.\n", (int) gen[2], (int) want[2]);
+    } else {
+        printf("    known divergence preserved: token 2 is %d, reference %d "
+               "(a near-tie inside our logit deviation)\n", (int) gen[2], (int) want[2]);
+    }
+
     sllm_ctx_free(c); sllm_tok_free(tok); sllm_model_free(m); sllm_gguf_close(&g);
 }
 

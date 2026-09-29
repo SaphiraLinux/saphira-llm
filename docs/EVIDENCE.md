@@ -516,19 +516,74 @@ reset clears the live prefix, the forward pass refuses to rewind a position,
 and there is a test that generates twice around a reset and requires identical
 ids.
 
+### A test asserted that freq_scale divides, and it never checked
+
+While fixing the RoPE angle the Phase 4 work turned up a second unverified
+assumption. `sllm_rope_inplace` divided the angle by `freq_scale`; the
+reference multiplies it:
+
+    static void rope_yarn(..., float theta_extrap, float freq_scale, ...) {
+        float theta_interp = freq_scale * theta_extrap;
+
+and the metadata factor is `1.0f/ropescale`, so `rope.scale_linear = 2`
+becomes a factor of 0.5 and the rotation slows for extrapolation. Multiplying
+is what makes that sensible.
+
+The Phase 2 test asserted the divide, framed as "a scale of 2 is the same as
+doubling the position", and passed for two phases. Same shape as the NEOX
+swap: an assumption that reads as reasonable and was never tested against the
+thing it mirrors. A test that only re-asserts the implementation's assumption
+is not a test.
+
+### RoPE now has known-output vectors, because properties could not catch a swap
+
+The layout swap above is the reason `ops_rope_matches_known_output_for_both_layouts`
+exists. "The rotation preserves each pair's norm" is satisfied by both
+pairings, so no property of that kind can distinguish NEOX from NORMAL. The
+test now pins literal expected outputs for both layouts -- computed from the
+reference's own algorithm, its repeated-multiplication angle cache and its
+`rotate_pairs` offsets -- so an exchange moves constants that do not move on
+their own.
+
 ### The float gap, and why the token gate is thinner than it looks
 
-Our logits sit 0.3 to 0.9 from the reference's. The tightest argmax margin
-across the two frozen prompts is 0.0427. **The deviation is larger than the
-smallest margin**, so token-identity over 16 positions is a real result and not
-a robust one; a slightly different prompt could flip an argmax, and in the
-generated continuation one already does, at the third token.
+The first version of this entry said the deviation was "the expected
+consequence of a reduction order we chose rather than copied". That was wrong,
+and checking it is the most useful thing in this file.
 
-That is the expected consequence of a reduction order we chose rather than
-copied, and the Phase 4 gate anticipates it: the hard gate is the argmax, the
-measured gate is the margin, and the two are reported together. Closing the gap
-means matching ggml's float reduction order in the attention and the lm_head,
-which is Phase 6 work with a real payoff and is not attempted here.
+A 2-to-4 percent deviation is not what float reordering produces; reordering
+over 2560 elements gives about 1e-4. So either there was a systematic error or
+a tiny one was being amplified. Running the attention products and the lm_head
+in double precision moved the worst deviation from 0.917 to 0.883 -- barely.
+Reordering error would have collapsed. The source was systematic, and a
+systematic error can be found.
+
+It was six of them, all listed in docs/PHASE4-GAP.md. The largest were the
+RoPE angle (built by a single `powf` instead of the reference's running
+multiplication) and SiLU (6912 libm exponentials per layer instead of the
+reference's AVX2 polynomial, which is not the same function). Fixing them moved
+the top-1 deviations from 0.34/0.16/0.40 to 0.048/0.013/0.063 at positions
+2, 4 and 5.
+
+**What remains is irreducible by choice.** `GGML_LLAMAFILE=ON`: the reference's
+QK^T, P@V and lm_head all run through tinyBLAS's blocked SIMD GEMM. And this
+model amplifies any float difference -- including one ulp -- to O(0.1), because
+it is a chain of 30 int8 quantisers and a perturbation that crosses a rounding
+boundary moves a whole quantisation step.
+
+So the deviation cannot be driven to zero without porting tinyBLAS, which
+`ARCHITECTURE.md` declines for the same reason it declines to copy the thread
+partitioning. It is a design position, and it is written down so it is not
+later mistaken for a shortfall.
+
+The gate is therefore not "within some tolerance". It is:
+
+> at every position, our top-1 deviation is smaller than the reference's
+> top-1-to-top-2 margin.
+
+That holds at 16 of 16, tightest at 70 percent of the margin. A tolerance
+number would have been arbitrary; the margin is measured, and a change that
+pushes the deviation past a margin fails naming the position that did it.
 
 ---
 
