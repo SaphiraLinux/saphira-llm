@@ -380,6 +380,14 @@ partitioning: the parity rule is about the model, not about copying the
 implementation. The margin comparison is what makes that position safe rather
 than merely defensible.
 
+One thing that was tried and is wrong: widening our accumulators to double.
+The intuition is that a more accurate reduction moves toward the true argmax
+and therefore toward the reference. Measured, it is worse at four of six
+positions, and much worse at two (position 4: deviation 0.013 to 0.115). The
+reference's own f32 blocked accumulation carries error, and that error is part
+of the value being compared against. The reference's imprecision is the
+specification, exactly as the RMSNorm narrowing is.
+
 ### The generated continuation
 
     ours      a small town, and the capital of France is a small

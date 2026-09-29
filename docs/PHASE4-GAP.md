@@ -151,22 +151,59 @@ expectation is never left stale. If a later change makes the divergence worse --
 more tokens differing, or the first two no longer matching -- it also fails,
 which is the direction that matters.
 
-## What closing this would actually take
+## What closing this would take, and one idea that measurement killed
 
-Not tinyBLAS, for the record. The cheapest real win is to reduce the deviation
-*before* the chaos amplifier sees it, by matching the reference's blocking
-loosely enough that the amplified result is smaller, and by checking whether
-the F16 lm_head can accumulate in a wider accumulator than the reference does
-(a strictly-better accumulator is legitimate here, because the reference's own
-value is not what we are matching -- we are matching the *argmax*, and a more
-accurate lm_head moves us closer to the true argmax, not further from the
-reference's).
+The obvious move is to make our reductions more accurate: accumulate the
+lm_head in double, accumulate the attention products in double. The argument
+was that the gate is the argmax, the reference is only a witness, and a more
+accurate reduction moves us toward the true argmax rather than away from the
+witness.
 
-That last point is worth stating carefully, because it is the one place where
-departing from the reference's arithmetic is defensible: the gate is the
-argmax, the reference is a witness, and a more accurate reduction is a better
-witness. Everything else on the list above is matched to the reference exactly,
-because everything else on it is amplified by the quantiser and accuracy buys
-nothing.
+**That is wrong, and it was measured rather than argued.** Running the
+attention products and the lm_head in double:
 
-Estimated at one focused pass. It is Phase 6 work, and it is tracked as such.
+| position | deviation, f32 | deviation, f64 |
+| ---: | ---: | ---: |
+| 1 | 0.33762 | 0.34238 |
+| 2 | 0.04843 | 0.06537 |
+| 3 | 0.10220 | 0.04653 |
+| 4 | 0.01316 | 0.11452 |
+| 5 | 0.06260 | 0.12037 |
+
+Worse at four of six positions, and much worse at positions 4 and 5. The
+reference's own f32 blocked accumulation carries error of its own, and that
+error is baked into the logits we are being compared against. Moving away from
+it moves us away from the thing the gate measures.
+
+So the rule is the opposite of the intuitive one and is worth stating plainly:
+
+> **In this project, "more accurate" is not automatically "closer to the
+> reference". The reference's numerics, including its imprecision, is the
+> specification. Precision is only ever worth adding where the reference's own
+> value is not what is being compared -- and here, it is.**
+
+This is the same principle as the RMSNorm narrowing, arrived at from the other
+direction. There, narrowing earlier looked less accurate and was required. Here,
+accumulating wider looked more accurate and is wrong. Both are cases where the
+gate is agreement with a specific implementation, not agreement with
+arithmetic.
+
+Closing the rest would mean reproducing tinyBLAS's tile shape and FMA
+accumulation order for three shapes. That is Phase 6 work, it is tracked, and
+on the evidence above it is worth doing only if the *generated* sequence
+stability turns out to matter more than the implementation cost.
+
+## The state of Phase 4's gate
+
+* Prompt positions: **16 of 16** argmax identical, and **16 of 16** with
+  deviation below the reference margin. Robust, not merely observed.
+* Generated continuation: **7 of 8**, with one near-tie divergence preserved
+  as a regression case in both directions.
+* The remaining deviation is bounded, explained, and attributed to a specific
+  cause with a measured floor.
+
+Whether that is enough to seal Phase 4 is a judgement about how much the single
+continuation token matters, and it is not one to make silently: the sequence is
+not *stable* in the strong sense, only mostly stable. The honest statement is
+that the prompt-position gate is solid, the continuation gate has one known
+divergence, and closing it requires porting tinyBLAS.
