@@ -25,14 +25,14 @@ url=https://saphira.vm2.uk/
 # same source. Never point it at a moving branch: a package recipe that builds
 # whatever main happens to be is not reproducible.
 #
-# The canonical origin is the saphira: remote below. "saphira:/path" is git's
-# scp-like syntax, so it resolves only where an SSH host named 'saphira' exists.
-# On a build host without that host entry, the equivalent local path is tried,
-# and the error says which forms were tried rather than just "clone failed".
-saphira_llm_url=saphira:/saphira-git-repo/saphira-llm.git
+# The upstream is the public repository, so this recipe builds from the same
+# place anyone else would clone. An internal mirror may be substituted at
+# packaging time by overriding saphira_llm_url in the environment; it is not
+# recorded here, because a published recipe must not name private hosts.
+saphira_llm_url=https://github.com/SaphiraLinux/saphira-llm.git
 saphira_llm_branch=main
 saphira_llm_rev=v0.0.1
-saphira_llm_local=/saphira-git-repo/saphira-llm.git
+
 
 # Nothing at runtime beyond libc: -lm for libm, -lpthread for the worker pool,
 # both in the base system. No model file is packaged. The 1.2 GB BitNet
@@ -58,7 +58,8 @@ recipe_build()
 	# reached two ways. Whichever answers first is checked out at the pin, so
 	# a stale mirror cannot quietly package different source.
 	cloned=no
-	for url in "$saphira_llm_url" "$saphira_llm_local"; do
+	for url in "$saphira_llm_url" "${saphira_llm_url_OVERRIDE:-}"; do
+		[ -n "$url" ] || continue
 		if git clone --branch "$saphira_llm_branch" "$url" saphira-llm \
 				>"$BUILDDIR/clone.log" 2>&1; then
 			cloned=yes

@@ -30,7 +30,22 @@
 
 set -eu
 
-MODEL="${MODEL:-/var/lib/spoon/models/ggml-model-i2_s.gguf}"
+# No model is shipped, so there is no default that works everywhere. Rather than
+# hard-code a path from the machine this was developed on, look in the obvious
+# places and then tell the user what to set. MODEL=... overrides all of it.
+if [ -z "${MODEL:-}" ]; then
+    for candidate in \
+        /var/lib/spoon/models/ggml-model-i2_s.gguf \
+        "$HOME/models/ggml-model-i2_s.gguf" \
+        ./ggml-model-i2_s.gguf
+    do
+        if [ -f "$candidate" ]; then
+            MODEL="$candidate"
+            break
+        fi
+    done
+fi
+MODEL="${MODEL:-}"
 
 # 4 threads, not the recommended 27. The recommendation is still the
 # pre-Phase-6 "leave one hardware thread free" rule, and measurement puts the
@@ -130,7 +145,16 @@ fi
 
 step "3. the model"
 
-[ -f "$MODEL" ] || die "no model at $MODEL (override with MODEL=/path/to.gguf)"
+if [ -z "$MODEL" ] || [ ! -f "$MODEL" ]; then
+    die "no model found (looked in /var/lib/spoon/models, ~/models and .)
+Set it explicitly, e.g.
+
+  MODEL=/path/to/ggml-model-i2_s.gguf ./testsuite.sh
+
+A suitable model is microsoft/bitnet-b1.58-2B-4T-gguf on Hugging Face (MIT,
+about 1.2 GB). Only the bitnet-b1.58 architecture loads; see README.md.
+Use --tests-only to run the gates without one."
+fi
 
 echo "model    $MODEL"
 echo "bytes    $(wc -c <"$MODEL" | tr -d ' ')"
@@ -193,8 +217,7 @@ echo "The runtime is deterministic, so the same prompt gives the same tokens"
 echo "every time. To see throughput properly measured rather than sampled once:"
 echo
 echo "  ./saphira-llm-tgbench -m $MODEL -p \"The capital of France is\" \\"
-echo "      -c 512 -n 64 -t 1,2,4,6,8,14,28 -r 3 -w 1"
-echo
+echo "      -c 512 -n 64 -t 1,2,4,6,8,14,28 -r 3 -w 1"echo
 echo "It repeats each row, prints the load average, and requires every row to"
 echo "produce the same token checksum. A differing checksum is a correctness"
 echo "failure; a fast row is not a pass."
