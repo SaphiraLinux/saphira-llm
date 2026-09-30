@@ -159,3 +159,45 @@ improvement at 2B.
 
 Items 1 and 2 are small and independent. Item 3 needs item 1 first, so that the
 converter's output is compared under a known arithmetic. Item 4 needs all three.
+
+---
+
+## Decision 6 — the I2_S row-width contract, and a correction to Step 5
+
+**The contract.** `sllm_i2s_dot` processes whole 128-element blocks and returns
+0 outright when `n < SLLM_I2S_QK`; `sllm_i2s_gemv` strides rows by `n/4`, which
+is the block layout's row size only when `n` is a whole number of blocks. A
+matrix whose *contracted* width (`ne[0]`, the dimension actually passed to the
+GEMV) is not a multiple of 128 therefore cannot be computed: below 128 every
+projection returns zero, and at 192 and similar the rows are read from the wrong
+offsets. Every shipped model is 2048-wide, so nothing in the project could
+distinguish the two cases.
+
+**Enforced in two places, on purpose.** `sllm_qat_export_i2s_gguf` refuses an
+unsupported width loudly rather than emitting a model that loads and computes
+nothing; and `sllm_model_load` applies the same rule to any I2_S tensor it
+reads, so a GGUF from outside this project gets the same answer. The loader
+checks `ne[0]` alone and not every dimension: `ffn_down` legitimately has an
+output width of 128 while its contracted width is 2048. A format's contract
+belongs at the boundary that enforces it, not in every producer that has to
+remember it.
+
+**CORRECTION to Step 5.** Commit `02e6e00` recorded Step 5 as proven: the
+exported model loaded through the ordinary `sllm_model_load` and executed an
+ordinary `sllm_forward_chunk`. That was true and it was not enough. The tiny
+fixture was `n_embd = 64`, so every projection in it returned a zero dot, and
+the "finite logit" that was checked was `(0 - act_sum) * (w_scale/act_scale)`.
+The model loaded, the API executed, the sanitizers were clean, and the answer
+was mathematically meaningless. Step 5 proved *loadability and API execution*;
+it did not prove meaningful I2_S network execution, and should not be cited as
+though it did.
+
+**What replaces it.** With the fixture at `n_embd = 128`, `n_ff = 256`, every
+contracted width is a multiple of 128, and the exported model executes the same
+quantised network the trainer evaluated. The layer-by-layer trace shows the
+pre-attention RMSNorm exact and Q, K and V post-RoPE at cosine 1.000000, and the
+trainer/runtime NLL now tracks instead of diverging (0 steps 5.54464 vs
+5.54464; 50 steps 0.14789 vs 0.147683; 200 steps 0.0335698 vs 0.0323623; 600
+steps 0.00378052 vs 0.00376585, top-1 23/23). The earlier divergence — trainer
+5.54 to 0.000005 while the runtime rose to 18.35 — was this, and not the absmax
+runaway, which remains an open training-quality question.

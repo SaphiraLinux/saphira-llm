@@ -281,6 +281,40 @@ static const sllm_gguf_tensor * need(const sllm_gguf * g, const char * name,
     return t;
 }
 
+/*
+ * An I2_S tensor the GEMV can actually consume.
+ *
+ * sllm_i2s_dot processes whole SLLM_I2S_QK (128) element blocks and returns 0
+ * outright when n < SLLM_I2S_QK, and sllm_i2s_gemv strides rows by n/4, which
+ * is only the block layout's row size when n is a whole number of blocks. A
+ * matrix whose contracted width is not a multiple of 128 therefore loads
+ * perfectly, passes every shape check, and then computes nonsense: a zero dot
+ * below 128, and rows read from the wrong offsets above it. Every shipped model
+ * is 2048-wide, so nothing in the project could have caught it.
+ *
+ * This is deliberately a check on ne[0] ALONE -- the dimension actually handed
+ * to the GEMV as n -- and not on every dimension. ffn_down legitimately has an
+ * output width of 128 while its contracted width is 2048, and demanding that
+ * every dimension be a multiple of 128 would reject valid models. ne[0] is the
+ * one that decides whether the arithmetic is computable.
+ *
+ * Validating here, in the loader, rather than only in our own exporter is the
+ * point: a model format's contract belongs at the boundary that enforces it, not
+ * in every producer that has to remember it. A GGUF from anywhere else gets the
+ * same answer.
+ */
+static const sllm_gguf_tensor * need_i2s(const sllm_gguf * g, const char * name,
+                                         sllm_ggml_type type, int32_t n_dims) {
+    const sllm_gguf_tensor * t = need(g, name, type, n_dims);
+    if (t == NULL) {
+        return NULL;
+    }
+    if (type == SLLM_TYPE_I2_S && (t->ne[0] % (uint64_t) SLLM_I2S_QK) != 0) {
+        return NULL;
+    }
+    return t;
+}
+
 sllm_status sllm_model_load(const sllm_gguf * g, sllm_model ** out) {
     if (g == NULL || out == NULL) {
         return SLLM_ERR_ARG;
@@ -360,31 +394,31 @@ sllm_status sllm_model_load(const sllm_gguf * g, sllm_model ** out) {
 
 #define LNAME(field, il) (snprintf(nm, sizeof(nm), "blk.%d.%s.weight", (il), (field)), nm)
 
-        const sllm_gguf_tensor * t = need(g, LNAME("attn_q", il), SLLM_TYPE_I2_S, 2);
+        const sllm_gguf_tensor * t = need_i2s(g, LNAME("attn_q", il), SLLM_TYPE_I2_S, 2);
         if (t == NULL || (int64_t) t->ne[0] != m->n_embd || (int64_t) t->ne[1] != m->n_embd) { goto bad_shape; }
         L->wq = (const uint8_t *) t->data; L->wq_rows = (size_t) m->n_embd;
 
-        t = need(g, LNAME("attn_k", il), SLLM_TYPE_I2_S, 2);
+        t = need_i2s(g, LNAME("attn_k", il), SLLM_TYPE_I2_S, 2);
         if (t == NULL || (int64_t) t->ne[0] != m->n_embd || (int64_t) t->ne[1] != m->n_embd_gqa) { goto bad_shape; }
         L->wk = (const uint8_t *) t->data; L->wk_rows = (size_t) m->n_embd_gqa;
 
-        t = need(g, LNAME("attn_v", il), SLLM_TYPE_I2_S, 2);
+        t = need_i2s(g, LNAME("attn_v", il), SLLM_TYPE_I2_S, 2);
         if (t == NULL || (int64_t) t->ne[0] != m->n_embd || (int64_t) t->ne[1] != m->n_embd_gqa) { goto bad_shape; }
         L->wv = (const uint8_t *) t->data; L->wv_rows = (size_t) m->n_embd_gqa;
 
-        t = need(g, LNAME("attn_output", il), SLLM_TYPE_I2_S, 2);
+        t = need_i2s(g, LNAME("attn_output", il), SLLM_TYPE_I2_S, 2);
         if (t == NULL || (int64_t) t->ne[0] != m->n_embd || (int64_t) t->ne[1] != m->n_embd) { goto bad_shape; }
         L->wo = (const uint8_t *) t->data; L->wo_rows = (size_t) m->n_embd;
 
-        t = need(g, LNAME("ffn_up", il), SLLM_TYPE_I2_S, 2);
+        t = need_i2s(g, LNAME("ffn_up", il), SLLM_TYPE_I2_S, 2);
         if (t == NULL || (int64_t) t->ne[0] != m->n_embd || (int64_t) t->ne[1] != m->n_ff) { goto bad_shape; }
         L->ffn_up = (const uint8_t *) t->data; L->up_rows = (size_t) m->n_ff;
 
-        t = need(g, LNAME("ffn_gate", il), SLLM_TYPE_I2_S, 2);
+        t = need_i2s(g, LNAME("ffn_gate", il), SLLM_TYPE_I2_S, 2);
         if (t == NULL || (int64_t) t->ne[0] != m->n_embd || (int64_t) t->ne[1] != m->n_ff) { goto bad_shape; }
         L->ffn_gate = (const uint8_t *) t->data;
 
-        t = need(g, LNAME("ffn_down", il), SLLM_TYPE_I2_S, 2);
+        t = need_i2s(g, LNAME("ffn_down", il), SLLM_TYPE_I2_S, 2);
         if (t == NULL || (int64_t) t->ne[0] != m->n_ff || (int64_t) t->ne[1] != m->n_embd) { goto bad_shape; }
         L->ffn_down = (const uint8_t *) t->data; L->down_rows = (size_t) m->n_embd;
 

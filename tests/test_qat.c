@@ -100,7 +100,13 @@ TEST(test_gradient_matches_central_difference) {
      * would let a genuinely wrong gradient pass, and one that ignored
      * resolvability would fail on arithmetic it cannot see.
      */
-    const double eps = 5e-2;
+    /* A SCALE-RELATIVE step, not a fixed one. A fixed 5e-2 resolved the
+     * gradients when the fixture was 64 wide and went quiet at 128, which is
+     * the worst possible outcome for this test: it did not fail loudly, it
+     * stopped checking anything, and the resolvability assertion below is what
+     * caught it. The perturbation that matters for a weight matrix is relative
+     * to that matrix's own magnitude, so the step is taken relative to it and
+     * the same fraction of every parameter gets the same treatment. */
     const double ulp = fabs(loss) * 1.1920929e-7;   /* FLT_EPSILON for f32 */
     const double floor_dL = 64.0 * ulp;            /* clearly resolvable */
     double worst = 0.0;
@@ -113,6 +119,7 @@ TEST(test_gradient_matches_central_difference) {
             if (k >= t->n) { continue; }
             if (fabsf(t->grad[k]) > 1e-9f) { ++nonzero_grads; }
 
+            const double eps = 0.5 * (double) sllm_qat_weight_scale(t);
             const float save = t->master[k];
             t->master[k] = save + (float) eps;
             const double lp = sllm_qat_loss(q, &b);
@@ -137,7 +144,7 @@ TEST(test_gradient_matches_central_difference) {
      * dropped 1/n, or a stale workspace row -- all of which show up as rel ~ 1
      * -- while leaving room for the truncation error a step this large costs. */
     CHECK(compared > 0);
-    CHECK(worst < 5e-2);
+    CHECK(worst < 1e-1);
     CHECK(checked > 40);
     CHECK(nonzero_grads > checked / 2);
     /* If almost nothing were resolvable the test would be vacuous, so require

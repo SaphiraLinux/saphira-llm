@@ -52,6 +52,7 @@
 #include <saphira_llm/qat.h>
 #include <saphira_llm/gguf.h>
 #include <saphira_llm/i2s_convert.h>
+#include <saphira_llm/i2s_gemm.h>
 #include <saphira_llm/ops.h>
 
 #include <math.h>
@@ -64,11 +65,20 @@
 
 void sllm_qat_default_config(sllm_qat_config * cfg) {
     memset(cfg, 0, sizeof *cfg);
+    /* n_embd=128, n_ff=256, and every I2_S contracted dimension is a multiple
+     * of SLLM_I2S_QK (128):
+     *   attn_q/k/v/attn_output, ffn_up, ffn_gate  -> ne[0] = n_embd  = 128
+     *   ffn_down                                   -> ne[0] = n_ff    = 256
+     * The 64-wide fixture this replaced was invalid and is the reason the
+     * lifecycle never actually executed an I2_S network: sllm_i2s_dot returns 0
+     * for n < 128, so every projection in that model returned zero and the
+     * "finite logits" were (0 - act_sum) * (w_scale/act_scale). It loaded, it
+     * ran, it was sanitizer-clean, and it was mathematically meaningless. */
     cfg->n_layer    = 2;
-    cfg->n_embd     = 64;
+    cfg->n_embd     = 128;
     cfg->n_head     = 4;
     cfg->n_head_kv  = 2;
-    cfg->n_ff       = 128;
+    cfg->n_ff       = 256;
     cfg->n_vocab    = 256;
     cfg->n_ctx      = 128;
     cfg->rms_eps    = 1e-5f;
@@ -1444,7 +1454,52 @@ int sllm_qat_export_i2s_gguf(const sllm_qat * q, const char * path,
                 const int out = (k == F_FFN_DOWN) ? E
                               : (k == F_ATTN_K || k == F_ATTN_V) ? EK
                               : (k == F_FFN_UP || k == F_FFN_GATE) ? F : E;
-                if ((size_t) in * (size_t) out != (size_t) t->n) { free(pk); goto fail; }
+                /* owned[xi] already holds pk from above, so every exit from here
+                 * must go through the fail: cleanup rather than freeing pk again.
+                 * Doing both is a double free, and it fires from the error path,
+                 * which is the one place a clear diagnostic must not be followed
+                 * by a crash. */
+                if ((size_t) in * (size_t) out != (size_t) t->n) { goto fail; }
+                /*
+                 * THE ROW-WIDTH PRECONDITION. The I2_S block is 128 elements in
+                 * 32 bytes (SLLM_I2S_QK), and the runtime's reader of that
+                 * buffer has two hard requirements that this exporter used to
+                 * ignore:
+                 *
+                 *   sllm_i2s_gemv strides rows by n/4, and
+                 *   sllm_i2s_dot returns 0 outright when n < 128.
+                 *
+                 * So a row of `in` elements is only consumable when `in` is a
+                 * multiple of 128. When it is, this exporter's FLATTENED pack
+                 * and the gemv's ROW-WISE read are the same bytes: element
+                 * i = in*r + c lands at in/4*r + (c/128)*32 + c%32, which is
+                 * both the flattened 128-block mapping and the row-strided one.
+                 * That identity is why every shipped tensor (n_embd 2048) is
+                 * unaffected, and it is asserted by the byte-stability test.
+                 *
+                 * When `in` is NOT a multiple of 128 there is no packing that
+                 * works, and the old behaviour was the worst of the options: the
+                 * file opened, every tensor was present, every shape checked
+                 * out, and the projections silently returned garbage -- a dot of
+                 * exactly 0 for in < 128, and a wrong row offset for in = 192
+                 * and similar. So the exporter now refuses. A narrow model is a
+                 * property the runtime does not yet support, and saying so at
+                 * write time is the difference between a clear error and a model
+                 * that loads and lies.
+                 */
+                if (((size_t) in % (size_t) SLLM_I2S_QK) != 0) {
+                    fprintf(stderr,
+                        "saphira-llm-qat: %s: cannot export: the I2_S runtime "
+                        "consumes rows of %d elements, and %s has an input width of "
+                        "%d, which is not a multiple of %d. sllm_i2s_dot returns 0 "
+                        "for n < %d and sllm_i2s_gemv strides rows by n/4, so a row "
+                        "that is not a whole number of 128-element blocks cannot be "
+                        "read back correctly. Use n_embd and n_ff that are "
+                        "multiples of %d.\n",
+                        nm, SLLM_I2S_QK, nm, in, SLLM_I2S_QK, SLLM_I2S_QK,
+                        SLLM_I2S_QK);
+                    goto fail;
+                }
                 xs[xi].n_dims = 2;
                 xs[xi].ne[0] = (uint64_t) in;
                 xs[xi].ne[1] = (uint64_t) out;
