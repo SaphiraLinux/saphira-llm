@@ -63,6 +63,27 @@ Not "add Qwen support". The distinct gaps, in dependency order:
    n_embd_head` per layer, which is the right *shape* for GQA. Mainstream
    models need a much larger default context and, for correctness at long
    context, a working sliding-window variant.
+7. **Per-head Q/K normalisation.** Added 2026-09-30 after inspecting
+   `Qwen3-8B-Q4_K_M.gguf`; it was absent from the original six and is a real
+   graph difference, not a detail. The model carries
+   `blk.<N>.attn_q_norm.weight` and `blk.<N>.attn_k_norm.weight`, each
+   `ne = [128, 1]` F32, alongside the existing `attn_norm` and `ffn_norm`. Qwen3
+   applies RMS norm over the *head* dimension of Q and K **before** the
+   attention scores are computed, not over the residual stream. BitNet has no
+   equivalent: its four pre-norms are all full-width over the residual. Three
+   consequences, all of which change numerics rather than just adding a call:
+   the norm reduces 128 elements, not `n_embd`; it is applied per head, so
+   `n_head` and `n_head_kv` differ and each of the 8 KV heads needs its own K
+   norm; and it must be ordered *before* RoPE is consumed by the score
+   computation, so an implementation that places it after the QKV projection but
+   after attention is silently wrong while looking structurally complete.
+   `attn_q_norm` is not symmetric with `attn_k_norm` in placement: both are
+   applied post-projection, pre-RoPE-consumption, but only K's interacts with
+   cache writes. **Requirement:** capture both as explicit reference
+   measurements — the per-head decoded norm vectors and a full
+   norm→RoPE→score intermediate for one fixed head — *before* implementing the
+   Qwen3 forward path. This is a measurement obligation, sequenced ahead of gap
+   2, not a note for the implementer to reconstruct from the architecture name.
 
 ### Two architectural decisions to settle before writing code
 

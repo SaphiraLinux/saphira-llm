@@ -1,0 +1,136 @@
+# Reference TOKENIZER values, independent of Saphira.
+#
+# Source: llama.cpp's own vocab API, driven by tools/s0_tok_probe.cpp against
+# Qwen3-8B-Q4_K_M.gguf. Tokens are printed, never compared and never
+# normalised. Captured 2026-09-30.
+#
+## THE SELECTOR TRAP, RECORDED BEFORE ANY Saphira TOKENIZER CODE EXISTS
+#
+# This GGUF declares:
+#     tokenizer.ggml.model = gpt2        <-- NOT gpt2 semantics, and NOT unique
+#     tokenizer.ggml.pre   = qwen2       <-- the actual pre-tokenizer
+#     n_vocab               = 151936     <-- not 50257
+#     llama_vocab_type()    = BPE
+#
+# So a selector that reads model==gpt2 and routes to the GPT-2 backend picks the
+# right FAMILY with the wrong PARAMETERS: GPT-2's pre-tokenizer pattern and a
+# 50257 vocab, applied to Qwen3 weights. That is a false green: baseline prose
+# tokenises correctly, and the failure only appears on spacing, punctuation and
+# non-ASCII input. The selector must key on the COMBINATION
+# model + pre + vocab size, and must never key on general.architecture alone.
+#
+# Evidence that the parameters genuinely differ from GPT-2, not just the label:
+#   '!' is its own token 1879, and '<' '>' are standalone 314 and 29, so
+#   <tag> splits as " <", "tag", ">" -- which is what makes the chat
+#   template's angle-bracket control tokens addressable at all.
+#   Repeated spaces are preserved as increasing-run tokens 220 " ", 262
+#   "   ", so whitespace normalisation is wrong even in the trivial case.
+#
+# Hard gate: Saphira must produce these ids byte-exactly. Correctness is
+# never to be inferred from logits or generated text.
+
+  === tokenizer metadata, from GGUF via llama.cpp ===
+  n_vocab                 = 151936
+  vocab_type (llama.cpp)  = BPE
+  bos=151643 eos=151645 eot=151645 sep=-1 pad=151643
+  add_bos=0 add_eos=0 add_sep=0
+  GGUF tokenizer.ggml.pre                 = [qwen2]
+  GGUF tokenizer.ggml.model               = [gpt2]
+  GGUF tokenizer.ggml.bos_token_id        = 151643
+  GGUF tokenizer.ggml.eos_token_id        = 151645
+  GGUF[absent] tokenizer.ggml.unknown_token_id
+  GGUF tokenizer.ggml.padding_token_id    = 151643
+  GGUF tokenizer.ggml.add_bos_token       = false
+  GGUF[absent] tokenizer.ggml.add_eos_token
+  GGUF[absent] tokenizer.ggml.add_space_prefix
+  GGUF[absent] tokenizer.ggml.ignore_merges
+  === encode cases (add_special=true, parse_special=true) ===
+  [baseline] 19 bytes -> n=4
+     ids = 785 3974 13876 38835
+     pieces = "The" " quick" " brown" " fox"
+     decode_rt = "The quick brown fox"   byte_identical=yes
+  [leading-space] 4 bytes -> n=1
+     ids = 576
+     pieces = " The"
+     decode_rt = " The"   byte_identical=yes
+  [trailing-space] 4 bytes -> n=2
+     ids = 785 220
+     pieces = "The" " "
+     decode_rt = "The "   byte_identical=yes
+  [both-spaces] 5 bytes -> n=2
+     ids = 576 220
+     pieces = " The" " "
+     decode_rt = " The "   byte_identical=yes
+  [repeated-spaces] 13 bytes -> n=7
+     ids = 64 220 293 256 272 262 294
+     pieces = "a" " " " b" "  " " c" "   " " d"
+     decode_rt = "a  b   c    d"   byte_identical=yes
+  [only-spaces] 3 bytes -> n=1
+     ids = 262
+     pieces = "   "
+     decode_rt = "   "   byte_identical=yes
+  [punctuation] 38 bytes -> n=16
+     ids = 9707 11 1879 0 320 9693 8 508 2152 60 314 36760 92 366 4578 29
+     pieces = "Hello" "," " world" "!" " (" "yes" ")" " [" "no" "]" " {" "maybe" "}" " <" "tag" ">"
+     decode_rt = "Hello, world! (yes) [no] {maybe} <tag>"   byte_identical=yes
+  [punct-dense] 21 bytes -> n=14
+     ids = 64 8402 78632 40422 1734 6663 59 70 91584 93 72 63 73 62911
+     pieces = "a" ",b" ";c" ":d" ".e" "/f" "\" "g" "|h" "~" "i" "`" "j" ""k"
+     decode_rt = "a,b;c:d.e/f\g|h~i`j"k"   byte_identical=yes
+  [digits] 10 bytes -> n=10
+     ids = 15 16 17 18 19 20 21 22 23 24
+     pieces = "0" "1" "2" "3" "4" "5" "6" "7" "8" "9"
+     decode_rt = "0123456789"   byte_identical=yes
+  [newline] 28 bytes -> n=8
+     ids = 1056 825 198 1056 1378 271 1056 3040
+     pieces = "line" " one" "
+  " "line" " two" "
+  
+  " "line" " four"
+     decode_rt = "line one
+  line two
+  
+  line four"   byte_identical=yes
+  [tab-cr] 5 bytes -> n=4
+     ids = 64 2233 201 66
+     pieces = "a" "	b" "" "c"
+     decode_rt = "a	bc"   byte_identical=yes
+  [utf8-accented] 21 bytes -> n=7
+     ids = 924 58858 94880 586 9333 1242 963
+     pieces = "ca" "fé" " naï" "ve" " ré" "sum" "é"
+     decode_rt = "café naïve résumé"   byte_identical=yes
+  [utf8-cjk] 24 bytes -> n=6
+     ids = 101059 102819 15767 56833 61803 70534
+     pieces = "日本" "語" "の" "テ" "キ" "スト"
+     decode_rt = "日本語のテキスト"   byte_identical=yes
+  [utf8-emoji] 30 bytes -> n=9
+     ids = 14990 61804 233 145375 1879 11162 234 235 2814
+     pieces = "hello" " �" "�" "🏽" " world" " �" "�" "�" " done"
+     decode_rt = "hello 👋🏽 world 🌍 done"   byte_identical=yes
+  [utf8-mixed] 30 bytes -> n=10
+     ids = 3376 37572 586 51950 75402 21894 102819 61804 233 5394
+     pieces = "na" "ï" "ve" " café" " 日" "本" "語" " �" "�" " ok"
+     decode_rt = "naïve café 日本語 👋 ok"   byte_identical=yes
+  [hyphen-underscore] 21 bytes -> n=5
+     ids = 72139 19096 1962 47722 38485
+     pieces = "snake" "_case" " ke" "bab" "-case"
+     decode_rt = "snake_case kebab-case"   byte_identical=yes
+  [url-like] 32 bytes -> n=11
+     ids = 2428 1110 8687 905 50976 43782 28 16 60617 28 17
+     pieces = "https" "://" "example" ".com" "/path" "?q" "=" "1" "&r" "=" "2"
+     decode_rt = "https://example.com/path?q=1&r=2"   byte_identical=yes
+  [json-like] 29 bytes -> n=17
+     ids = 4913 74 788 508 16 11 220 17 11 845 1125 330 82 788 330 85 9207
+     pieces = "{"" "k" "":" " [" "1" "," " " "2" "," " null" "]," " "" "s" "":" " "" "v" ""}"
+     decode_rt = "{"k": [1, 2, null], "s": "v"}"   byte_identical=yes
+  [long-word] 34 bytes -> n=11
+     ids = 12776 2962 278 333 4101 321 4532 4580 530 307 77187
+     pieces = "sup" "erc" "al" "if" "rag" "il" "istic" "exp" "ial" "id" "ocious"
+     decode_rt = "supercalifragilisticexpialidocious"   byte_identical=yes
+  [single-char] 1 bytes -> n=1
+     ids = 87
+     pieces = "x"
+     decode_rt = "x"   byte_identical=yes
+  [empty] 0 bytes -> n=0
+     ids =
+     pieces =
