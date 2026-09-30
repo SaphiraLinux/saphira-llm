@@ -10,7 +10,7 @@ reference.
 
 | | |
 | --- | --- |
-| Machine | Egg — Saphira Linux 0.1, musl, `egg.saphira.vm2.uk` |
+| Machine | Saphira Linux 0.1, musl, x86-64-v3, internal build host |
 | CPU | Intel Core i9-13900K, 14 cores / 28 threads, hybrid P+E |
 | ISA | AVX2, FMA, F16C, BMI2, **AVX-VNNI**; no AVX-512, no AMX |
 | RAM | 62 GiB |
