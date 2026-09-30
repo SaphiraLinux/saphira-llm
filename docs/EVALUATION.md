@@ -196,17 +196,91 @@ They can disagree, and when they do, correctness wins. A change that improves
 perplexity while breaking token parity has broken the thing, and the better
 number is not evidence otherwise.
 
-## Known limitation: no rolling window
+## Rolling window
 
-A corpus must fit the context in full. llama.cpp scores long input with a
-rolling window and a stride, re-feeding an overlap so every token still sees a
-full window. That is not implemented, so a corpus over `--max-tokens` (default
-8192) is **refused with an explanation** rather than silently scored as a
-prefix.
+`--stride N` walks a corpus that is longer than the context in windows of
+`n_ctx` tokens, scoring only the last `N` of each. The single-window path
+(`--stride 0`, the default) is unchanged, and a corpus that does not fit is
+still **refused**, never truncated.
 
-This is the first thing to add. It is what a wiki-scale or book-scale
-measurement needs, and without it every figure here comes from text short enough
-to be self-contained.
+### Semantics
+
+- Window `i` begins at corpus position `start_i = i * stride`.
+- Its length is `len_i = min(n_win, n_tok - start_i)`, where
+  `n_win = min(n_ctx, n_tok)`. **The last window is truncated to the end of the
+  corpus**, not pulled back.
+- Within a window only its last `count = min(stride, len_i - 1)` tokens are
+  scored. Earlier tokens were scored by the previous window and are not scored
+  again.
+- Each window is fed into a **cleared** context at positions `0..len-1`, so its
+  predictions depend on that window's own prefix and nothing before it.
+- Token 0 is never scored; it has no context in any window.
+
+### Why truncate rather than pull back
+
+This is the one design decision that decides whether the tiling is correct.
+
+A window always covers `n_win - stride .. n_win - 1` of its own tokens. If the
+final window is instead moved *earlier* to stay full, it **overlaps** its
+predecessor and leaves a gap after it. Measured on a 1156-token corpus with a
+256-token window and stride 255: 120 tokens scored twice and 135 never scored.
+
+Truncating the last window to the corpus end makes the scored ranges a
+**partition** of `[1, n_tok)` — no gap, no overlap — for any stride.
+
+### Coverage, and why a smaller stride is refused
+
+Windows advance by `stride` and each scores `count` tokens, so a gap opens
+unless `count == stride`; and the first window must begin scoring at token 1,
+which needs `count == n_win - 1`. Both hold exactly when
+
+```
+stride == n_win - 1
+```
+
+Anything else is **refused with the arithmetic shown**, rather than reporting a
+perplexity over a silently-scored subset.
+
+The upstream reference is looser than this: it advances by `stride` and scores
+the last `stride` tokens of each window, so at `stride < n_ctx` it silently
+leaves `1 .. n_ctx-stride-1` unscored. This tool refuses that configuration
+instead.
+
+### Equivalence, proven
+
+With `stride == n_win - 1` and a corpus that fits in one window there is a
+single window scoring corpus tokens `1 .. n_tok-1` — the same set, at the same
+positions, into a cleared context, as the single-window path. Therefore:
+
+| configuration | `nll_sum` |
+| --- | --- |
+| `--ctx 386 --stride 0` | 1916.2644512626152 |
+| `--ctx 512 --stride 0` | 1916.2644512626152 |
+| `--ctx 386 --stride 385` | 1916.2644512626152 |
+| `--ctx 512 --stride 385` | 1916.2644512626152 |
+
+Bit-identical, asserted with `==` in `test_eval.c` rather than a tolerance,
+because the arithmetic contract makes exactness available and a tolerance here
+would hide the class of bug this exists to catch.
+
+### Token accounting
+
+Every scored token increments its own counter, and afterwards:
+
+- no token is scored more than once,
+- no token is scored zero times, except token 0,
+- token 0 is never scored,
+- the total equals `corpus_tokens - 1`.
+
+A stride bug would still produce a plausible-looking perplexity, so this is
+checked rather than reported for comfort. It caught two real off-by-ones during
+development — a `first_row` of `n_win - stride` instead of `n_win - 1 - stride`
+(dropping token 1), and a `last_row` that did not exclude the row predicting a
+target outside the window.
+
+Over-context, measured: a 1156-token corpus in a 256-token window at stride 255
+runs 5 windows, scores 1155 tokens, and passes accounting. The in-tree test does
+the same at 771 tokens in 7 windows of 128.
 
 ## The in-tree fixture, and why its number is not a benchmark
 

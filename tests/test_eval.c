@@ -484,6 +484,245 @@ TEST(eval_scores_every_token_but_the_first_and_is_deterministic) {
 
 /* ------------------------------------------------------------------ */
 
+
+/*
+ * Rolling-window and single-window scoring must agree EXACTLY.
+ *
+ * This is the acceptance criterion for rolling-window evaluation, and it is
+ * checkable on a corpus that fits in one context, which is the only place the
+ * two are supposed to coincide: with stride == n_win - 1 the single window
+ * scores corpus tokens 1..n_tok-1, which is precisely the set the single-window
+ * path scores, fed at the same positions into a cleared context.
+ *
+ * Compared with == rather than a tolerance, because the arithmetic contract
+ * makes bit equality available and a tolerance here would hide exactly the
+ * class of bug this catches.
+ */
+TEST(eval_rolling_window_equals_single_window_when_it_fits) {
+    if (access(SLLM_TEST_MODEL, R_OK) != 0 ||
+        access(EVAL_CORPUS, R_OK) != 0) {
+        printf("    skipped: model or corpus not available\n");
+        CHECK(1);
+        return;
+    }
+    sllm_gguf g; char err[512];
+    if (sllm_gguf_open(SLLM_TEST_MODEL, &g, err, sizeof(err)) != SLLM_OK) {
+        printf("    skipped: %s\n", err); CHECK(1); return;
+    }
+    sllm_model * m = NULL;
+    if (sllm_model_load(&g, &m) != SLLM_OK) { sllm_gguf_close(&g); CHECK(1); return; }
+    sllm_tok * tok = NULL;
+    if (sllm_tok_load(&g, &tok) != SLLM_OK) { sllm_model_free(m); sllm_gguf_close(&g); CHECK(1); return; }
+
+    FILE * f = fopen(EVAL_CORPUS, "rb");
+    CHECK(f != NULL);
+    if (f == NULL) { sllm_tok_free(tok); sllm_model_free(m); sllm_gguf_close(&g); return; }
+    fseek(f, 0, SEEK_END); const long len = ftell(f); rewind(f);
+    char * text = (char *) malloc((size_t) len + 1);
+    if (text == NULL || (len > 0 && fread(text, 1, (size_t) len, f) != (size_t) len)) {
+        free(text); fclose(f); sllm_tok_free(tok); sllm_model_free(m); sllm_gguf_close(&g);
+        CHECK(0); return;
+    }
+    fclose(f);
+    text[len] = '\0';
+
+    const int32_t cap = sllm_tok_encode_len(tok, (size_t) len, true);
+    int32_t * ids = (int32_t *) malloc((size_t) cap * sizeof(int32_t));
+    CHECK(ids != NULL);
+    if (ids == NULL) {
+        free(text); sllm_tok_free(tok); sllm_model_free(m); sllm_gguf_close(&g); return;
+    }
+    const int32_t n_tok = sllm_tok_encode(tok, text, (size_t) len, true, true, ids, cap);
+    free(text);
+    CHECK_EQ_INT(n_tok, EVAL_GOLDEN_TOKENS);
+    if (n_tok < 3) { free(ids); sllm_tok_free(tok); sllm_model_free(m); sllm_gguf_close(&g); return; }
+
+    const int32_t n_vocab = sllm_model_n_vocab(m);
+    float * logits = (float *) malloc((size_t) SLLM_MAX_CHUNK * (size_t) n_vocab * sizeof(float));
+    CHECK(logits != NULL);
+    if (logits == NULL) { free(ids); sllm_tok_free(tok); sllm_model_free(m); sllm_gguf_close(&g); return; }
+
+    /* --- single window: the whole corpus through one context --- */
+    double sum_single = 0.0;
+    {
+        sllm_ctx * c = NULL;
+        CHECK_STATUS(sllm_ctx_new(m, n_tok, &c), SLLM_OK);
+        for (int32_t p = 0; p < n_tok; ) {
+            int32_t k = n_tok - p;
+            if (k > SLLM_MAX_CHUNK) { k = SLLM_MAX_CHUNK; }
+            const int32_t rows = (p + k >= n_tok) ? (k - 1) : k;
+            CHECK_STATUS(sllm_forward_chunk(m, c, ids + p, k, p, logits), SLLM_OK);
+            for (int32_t i = 0; i < rows; ++i) {
+                sum_single += sllm_eval_token_nll(logits + (size_t) i * (size_t) n_vocab,
+                                                  n_vocab, ids[p + i + 1]);
+            }
+            p += k;
+        }
+        sllm_ctx_free(c);
+    }
+
+    /* --- rolling: one window, stride n_tok-1, scored range 1..n_tok-1 --- */
+    double sum_rolling = 0.0;
+    int64_t n_scored = 0;
+    {
+        const int32_t stride = n_tok - 1;
+        sllm_ctx * c = NULL;
+        CHECK_STATUS(sllm_ctx_new(m, n_tok, &c), SLLM_OK);
+        for (int32_t start = 0; start < n_tok; start += stride) {
+            int32_t wl = n_tok - start;
+            if (wl > n_tok) { wl = n_tok; }
+            if (wl < 2) { break; }
+            const int32_t count     = (stride < wl - 1) ? stride : (wl - 1);
+            const int32_t first_row = (wl - 1) - count;
+            const int32_t last_row  = wl - 2;
+            sllm_ctx_reset(c);
+            for (int32_t base = 0; base < wl; ) {
+                int32_t k = wl - base;
+                if (k > SLLM_MAX_CHUNK) { k = SLLM_MAX_CHUNK; }
+                CHECK_STATUS(sllm_forward_chunk(m, c, ids + start + base, k, base, logits), SLLM_OK);
+                for (int32_t j = 0; j < k; ++j) {
+                    const int32_t row = base + j;
+                    if (row < first_row || row > last_row) { continue; }
+                    sum_rolling += sllm_eval_token_nll(logits + (size_t) j * (size_t) n_vocab,
+                                                       n_vocab, ids[start + row + 1]);
+                    ++n_scored;
+                }
+                base += k;
+            }
+        }
+        sllm_ctx_free(c);
+    }
+
+    CHECK_EQ_INT((int) n_scored, n_tok - 1);
+    CHECK(sum_single == sum_rolling);
+    CHECK(sum_rolling == EVAL_GOLDEN_NLL_SUM);
+
+    free(logits);
+    free(ids);
+    sllm_tok_free(tok);
+    sllm_model_free(m);
+    sllm_gguf_close(&g);
+}
+
+/*
+ * Rolling over a corpus LONGER than the window must still score every token
+ * exactly once.
+ *
+ * The window here is deliberately far smaller than the corpus, so this is many
+ * windows and the tiling has to be right. Each token is counted separately, so
+ * a window that overlapped its predecessor or left a gap would be caught
+ * rather than producing a plausible-looking perplexity over a subset.
+ */
+TEST(eval_rolling_window_over_long_corpus_scores_each_token_once) {
+    if (access(SLLM_TEST_MODEL, R_OK) != 0 || access(EVAL_CORPUS, R_OK) != 0) {
+        printf("    skipped: model or corpus not available\n");
+        CHECK(1);
+        return;
+    }
+    sllm_gguf g; char err[512];
+    if (sllm_gguf_open(SLLM_TEST_MODEL, &g, err, sizeof(err)) != SLLM_OK) {
+        printf("    skipped: %s\n", err); CHECK(1); return;
+    }
+    sllm_model * m = NULL;
+    if (sllm_model_load(&g, &m) != SLLM_OK) { sllm_gguf_close(&g); CHECK(1); return; }
+    sllm_tok * tok = NULL;
+    if (sllm_tok_load(&g, &tok) != SLLM_OK) { sllm_model_free(m); sllm_gguf_close(&g); CHECK(1); return; }
+
+    /* Two copies of the fixture concatenated, then tokenised: a corpus
+     * comfortably longer than the window below, from text that already has a
+     * recorded tokenisation. */
+    FILE * f = fopen(EVAL_CORPUS, "rb");
+    CHECK(f != NULL);
+    if (f == NULL) { sllm_tok_free(tok); sllm_model_free(m); sllm_gguf_close(&g); return; }
+    fseek(f, 0, SEEK_END); const long len = ftell(f); rewind(f);
+    char * one = (char *) malloc((size_t) len + 1);
+    char * two = (char *) malloc((size_t) len * 2 + 1);
+    if (one == NULL || two == NULL ||
+        (len > 0 && fread(one, 1, (size_t) len, f) != (size_t) len)) {
+        free(one); free(two); fclose(f);
+        sllm_tok_free(tok); sllm_model_free(m); sllm_gguf_close(&g);
+        CHECK(0); return;
+    }
+    fclose(f);
+    memcpy(two, one, (size_t) len);
+    memcpy(two + len, one, (size_t) len);
+    two[len * 2] = '\0';
+    free(one);
+
+    const int32_t cap = sllm_tok_encode_len(tok, (size_t) len * 2, true);
+    int32_t * ids = (int32_t *) malloc((size_t) cap * sizeof(int32_t));
+    CHECK(ids != NULL);
+    if (ids == NULL) { free(two); sllm_tok_free(tok); sllm_model_free(m); sllm_gguf_close(&g); return; }
+    const int32_t n_tok = sllm_tok_encode(tok, two, (size_t) len * 2, true, true, ids, cap);
+    free(two);
+    CHECK(n_tok > 200);
+    if (n_tok < 8) { free(ids); sllm_tok_free(tok); sllm_model_free(m); sllm_gguf_close(&g); return; }
+
+    const int32_t n_vocab = sllm_model_n_vocab(m);
+    const int32_t n_win   = 128;                 /* far smaller than the corpus */
+    const int32_t stride  = n_win - 1;
+    float * logits = (float *) malloc((size_t) SLLM_MAX_CHUNK * (size_t) n_vocab * sizeof(float));
+    uint8_t * hits = (uint8_t *) calloc((size_t) n_tok, 1);
+    CHECK(logits != NULL); CHECK(hits != NULL);
+    if (logits == NULL || hits == NULL) {
+        free(hits); free(logits); free(ids);
+        sllm_tok_free(tok); sllm_model_free(m); sllm_gguf_close(&g);
+        return;
+    }
+
+    int64_t scored = 0, windows = 0;
+    sllm_ctx * c = NULL;
+    CHECK_STATUS(sllm_ctx_new(m, n_win, &c), SLLM_OK);
+    for (int32_t start = 0; start < n_tok; start += stride) {
+        int32_t wl = n_tok - start;
+        if (wl > n_win) { wl = n_win; }
+        if (wl < 2) { break; }
+        const int32_t count     = (stride < wl - 1) ? stride : (wl - 1);
+        const int32_t first_row = (wl - 1) - count;
+        const int32_t last_row  = wl - 2;
+        sllm_ctx_reset(c);
+        for (int32_t base = 0; base < wl; ) {
+            int32_t k = wl - base;
+            if (k > SLLM_MAX_CHUNK) { k = SLLM_MAX_CHUNK; }
+            CHECK_STATUS(sllm_forward_chunk(m, c, ids + start + base, k, base, logits), SLLM_OK);
+            for (int32_t j = 0; j < k; ++j) {
+                const int32_t row = base + j;
+                if (row < first_row || row > last_row) { continue; }
+                const int32_t ti = start + row + 1;
+                (void) sllm_eval_token_nll(logits + (size_t) j * (size_t) n_vocab,
+                                           n_vocab, ids[ti]);
+                ++hits[ti];
+                ++scored;
+            }
+            base += k;
+        }
+        ++windows;
+    }
+    sllm_ctx_free(c);
+
+    /* The corpus really is longer than the window, so this is a real test. */
+    CHECK(n_tok > n_win);
+    CHECK(windows > 1);
+    CHECK_EQ_INT((int) scored, n_tok - 1);
+
+    int twice = 0, never = 0;
+    for (int32_t i = 0; i < n_tok; ++i) {
+        if (hits[i] > 1) { ++twice; } else if (hits[i] == 0) { ++never; }
+    }
+    CHECK_EQ_INT(twice, 0);
+    CHECK_EQ_INT(never, 1);   /* token 0 only */
+    CHECK_EQ_INT(hits[0], 0);
+    printf("    %d tokens, %d windows of %d, stride %d: each scored once\n",
+           n_tok, (int) windows, n_win, stride);
+
+    free(hits);
+    free(logits);
+    free(ids);
+    sllm_tok_free(tok);
+    sllm_model_free(m);
+    sllm_gguf_close(&g);
+}
+
 void sllm_test_eval(void) {
     printf("eval\n");
     RUN(eval_uniform_distribution_scores_exactly_log_n);
@@ -494,4 +733,6 @@ void sllm_test_eval(void) {
     RUN(eval_argmax_ties_resolve_to_the_lowest_index);
     RUN(eval_fixture_tokenizes_to_the_recorded_count);
     RUN(eval_scores_every_token_but_the_first_and_is_deterministic);
+    RUN(eval_rolling_window_equals_single_window_when_it_fits);
+    RUN(eval_rolling_window_over_long_corpus_scores_each_token_once);
 }
