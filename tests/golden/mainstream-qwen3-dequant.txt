@@ -1,0 +1,93 @@
+# Reference DEQUANTISATION values, independent of Saphira.
+#
+# Source: llama.cpp's own ggml type traits (to_float for the type), driven by
+# tools/s0_deq_probe.cpp against Qwen3-8B-Q4_K_M.gguf. The file is read by the probe
+# itself so the RAW ENCODED BYTES are in hand to hash and the byte offset is
+# computed as data_offset + tensor_offset, not assumed. No Saphira dequantisation
+# exists or is used. Captured 2026-09-30 at repo commit bc64845.
+#
+# FNV-1a 64 over the row's encoded bytes (RAW_HASH) and over the row's decoded
+# f32 array (DECODED_HASH). Values printed at %.9g.
+#
+# F16 IS ABSENT FROM THIS MODEL. The type census is 145 F32, 217 Q4_K, 37 Q6_K and
+# nothing else, so an F16 control cannot be sourced from this file. F32 is used as
+# the control instead and that substitution is deliberate, not a silent one: F32 is
+# the only uncompressed type present, which makes it the control that can detect an
+# offset or hashing error. An F16 control needs a different model.
+
+# NOTE: this model has NO f32 to_float trait in llama.cpp, because f32 IS the decoded
+# form. The probe memcpy's it. Without that branch the control silently vanished,
+# which is the same failure shape as everything else found this stage.
+
+  
+  [case] blk.0.attn_q.weight
+    type            = q4_K (ggml 12)
+    ne              = [4096, 4096]
+    row             = 0
+    block_elems     = 256   type_bytes = 144   row_encoded_bytes = 2304
+    decoded_elems   = 4096
+    RAW_HASH        = 5197075a0ccd39cb
+    DECODED_HASH    = fc4c8f77573054f6
+    first8          = -0.000228881836 0.00187397003 -0.000228881836 0.00187397003 0.00818252563 -0.0149488449 0.0123882294 0.00607967377
+    last4           = 0.010248661 0.00300258398 -0.00907421112 -0.0066588521
+    min=-0.0361990929 max=0.0426363945 mean=5.43712376e-05 nonfinite=0
+  
+  [case] blk.0.ffn_gate.weight
+    type            = q4_K (ggml 12)
+    ne              = [4096, 12288]
+    row             = 7
+    block_elems     = 256   type_bytes = 144   row_encoded_bytes = 2304
+    decoded_elems   = 4096
+    RAW_HASH        = ba13838dc81f11d6
+    DECODED_HASH    = e0a141fff9c1678a
+    first8          = -0.00664806366 0.0233354568 0.0120916367 -0.0328836441 0.0158395767 -0.029135704 0.000847816467 0.0120916367
+    last4           = -0.00177669525 -0.00649631023 0.0218213797 0.00294291973
+    min=-0.0558156967 max=0.0654725432 mean=-0.000148328269 nonfinite=0
+  
+  [case] blk.0.attn_v.weight
+    type            = q6_K (ggml 14)
+    ne              = [4096, 1024]
+    row             = 0
+    block_elems     = 256   type_bytes = 210   row_encoded_bytes = 3360
+    decoded_elems   = 4096
+    RAW_HASH        = 01bece6cbb6078a9
+    DECODED_HASH    = 0ba53385bda2f833
+    first8          = -0.00262737274 0.0394105911 -0.00525474548 -0.00394105911 0.010509491 0.0223326683 -0.00131368637 0.035469532
+    last4           = 0.00816732645 -0.0290393829 0.01270473 0
+    min=-0.0653266907 max=0.0734863281 mean=-0.000220131828 nonfinite=0
+  
+  [case] blk.0.ffn_down.weight
+    type            = q6_K (ggml 14)
+    ne              = [12288, 4096]
+    row             = 3
+    block_elems     = 256   type_bytes = 210   row_encoded_bytes = 10080
+    decoded_elems   = 12288
+    RAW_HASH        = df5b57cdebdb9f6a
+    DECODED_HASH    = 3959e8d5f7116e1d
+    first8          = -0.0247612596 0.0108949542 0.00297135115 -0.012875855 -0.0307039618 0.00693315268 0.00891405344 0
+    last4           = -0.0263768435 0.0117230415 -0.00293076038 -0.00586152077
+    min=-0.0463867188 max=0.045173645 mean=0.000118804654 nonfinite=0
+  
+  [case] token_embd.weight
+    type            = q4_K (ggml 12)
+    ne              = [4096, 151936]
+    row             = 0
+    block_elems     = 256   type_bytes = 144   row_encoded_bytes = 2304
+    decoded_elems   = 4096
+    RAW_HASH        = 4da49062b9523050
+    DECODED_HASH    = a093cf1fcf0a75ea
+    first8          = 0.0545911789 0.0415992737 0.0286073685 -0.0233602524 -0.0233602524 0.00262355804 -0.0103683472 0.0415992737
+    last4           = 0.00669574738 -0.00140571594 -0.0338115692 0.00669574738
+    min=-0.167507172 max=0.150624275 mean=-0.000198702415 nonfinite=0
+  
+  [case] blk.0.attn_norm.weight
+    type            = f32 (ggml 0)
+    ne              = [4096, 1]
+    row             = 0
+    block_elems     = 1   type_bytes = 4   row_encoded_bytes = 16384
+    decoded_elems   = 4096
+    RAW_HASH        = 484deff32278ec66
+    DECODED_HASH    = 484deff32278ec66
+    first8          = 0.0151367188 0.0147705078 0.0159912109 0.0147705078 0.0154418945 0.0153808594 0.0154418945 0.0147094727
+    last4           = 0.0157470703 0.0162353516 0.0153808594 0.0154418945
+    min=-0.00185394287 max=0.0302734375 mean=0.0152258752 nonfinite=0
