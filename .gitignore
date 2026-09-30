@@ -14,6 +14,13 @@ opencode.*
 # the binary is not, and saphira-llm-tgbench / saphira-llm-kernelbench remain
 # tracked by deliberate policy established in d96f361.
 /saphira-llm-topoprobe
+# saphira-llm-eval is a build product too. It is deliberately NOT tracked,
+# unlike saphira-llm-tgbench and saphira-llm-kernelbench which d96f361 chose to
+# keep: those two predate the .gitignore binary list and are an established
+# (if odd) policy. A tool that did not exist at v0.0.1 has no such history, and
+# a stale committed binary is worse than none. Its behaviour is gated by
+# tests/test_eval.c, which does not need the binary committed to run.
+/saphira-llm-eval
 *.disasm
 *.funcs
 

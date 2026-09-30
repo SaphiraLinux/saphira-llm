@@ -9,6 +9,7 @@
 #ifndef SLLM_TEST_HARNESS_H
 #define SLLM_TEST_HARNESS_H
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -61,6 +62,27 @@ extern const char * sllm_current;
         sllm_tests_failed++; \
         fprintf(stderr, "  FAIL %s:%d in %s: %s\n        got  \"%s\"\n        want \"%s\"\n", \
                 __FILE__, __LINE__, sllm_current, #got, g_ ? g_ : "(null)", w_); \
+    } \
+} while (0)
+
+/*
+ * Absolute-tolerance float comparison, for the places where two computations
+ * of the same quantity are allowed to differ in the last bits.
+ *
+ * Deliberately NOT the default: the kernels that must agree exactly use
+ * CHECK_SAME_BITS, and a tolerance macro is an invitation to reach for it
+ * where bit-exactness was the actual requirement. This exists for measured
+ * quantities -- a recorded golden value, or two formulations of one reduction
+ * -- and it is the caller's job to justify the tolerance in a comment.
+ */
+#define CHECK_NEAR(got, want, tol) do { \
+    double g_ = (double) (got); \
+    double w_ = (double) (want); \
+    sllm_tests_run++; \
+    if (!(fabs(g_ - w_) <= (double) (tol))) { \
+        sllm_tests_failed++; \
+        fprintf(stderr, "  FAIL %s:%d in %s: %s\n        got  %.12g\n        want %.12g\n        tol  %.12g\n", \
+                __FILE__, __LINE__, sllm_current, #got, g_, w_, (double) (tol)); \
     } \
 } while (0)
 

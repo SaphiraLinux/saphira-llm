@@ -91,7 +91,7 @@ if [ "$DO_BUILD" -eq 1 ]; then
             grep -iE 'warning|error' "$WORK/build.log" || true
             exit 1
         fi
-        echo "clean: 6 binaries, 0 warnings, 0 errors"
+        echo "clean: 7 binaries, 0 warnings, 0 errors"
     else
         echo "FAIL: the build did not complete"
         tail -20 "$WORK/build.log" || true
@@ -141,9 +141,27 @@ if [ "$DO_QA" -eq 0 ]; then
     exit 0
 fi
 
-# ---------------------------------------------------------------- 3. the model
+# ---------------------------------------------------------------- 3. quality
 
-step "3. the model"
+if [ -n "$MODEL" ] && [ -f "$MODEL" ]; then
+    step "3. model quality (perplexity)"
+    CORPUS="${CORPUS:-tests/golden/eval-corpus.txt}"
+    if [ -f "$CORPUS" ]; then
+        ./saphira-llm-eval -m "$MODEL" -d "$CORPUS" -t "$THREADS" --log warn |
+            grep -E '^(corpus_tokens|scored_tokens|mean_nll|perplexity|top1_accuracy)'
+        echo
+        echo "  Lower perplexity is better. This is a measurement, not a gate,"
+        echo "  and it only compares against another run of the same binary on"
+        echo "  the same corpus. See docs/EVALUATION.md."
+    else
+        echo "no corpus at $CORPUS (set CORPUS=/path/to/text.txt)"
+    fi
+    echo
+fi
+
+# ---------------------------------------------------------------- 4. the model
+
+step "4. generation (Q&A)"
 
 if [ -z "$MODEL" ] || [ ! -f "$MODEL" ]; then
     die "no model found (looked in /var/lib/spoon/models, ~/models and .)
@@ -217,7 +235,8 @@ echo "The runtime is deterministic, so the same prompt gives the same tokens"
 echo "every time. To see throughput properly measured rather than sampled once:"
 echo
 echo "  ./saphira-llm-tgbench -m $MODEL -p \"The capital of France is\" \\"
-echo "      -c 512 -n 64 -t 1,2,4,6,8,14,28 -r 3 -w 1"echo
+echo "      -c 512 -n 64 -t 1,2,4,6,8,14,28 -r 3 -w 1"
+echo
 echo "It repeats each row, prints the load average, and requires every row to"
 echo "produce the same token checksum. A differing checksum is a correctness"
 echo "failure; a fast row is not a pass."

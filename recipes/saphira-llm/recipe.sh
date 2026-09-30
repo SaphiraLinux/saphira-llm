@@ -92,7 +92,7 @@ recipe_build()
 
 	make -j"${JOBS:-$(nproc)}" CC=gcc \
 		BASELINE="$march" \
-		all test bench tgbench kernelbench topoprobe
+		all test bench eval tgbench kernelbench topoprobe
 
 	# The gates run at package-build time, and the ISA gate is the reason
 	# binutils is above. A package that cannot prove its own baseline does
@@ -152,6 +152,7 @@ recipe_install()
 	install -m 0755 saphira-llm-kernelbench  "$PKGDEST/usr/bin/saphira-llm-kernelbench"
 	install -m 0755 saphira-llm-schedbench  "$PKGDEST/usr/bin/saphira-llm-schedbench"
 	install -m 0755 saphira-llm-topoprobe   "$PKGDEST/usr/bin/saphira-llm-topoprobe"
+	install -m 0755 saphira-llm-eval        "$PKGDEST/usr/bin/saphira-llm-eval"
 	install -m 0755 testsuite.sh    "$PKGDEST/usr/bin/saphira-llm-testsuite"
 
 	# saphira-llm-test is the gate, not a user tool. It is installed under
@@ -170,6 +171,12 @@ recipe_install()
 	for d in README.md ARCHITECTURE.md FORMAT.md BENCHMARKS.md PROVENANCE.md; do
 		install -m 0644 "$d" "$PKGDEST/usr/share/doc/saphira-llm/$d"
 	done
+	install -m 0644 docs/EVALUATION.md "$PKGDEST/usr/share/doc/saphira-llm/EVALUATION.md"
+	# The eval fixture travels with the package so a recorded perplexity is
+	# reproducible on an installed system without a checkout.
+	install -d "$PKGDEST/usr/share/saphira-llm/corpus"
+	install -m 0644 tests/golden/eval-corpus.txt \
+		"$PKGDEST/usr/share/saphira-llm/corpus/eval-corpus.txt"
 	# install -D would create each parent, but the licenses path is a
 	# directory that has to exist before two files land in it.
 	install -d "$PKGDEST/usr/share/licenses/saphira-llm"

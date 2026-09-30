@@ -1,0 +1,28 @@
+The measurement of a language model is a separate question from the
+correctness of the code that runs it. A program can be exactly right about
+every arithmetic step it takes and still describe a model that predicts badly,
+because the numbers it computes faithfully can be the wrong numbers for the
+task. Only a score over fixed text, produced by software that does not change
+between runs, can answer the second question.
+
+Perplexity is that score. It is the exponentiated average negative log
+likelihood of the tokens in a corpus, where each token is scored against the
+distribution the model produced after reading everything before it. A lower
+value means the model assigned more probability to what actually came next.
+It is not a measure of truth, and it is not a measure of usefulness. It is a
+measure of how well the model predicts text of this kind, and two models are
+only comparable when they were measured on the same text with the same
+vocabulary and the same context.
+
+This matters because almost every change made to a model is invisible without
+such a number. Converting weights to a packed ternary format may cost a
+little accuracy or cost a great deal, and reading the resulting text gives no
+reliable answer to which happened. Nor does comparing two checkpoints by eye,
+or by whether the output merely looks more fluent. A single repeatable figure,
+attached to a fixed corpus, turns those questions into arithmetic.
+
+The caution is that the figure is only as good as the corpus behind it. A
+model measured on one narrow document can score badly on everything else, and
+a model can be optimised for a benchmark until the benchmark stops meaning
+anything. The number is a receipt, not a verdict, and it is worth exactly as
+much as the care taken in choosing what to measure and what to leave out.
