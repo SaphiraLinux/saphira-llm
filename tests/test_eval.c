@@ -53,44 +53,31 @@
  * thing on every machine and after every unrelated change. */
 #define EVAL_CORPUS "tests/golden/eval-corpus.txt"
 
-/* Recorded on this model, this corpus, this tokenizer, this context. See
- * docs/EVALUATION.md for how to regenerate it and when to regenerate it.
+/* Recorded under the arithmetic contract: -ffp-contract=off, defined in
+ * docs/DECISIONS.md decision 1 and applied in the Makefile as FPFLAGS.
  *
- * The value is from the SHIPPING build (gcc, -O2), which is the compiler the
- * Makefile uses by default.
+ * Under that contract the value is not merely close across compilers, it is
+ * IDENTICAL, which is what earns the exact comparison below:
  *
- * The tolerance is not a guess and is not a fudge factor. It is a measured
- * property of the forward pass, established by building the same source six
- * ways:
+ *   gcc   -O2 -ffp-contract=off    nll_sum 1916.2644512626  mean_nll 4.9773102630
+ *   clang -O2 -ffp-contract=off    nll_sum 1916.2644512626  mean_nll 4.9773102630
+ *   clang -O1 -ffp-contract=off    nll_sum 1916.2644512626  mean_nll 4.9773102630
+ *     (plus ASan+UBSan, and thread counts 1/4/8/16, all identical)
  *
- *   gcc   -O2                             4.9773102630
- *   gcc   -O2 -ffp-contract=off           4.9773102630
- *   clang -O2 -ffp-contract=off           4.9773102630
- *   clang -O2                             4.9807068980
- *   clang -O2 -mfma -ffp-contract=fast    4.9807068980
- *   clang -O1 -fsanitize=address,undefined 4.9807068980
+ * For contrast, WITH contraction enabled clang gave mean_nll 4.9807068980 --
+ * a 0.34% gap in perplexity, the same order as a small real improvement, and
+ * therefore a trap for anyone A/B-ing across a toolchain change. That is why
+ * the contract exists and why this comparison can be exact.
  *
- * gcc and clang agree BIT-EXACTLY once FMA contraction is disabled, and
- * disagree by 0.0034 when it is enabled. So the entire cross-compiler spread is
- * the forward pass contracting multiply-add into fused operations, not the
- * reduction order, not the optimisation level, and not the sanitizers. Both are
- * conforming C99; they just round differently, and a 385-token sum of 128256-way
- * reductions has plenty of opportunity to notice.
- *
- * This is the same property Phase 4 already established about the logits: our
- * reduction order is our own, so bit equality with the reference was never
- * available and the gate is an argmax margin instead. It reaches the loss the
- * same way it reaches the logits.
- *
- * 5e-3 is chosen above the measured 3.4e-3 spread with margin, and is still two
- * orders of magnitude tighter than any real regression: a broken operator or a
- * changed weight moves this by whole nats, not thousandths. The bit-exact
- * within-build assertion below is the one A/B comparison actually depends on,
- * and it has no tolerance at all.
+ * EXACT means exact. A different libm or a different architecture may still
+ * move the last bits, and if so the correct response is a deliberate
+ * re-recording with the difference explained -- not a tolerance widened until
+ * the signal fits. The previous 5e-3 tolerance existed only to absorb the FMA
+ * spread, and the arithmetic contract removed the reason for it.
  */
 #define EVAL_GOLDEN_TOKENS    386
-#define EVAL_GOLDEN_MEAN_NLL  4.9773102630
-#define EVAL_GOLDEN_TOL       5e-3
+#define EVAL_GOLDEN_NLL_SUM   1916.2644512626152
+#define EVAL_GOLDEN_MEAN_NLL  4.9773102630197794
 
 /* ------------------------------------------------------------------ */
 /* scoring arithmetic, no model required                               */
@@ -478,11 +465,13 @@ TEST(eval_scores_every_token_but_the_first_and_is_deterministic) {
      * nothing, and the golden comparison below is noise. */
     CHECK(first_sum == second_sum);
 
-    /* And the recorded golden value, to a tolerance rather than exactly,
-     * because this is the one assertion here that is allowed to move, and only
-     * deliberately. */
+    /* And the recorded canonical value, EXACTLY, under the arithmetic
+     * contract. Not approximately: the contract is what makes exactness
+     * available, and a tolerance here would hide the very cross-toolchain
+     * drift the contract exists to eliminate. */
+    CHECK(first_sum == EVAL_GOLDEN_NLL_SUM);
     const double mean = first_sum / (double) first_scored;
-    CHECK_NEAR(mean, EVAL_GOLDEN_MEAN_NLL, EVAL_GOLDEN_TOL);
+    CHECK(mean == EVAL_GOLDEN_MEAN_NLL);
     printf("    fixture: %d tokens, mean_nll %.10f, ppl %.4f\n",
            n_tok, mean, exp(mean));
 

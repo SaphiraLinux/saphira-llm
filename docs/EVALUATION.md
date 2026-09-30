@@ -139,30 +139,48 @@ gcc and clang figures differ by 0.34% (perplexity 145.0836 against 145.5773),
 which is the same order as a small real improvement and would be easy to
 mistake for one. `saphira-llm-eval` prints this warning for that reason.
 
-### The arithmetic contract
+### The arithmetic contract — IN FORCE
 
-Adding `-ffp-contract=off` to the **release** build is **not** done: it would
-change the shipped arithmetic of a sealed release, which is a larger call than
-an evaluation stage should make on its own.
+`-ffp-contract=off` is now applied by the Makefile as `FPFLAGS`, to the library,
+the tests, the evaluator and the training tooling alike. One arithmetic for
+everything: a test suite that built the library differently from the shipped
+binary would be testing something nobody runs.
 
-For work **after** the sealed tag it is decided, and the rule is in
-`DECISIONS.md`:
+`v0.0.1` at tag `7dbcc67` predates this and is unaffected — a tag names a tree,
+not a build.
 
-- `v0.0.1` at `7dbcc67` is not touched.
-- The **evaluation and training validation path** builds with
-  `-ffp-contract=off`, so regression arithmetic is deterministic across
-  compilers.
-- A fresh canonical baseline is established under that arithmetic. **The golden
-  value in `test_eval.c` was captured under the default (contracted) build and
-  is provisional until re-recorded.** Once the contract is in force the 5e-3
-  tolerance that currently absorbs the FMA spread becomes unnecessary and
-  should become exact equality.
-- A contracted baseline is never compared against a non-contracted build, and
-  the difference is never reported as a model improvement.
-- If production inference later deliberately uses FMA for performance, that is
-  benchmarked separately and does not become the quality baseline by accident.
+**Canonical baseline, recorded under the contract:**
 
-Not yet applied; it is the first item in the next-actions list.
+| build | `nll_sum` | `mean_nll` |
+| --- | --- | --- |
+| gcc `-O2` | 1916.2644512626152 | 4.9773102630197794 |
+| clang `-O2` | 1916.2644512626152 | 4.9773102630197794 |
+| clang `-O1` + ASan/UBSan | 1916.2644512626152 | 4.9773102630197794 |
+
+Identical, not close. Thread counts 1/4/8/16 are identical too.
+
+For contrast, **with** contraction enabled clang gave `mean_nll 4.9807068980` —
+a 0.34% gap in perplexity, the same order as a small real improvement, and
+therefore exactly the trap this contract removes.
+
+### The golden comparison is now exact
+
+The tolerance in `test_eval.c` was 5e-3, and existed only to absorb the FMA
+spread. The contract removed the reason for it, so the comparison is now
+`==` on the bit pattern: `nll_sum` and `mean_nll` must match exactly.
+
+That required one correction worth recording: the golden was initially captured
+from a `%.10f` rendering, which is a *rounded decimal* and not the double. The
+exact comparison caught it immediately, which is the right way round. The
+evaluator's `--json` now emits these fields with `%.17g` so they round-trip.
+
+A different libm or a different architecture may still move the last bits. If
+so the correct response is a deliberate re-recording with the difference
+explained — not a tolerance widened until the signal fits.
+
+Overriding `FPFLAGS` is the deliberate production-FMA decision, which is a
+separate performance benchmark and is **not** the quality baseline. See
+`DECISIONS.md`.
 
 ## Evaluation is not a correctness gate
 

@@ -13,10 +13,30 @@ BINDIR  ?= $(PREFIX)/bin
 # `make check-isa` proves that mechanically.
 BASELINE ?= -march=x86-64-v3
 
+# ARITHMETIC CONTRACT. Regression results must not depend on which compiler
+# built the tree.
+#
+# Measured on this source: with FMA contraction enabled, gcc and clang differ
+# by 0.0034 in mean_nll (perplexity 145.0836 against 145.5773, a 0.34% gap) on
+# the in-tree fixture. With contraction disabled they agree BIT-EXACTLY. The
+# whole difference is the forward pass fusing multiply-adds, and it is large
+# enough to be mistaken for a model change.
+#
+# So contraction is off by default, for the library, the tests, the evaluator
+# and the training tooling alike. One arithmetic for everything: a test suite
+# that built the library differently from the shipped binary would be testing
+# something nobody runs.
+#
+# Overriding this is the deliberate production-FMA decision, which is a separate
+# performance benchmark and is NOT the quality baseline. See docs/DECISIONS.md
+# decision 1. v0.0.1 at tag 7dbcc67 predates this and is unaffected: the tag
+# names a tree, not a build.
+FPFLAGS ?= -ffp-contract=off
+
 # _POSIX_C_SOURCE is required because we target musl/POSIX, not bare ISO C:
 # mmap, setenv and friends are POSIX, and -std=c11 alone hides them.
 CFLAGS  ?= -O2 -std=c11 -Wall -Wextra -Wpedantic
-CFLAGS  += $(BASELINE) -Iinclude -D_POSIX_C_SOURCE=200809L
+CFLAGS  += $(BASELINE) $(FPFLAGS) -Iinclude -D_POSIX_C_SOURCE=200809L
 LDFLAGS ?=
 LDLIBS   = -lm -lpthread
 
@@ -110,7 +130,7 @@ SAN_CC ?= clang
 san:
 	$(MAKE) clean
 	$(MAKE) test CC="$(SAN_CC)" DEBUG=1 \
-		CFLAGS="-O1 -g -std=c11 -Wall -Wextra -Wpedantic $(BASELINE) \
+		CFLAGS="-O1 -g -std=c11 -Wall -Wextra -Wpedantic $(BASELINE) $(FPFLAGS) \
 			-Iinclude -D_POSIX_C_SOURCE=200809L \
 			-fsanitize=address,undefined -fno-omit-frame-pointer \
 			-fno-sanitize-recover=all" \
@@ -129,7 +149,8 @@ clean:
 
 help:
 	@echo 'targets: all test check check-isa san asan ubsan install clean'
-	@echo 'vars   : CC CFLAGS BASELINE PREFIX BINDIR DEBUG=1 SAN_CC=clang'
+	@echo '         eval tgbench kernelbench topoprobe'
+	@echo 'vars   : CC CFLAGS BASELINE FPFLAGS PREFIX BINDIR DEBUG=1 SAN_CC=clang'
 	@echo '  BASELINE defaults to $(BASELINE)'
 
 # Phase 6 decode-throughput harness. Loads the model once and sweeps thread

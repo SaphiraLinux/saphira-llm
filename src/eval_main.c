@@ -423,8 +423,8 @@ int main(int argc, char ** argv) {
         printf("  \"scored_tokens\": %lld,\n", (long long) scored);
         printf("  \"context\": %d,\n", n_ctx);
         printf("  \"threads\": %d,\n", n_threads);
-        printf("  \"nll_sum\": %.10f,\n", nll_sum);
-        printf("  \"mean_nll\": %.10f,\n", mean_nll);
+        printf("  \"nll_sum\": %.17g,\n", nll_sum);
+        printf("  \"mean_nll\": %.17g,\n", mean_nll);
         printf("  \"perplexity\": %.6f,\n", ppl);
         printf("  \"bits_per_token\": %.6f,\n", bpt);
         printf("  \"top1_accuracy\": %.6f,\n", acc);
