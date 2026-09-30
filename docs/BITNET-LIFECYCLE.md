@@ -90,7 +90,7 @@ recorded now so it is a decision rather than a bug found later.
 
 ---
 
-## 2. BF16 master → I2_S conversion — feasible, spec fully recoverable
+## 2. BF16 master → I2_S conversion — IMPLEMENTED, hermetic gate passed
 
 **Yes, and the specification is completely recoverable from the pinned tree.**
 The authoritative definition is
@@ -148,7 +148,78 @@ reference's dequantiser on a real tensor. A native converter is validated by
 comparing its output against that, byte for byte, not by checking the result
 loads.
 
-### The constraint on proving it
+### ### What the implementation found, beyond the specification
+
+Four things, none of which were visible from reading the spec and all of which
+would have shipped a wrong converter:
+
+**1. The two upstream quantisers differ, and the test data must come from BF16.**
+Measured over 1000 values spanning 0.001..1.0 of the scale, the Python
+threshold rule and the C sign rule disagree on **500 of them** — exactly where
+`|w/scale| < 0.5`. On already-ternary input they agree completely (0
+disagreements), which is why the hermetic round trip is safe under either.
+
+The rule also has a **knife edge at |w/scale| = 0.5**: BF16 truncation can move a
+value exactly onto the threshold from one side, where `t < -0.5` is false. The
+first golden vectors packed the original f32 while the converter sees the BF16
+round trip, so they tested values the converter can never be handed. The fixture
+now publishes the BF16-surviving value, which is what a real master weight is.
+
+**2. Upstream's C quantiser disagrees with upstream's own C dequantiser.**
+
+| | element 33 goes to |
+| --- | --- |
+| `quantize_i2_s`, quants.c:1358 (flat) | byte `33/4` = 8, field `33%4` = 1 |
+| `dequantize_row_i2_s`, quants.c:1335 | byte `33%32` = 1, field `(33%128)/32` = 1 |
+| python packer, `reshape(nblocks,4,32)` | byte 1, field 1 — **agrees with the dequantiser** |
+
+So the authoritative layout is **interleaved**: within a 128-element group the
+four fields of a byte are 32 weights apart. Three sources agree — the C
+dequantiser, the Python packer, and this project's own decoder, which is gated
+against `tests/golden/i2s-reference.txt` captured from the reference's own
+dequantiser. The C quantiser is a **latent upstream bug**, never exercised
+because bitnet.cpp consumes weights already packed by the Python converter.
+
+This project's converter packs interleaved, and the golden records the upstream
+C quantiser's flat output only so the divergence is on the record.
+
+**3. `n` must be a multiple of 4, and the upstream C quantiser corrupts otherwise.**
+Four elements share a byte and the scale begins at offset `n/4`, so for
+`n = 1` upstream's loop writes the code into the byte the scale is about to
+occupy, and the scale then overwrites it. Python pads to 128. This converter
+**rejects** `n % 4 != 0` rather than shipping a model with a mangled scale.
+
+**4. The hermetic gate's size guard excluded the interesting tensors.** An
+earlier `n_elems > 1<<24` check silently refused every FFN tensor — 17,694,720
+elements each — and reported a failure, so the gate looked exercised while never
+having run on the largest tensors in the model. A guard that excludes the cases
+you most want tested is worse than no guard.
+
+### The gate, and what "byte-identical" precisely means
+
+`tests/test_i2s_hermetic.c` dequantises each shipped I2_S tensor to BF16, runs
+the native converter, and compares. Result: **210 I2_S tensors in the model, 24
+round-tripped, 261,488,640 elements, 0 failures**, under both rules.
+
+Two precisions, both reasoned rather than assumed:
+
+- **The scale is supplied, not recovered.** The I2_S scale is an arbitrary f32,
+  and an arbitrary f32 is not representable in BF16 — truncation perturbs it.
+  Scale byte-identity is therefore unachievable by construction. What the round
+  trip must preserve is the **codes**, decided by sign, which BF16 preserves
+  exactly. So the gate uses the `override_scale` path and requires everything
+  else byte for byte. This is the strongest criterion the format permits, and it
+  is attainable precisely because the codes and the scale are separate fields.
+- **The 28 bytes after the scale are not compared.** They are alignment padding
+  that the format does not define: our decoder reads four bytes at `n/4`, and
+  the upstream dequantiser takes the scale as a parameter. The shipped file
+  carries **residual data** in them. The first version of the gate failed on all
+  24 tensors, every one in the last 28 bytes and nowhere else. Where the format
+  is silent, this converter **requires determinism**: the padding is asserted to
+  be zero rather than inheriting whatever was in the buffer. That is a stronger
+  claim than copying residual bytes, and the one a shipped artefact should meet.
+
+### The constraint on using a real master
 
 **There is no BF16/master BitNet model on this machine.** A search finds only the
 three I2_S GGUFs and Qwen3. So the natural demo — convert the real upstream
