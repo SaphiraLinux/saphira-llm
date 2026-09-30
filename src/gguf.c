@@ -161,8 +161,24 @@ static const type_info g_types[SLLM_TYPE_COUNT] = {
     [SLLM_TYPE_BF16]   = { "BF16",   1, 2, true  },
     [SLLM_TYPE_Q8_0]   = { "Q8_0",   32, 34, true  },
     [SLLM_TYPE_Q4_0]   = { "Q4_0",   32, 18, true  },
-    [SLLM_TYPE_Q4_K]   = { "Q4_K",   256, 144, true },
-    [SLLM_TYPE_Q6_K]   = { "Q6_K",   256, 210, true },
+    /* supported == "sllm_dequant_row can decode this". It is NOT "we know the
+     * byte layout". Those are different questions and Q4_K/Q6_K were answering
+     * the first one as though it were the second: the block and type sizes are
+     * real, so sllm_gguf_type_nbytes sizes them correctly and a Q4_K_M file
+     * opens and parses fine, but sllm_dequant_row has no case for either and
+     * returns SLLM_ERR_TYPE_UNSUPPORTED. sllm_gguf_type_is_supported() was
+     * therefore reporting a capability that did not exist.
+     *
+     * Measured on a real ordinary model (Qwen3-8B-Q4_K_M.gguf): 217 Q4_K and
+     * 37 Q6_K tensors size correctly, zero of them decode. Same species as the
+     * 64-wide I2_S defect -- a claim that a consumer could trust and that was
+     * not true. Corrected to false; the size and layout recognition above is
+     * deliberately left intact, because that part was always right and is what
+     * lets the container remain general.
+     *
+     * The dequantisers are NOT implemented by this change. */
+    [SLLM_TYPE_Q4_K]   = { "Q4_K",   256, 144, false },
+    [SLLM_TYPE_Q6_K]   = { "Q6_K",   256, 210, false },
     [SLLM_TYPE_I2_S]   = { "I2_S",   1, 0, true },  /* 0 == variable, see nbytes */
 
     [SLLM_TYPE_Q4_1]   = { "Q4_1",   32, 20, false },
