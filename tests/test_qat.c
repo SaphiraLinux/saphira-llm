@@ -171,47 +171,57 @@ TEST(test_ste_reaches_master) {
 
     q->ternary = true;
     (void) sllm_qat_loss(q, &b);
-    double gnorm = 0.0;
-    for (int i = 0; i < q->n_p; ++i) {
-        if (strcmp(q->p[i].name, "blk.0.ffn_up") == 0) {
-            for (int k = 0; k < q->p[i].n; ++k) {
-                gnorm += (double) q->p[i].grad[k] * q->p[i].grad[k];
-            }
-        }
-    }
-    gnorm = sqrt(gnorm);
-    CHECK(gnorm > 0.0);
 
-    /* The ternary saturates at +/-1, so the forward value cannot change when
-     * the master is scaled. The gradient must therefore be identical. */
     sllm_qat_tensor * t = NULL;
     for (int i = 0; i < q->n_p; ++i) {
         if (strcmp(q->p[i].name, "blk.0.ffn_up") == 0) { t = &q->p[i]; }
     }
     CHECK(t != NULL);
-    float * g0 = (float *) malloc((size_t) t->n * sizeof(float));
-    memcpy(g0, t->grad, (size_t) t->n * sizeof(float));
+    if (t == NULL) { sllm_qat_free(q); return; }
 
-    for (int k = 0; k < t->n; ++k) { t->master[k] *= 3.0f; }
-    (void) sllm_qat_loss(q, &b);
-    double diff = 0.0;
+    double gnorm = 0.0;
     for (int k = 0; k < t->n; ++k) {
-        diff += fabs((double) t->grad[k] - (double) g0[k]);
+        gnorm += (double) t->grad[k] * t->grad[k];
     }
-    /* The absmax scale moves when the master is scaled by 3, so the ternary
-     * DOES change -- some entries can cross the 0.5 threshold. So this is not
-     * bit-exact, and that is the point. Scaling every master by 3 also scales
-     * the absmax by 3, so w/scale -- and therefore the ternary, and therefore
-     * the entire forward pass -- is unchanged. The gradient wrt the QUANTISED
-     * weight is a function of the forward alone, and the estimator passes it
-     * through untouched, so the master gradient must come out bit-identical.
-     *
-     * A gradient that moved here would mean something is differentiating
-     * through the ternary; a gradient of zero would mean nothing reaches the
-     * master at all. Either is a failed estimator. */
-    CHECK(diff == 0.0);
+    gnorm = sqrt(gnorm);
+    CHECK(gnorm > 0.0);
 
-    free(g0);
+    /*
+     * The estimator, tested where it is actually falsifiable.
+     *
+     * A master entry whose ternary code is ZERO has, under any real derivative
+     * of the forward, a gradient of exactly zero: the code is locally constant
+     * there, so nothing about that entry can influence the loss. The STE says
+     * the loss gradient with respect to the quantised weight is handed to the
+     * master regardless, so a zero-coded entry must receive the same treatment
+     * as every other entry and come away NON-ZERO.
+     *
+     * This replaces an earlier version of this test that scaled the whole
+     * master by 3 and asserted the gradient came back bit-identical. That
+     * assertion was only true while the ternary value was +-1, where the
+     * forward genuinely did not move. The value is now +-absmax to match the
+     * deployed format, so the forward does scale and the gradient legitimately
+     * changes -- the old test was measuring the old convention, not the
+     * estimator, and would have passed or failed for reasons that had nothing
+     * to do with the STE. The zero-code property is convention-independent,
+     * which is what makes it the better probe.
+     */
+    const double scale = sllm_qat_weight_scale(t);
+    int zero_coded = 0, zero_coded_with_grad = 0;
+    for (int k = 0; k < t->n; ++k) {
+        if (fabs((double) t->master[k]) <= 0.5 * (double) scale) {
+            ++zero_coded;
+            if (fabs((double) t->grad[k]) > 0.0) { ++zero_coded_with_grad; }
+        }
+    }
+    CHECK(zero_coded > t->n / 4);
+    /* A majority, not all. An estimator that is missing entirely would give
+     * exactly zero here for EVERY zero-coded entry, so the count being large is
+     * what falsifies it; a few entries landing on exactly 0.0 through float32
+     * cancellation in a 24-token sum are expected and say nothing about the
+     * estimator. Demanding every single one would be demanding a coincidence. */
+    CHECK(zero_coded_with_grad * 2 > zero_coded);
+
     sllm_qat_free(q);
 }
 

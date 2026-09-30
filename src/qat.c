@@ -272,8 +272,37 @@ static int act_q_train(float x, float s, float * recip_scale) {
  */
 static float ternarise(float w, double scale) {
     const double t = (double) w * (1.0 / scale);
-    if (t >  0.5) { return  1.0f; }
-    if (t < -0.5) { return -1.0f; }
+    /*
+     * THE VALUE IS +-SCALE, NOT +-1. This is the whole Step 6 fix, and it is
+     * one line, because the two conventions differ by exactly one per-tensor
+     * factor and that factor is the whole bug.
+     *
+     * The ternary carries the SIGN; the per-tensor scale carries the MAGNITUDE.
+     * That is not this project's invention, it is the deployed format:
+     *
+     *   - the reference dequantiser writes y = i2_scale * map2bit[c], with
+     *     map2bit = {-1, 0, +1, 0} (quants.c, dequantize_row_i2_s:1349), so
+     *     the effective weight is +-absmax and never +-1;
+     *   - this runtime's epilogue agrees independently:
+     *     (dot - act_sum) * (w_scale / act_scale), and since
+     *     (dot - act_sum) is already the sign-carrying sum, the weight that
+     *     multiplies the activation is w_scale (i2s_gemm.c:271).
+     *
+     * Training with +-1 while deploying with +-absmax is a factor of absmax per
+     * tensor, and because the absmax GROWS during training (measured: 0.47 to
+     * 4.07 over 200 steps) the factor grows with it. The symptom is not noisy
+     * degradation, it is divergence: the trainer's NLL fell 5.54 -> 5.2e-6
+     * while the exported model through the ordinary runtime rose 5.88 -> 17.36
+     * -> 18.49 at 0/200/600 steps. A gap that widens monotonically cannot be
+     * quantisation noise, and this is its cause.
+     *
+     * Note what does NOT change here: the packed CODES are identical, because
+     * the threshold and the scale are untouched. The exported file is
+     * byte-for-byte what it was; only the value the trainer multiplies by
+     * changes, to the value the runtime already reconstructs.
+     */
+    if (t >  0.5) { return (float)  scale; }
+    if (t < -0.5) { return (float) -scale; }
     return 0.0f;
 }
 
@@ -676,25 +705,50 @@ static void qat_layer_fwd(qws * w, sllm_qat * q, int l, int n_tok) {
          * row. The runtime rotates rope.dimension_count dims and refuses a file
          * whose n_rot exceeds n_embd_head, so rotating all E here would train a
          * model whose positional encoding the loader cannot even accept. */
+        /* PER HEAD, with n_rot = n_embd_head dims each -- not n_rot dims of the
+         * whole row. The runtime rotates `qh + h*hd` once per head
+         * (forward.c:640), and NEOX pairs (i, i + n_rot/2) WITHIN the slice it
+         * is given. Rotating a single n_rot-wide prefix of the row therefore
+         * gets head 0 right and leaves heads 1..H-1 unrotated, and it would pair
+         * across head boundaries even if they were not. That is the second half
+         * of the export mismatch: the codes and the scale were already correct,
+         * so the only thing wrong left with the positional encoding. */
         const size_t nrot = (size_t) w->q->cfg.n_embd_head;
         for (int t = 0; t < n_tok; ++t) {
-            sllm_rope_inplace(w->qh + (size_t) t * E, nrot, t,
-                              q->cfg.rope_base, 1.0f, SLLM_ROPE_NEOX);
-            sllm_rope_inplace(w->kh + (size_t) t * EK, nrot, t,
-                              q->cfg.rope_base, 1.0f, SLLM_ROPE_NEOX);
+            for (int h = 0; h < w->H; ++h) {
+                sllm_rope_inplace(w->qh + (size_t) t * E + (size_t) h * w->HD, nrot, t,
+                                  q->cfg.rope_base, 1.0f, SLLM_ROPE_NEOX);
+            }
+            for (int g = 0; g < w->HK; ++g) {
+                sllm_rope_inplace(w->kh + (size_t) t * EK + (size_t) g * w->HD, nrot, t,
+                                  q->cfg.rope_base, 1.0f, SLLM_ROPE_NEOX);
+            }
         }
 
         attn_fwd(w);
 
+        /*
+         * ORDER: attn -> subln -> quantise -> output projection.
+         *
+         * The sub-norm goes BEFORE the projection because that is where the
+         * runtime puts it ("attn_sub_norm, then the output projection",
+         * forward.c:694), and a normalisation is not commutative with a linear
+         * map: normalising after the projection gives a different function, and
+         * a different one that gets worse as training sharpens the weights. The
+         * FFN block below already had the right order -- ffn_sub_norm before
+         * ffn_down -- which is why the two sub-norms were easy to confuse.
+         */
         for (int t = 0; t < n_tok; ++t) {
-            act_q_row(w, w->attnq + (size_t) t * E, w->attn + (size_t) t * E, E, NULL);
+            rms_fwd(w->ao + (size_t) t * E, w->attn + (size_t) t * E, wsn, E, eps,
+                    &w->rinv[(size_t) (l * 4 + 1) * T + t]);
+        }
+        for (int t = 0; t < n_tok; ++t) {
+            act_q_row(w, w->attnq + (size_t) t * E, w->ao + (size_t) t * E, E, NULL);
         }
         mat_fwd(w->ao_pre, w->attnq, wo, n_tok, E, E);
 
         for (int t = 0; t < n_tok; ++t) {
-            rms_fwd(w->ao + (size_t) t * E, w->ao_pre + (size_t) t * E, wsn, E, eps,
-                    &w->rinv[(size_t) (l * 4 + 1) * T + t]);
-            const float * a = w->ao + (size_t) t * E;
+            const float * a = w->ao_pre + (size_t) t * E;
             float * o = w->xmid + (size_t) t * E;
             const float * xi = xin + (size_t) t * E;
             for (int d = 0; d < E; ++d) { o[d] = xi[d] + a[d]; }
@@ -971,17 +1025,29 @@ static void qat_backward(qws * w, sllm_qat * q, const int32_t * tokens,
         }
 
         /* ===== attention: ao = subln1(ao_pre), ao_pre = attnq @ wo^T ===== */
+        /* Three distinct vectors, and conflating any two of them is the bug
+         * this structure exists to prevent. Exactly as the FFN block does it:
+         *
+         *   S    = d(loss)/d(o)      o is the projection's OUTPUT, which the
+         *                              residual adds to the stream
+         *   work = d(loss)/d(qa)     qa is the quantiser's input, i.e. the
+         *                              projection's INPUT gradient
+         *   d_attn = d(loss)/d(attn) what the sub-norm's backward produces
+         *
+         * rms_bwd takes the gradient of the norm's OUTPUT, which is `work` and
+         * not S. Passing S there looks plausible and silently stops training. */
+        mat_bwd_x(work, S, wo, n_tok, E, E);
+        mat_bwd_w(po->grad, S, w->attnq, n_tok, E, E);                /* STE */
         {
             for (int t = 0; t < n_tok; ++t) {
                 const float inv = w->rinv[(size_t) (l * 4 + 1) * T + t];
-                const float * ap = w->ao_pre + (size_t) t * E;
-                rms_bwd(work + (size_t) t * E, S + (size_t) t * E, ap, psn->master, E, inv);
-                const float * sa = S + (size_t) t * E;
-                for (int d = 0; d < E; ++d) { psn->grad[d] += sa[d] * ap[d] * inv; }
+                const float * at = w->attn + (size_t) t * E;
+                rms_bwd(w->d_attn + (size_t) t * E, work + (size_t) t * E, at,
+                        psn->master, E, inv);
+                const float * dq = work + (size_t) t * E;
+                for (int d = 0; d < E; ++d) { psn->grad[d] += dq[d] * at[d] * inv; }
             }
         }
-        mat_bwd_x(w->d_attn, work, wo, n_tok, E, E);
-        mat_bwd_w(po->grad, work, w->attnq, n_tok, E, E);              /* STE */
         {
             const int H = w->H, HK = w->HK, HD = w->HD;
             const int grp = H / HK;
@@ -1028,10 +1094,14 @@ static void qat_backward(qws * w, sllm_qat * q, const int32_t * tokens,
          * backward cannot drift from the forward. */
         const size_t nrot = (size_t) w->q->cfg.n_embd_head;
         for (int t = 0; t < n_tok; ++t) {
-            sllm_rope_inplace(w->d_qh + (size_t) t * E, nrot, -t,
-                              q->cfg.rope_base, 1.0f, SLLM_ROPE_NEOX);
-            sllm_rope_inplace(w->d_kh + (size_t) t * EK, nrot, -t,
-                              q->cfg.rope_base, 1.0f, SLLM_ROPE_NEOX);
+            for (int h = 0; h < w->H; ++h) {
+                sllm_rope_inplace(w->d_qh + (size_t) t * E + (size_t) h * w->HD, nrot, -t,
+                                  q->cfg.rope_base, 1.0f, SLLM_ROPE_NEOX);
+            }
+            for (int g = 0; g < w->HK; ++g) {
+                sllm_rope_inplace(w->d_kh + (size_t) t * EK + (size_t) g * w->HD, nrot, -t,
+                                  q->cfg.rope_base, 1.0f, SLLM_ROPE_NEOX);
+            }
         }
         mat_bwd_x(w->d_n1, w->d_qh, wq, n_tok, E, E);
         mat_bwd_x(w->d_n1, w->d_kh, wk, n_tok, EK, E);
@@ -1229,6 +1299,48 @@ sllm_qat * sllm_qat_load(const char * path) {
  * score measures quantisation rather than a changed scale.
  */
 
+/*
+ * IEEE binary32 -> binary16, round-to-nearest-even.
+ *
+ * Needed because token_embd is declared F16 and the runtime decodes it with
+ * dot_f16, and the project has an f16 DECODER (sllm_fp16_to_fp32) but no
+ * packer. Writing sllm_f32_to_bf16's bits into an F16 tensor instead -- which
+ * is what this exporter did -- is not a small error: binary16 is
+ * sign/exp5/mant10 and bfloat16 is sign/exp8/mant7, so every value is
+ * reinterpreted with the wrong exponent width. Measured on the untrained
+ * export, that put the runtime's logits ~128x the trainer's with a cosine of
+ * 0.4, and it grew as training moved the magnitudes around. The two formats
+ * are not variants of each other; the bytes mean different numbers.
+ */
+static uint16_t f32_to_f16_bits(float f) {
+    uint32_t x;
+    memcpy(&x, &f, sizeof x);
+    const uint32_t sign = (x >> 16) & 0x8000u;
+    const uint32_t ebits = (x >> 23) & 0xFFu;
+    uint32_t mant = x & 0x7FFFFFu;
+    if (ebits == 0xFFu) {                       /* inf or NaN */
+        if (mant == 0) { return (uint16_t) (sign | 0x7C00u); }
+        uint16_t h = (uint16_t) ((mant >> 13) | 0x7C00u);
+        return (h == 0x7C00u) ? (uint16_t) (h | 1u) : h;   /* keep NaN a NaN */
+    }
+    int32_t exp = (int32_t) ebits - 127 + 15;
+    if (exp >= 0x1F) { return (uint16_t) (sign | 0x7C00u); }  /* overflow */
+    if (exp <= 0) {                                             /* subnormal */
+        if (exp < -10) { return (uint16_t) sign; }
+        mant |= 0x800000u;                                      /* implicit 1 */
+        const uint32_t shift = (uint32_t) (14 - exp);
+        uint32_t half = mant >> shift;
+        const uint32_t rem = mant & ((1u << shift) - 1u);
+        const uint32_t mid = 1u << (shift - 1);
+        if (rem > mid || (rem == mid && (half & 1u))) { ++half; }
+        return (uint16_t) (sign | half);
+    }
+    uint32_t half = ((uint32_t) exp << 10) | (mant >> 13);
+    const uint32_t rem = mant & 0x1FFFu;
+    if (rem > 0x1000u || (rem == 0x1000u && (half & 1u))) { ++half; }
+    return (uint16_t) (sign | half);
+}
+
 typedef struct { uint8_t * b; size_t n, cap; } wbuf;
 
 static int wb_put(wbuf * w, const void * p, size_t n) {
@@ -1284,7 +1396,7 @@ int sllm_qat_export_i2s_gguf(const sllm_qat * q, const char * path,
 
     /* the tied embedding is F16, the one tensor the ternary does not touch */
     for (int i = 0; i < E * V; ++i) {
-        emb16[i] = sllm_f32_to_bf16(q->p[0].master[i]);
+        emb16[i] = f32_to_f16_bits(q->p[0].master[i]);
     }
     int xi = 0;
     xs[xi].name = strdup("token_embd.weight");   /* heap: freed below */
