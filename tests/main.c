@@ -21,6 +21,8 @@ void sllm_test_dot_f16(void);
 void sllm_test_eval(void);
 void sllm_test_i2s_convert(void);
 void sllm_test_i2s_hermetic(void);
+void sllm_test_qat(void);
+void sllm_test_lifecycle(void);
 
 int sllm_tests_run    = 0;
 int sllm_tests_failed = 0;
@@ -42,6 +44,8 @@ int main(void) {
     sllm_test_eval();
     sllm_test_i2s_convert();
     sllm_test_i2s_hermetic();
+    sllm_test_qat();
+    sllm_test_lifecycle();
 
     printf("\n%d checks, %d failed\n", sllm_tests_run, sllm_tests_failed);
     return sllm_tests_failed == 0 ? 0 : 1;
