@@ -1,0 +1,56 @@
+# Independent reference values for a mainstream GGUF architecture.
+#
+# Source of truth: llama.cpp, the vendored checkout at third_party/llama.cpp,
+# built CPU-only (cmake -DLLAMA_CURL=OFF -DGGML_CUDA=OFF ... && make llama) and
+# driven through its own public API by tools/s0_probe.cpp. NOTHING here is
+# produced by Saphira, so every value is independent of the implementation that
+# will later be measured against it.
+#
+# Model: /var/lib/spoon/models/qwen3-8b/Qwen3-8B-Q4_K_M.gguf (5,027,783,488 B)
+# Captured: 2026-09-30, at repo commit 92e6b3b
+#
+# These are EXPECTED VALUES, not a comparison. No comparison has been made yet
+# and no discrepancy has been normalised away. This file is the fixed point
+# every later stage is measured against.
+
+[model.shape]
+n_vocab                 = 151936
+n_ctx_train             = 40960
+n_embd                  = 4096
+n_layer                 = 36
+n_head                  = 32
+n_head_kv               = 8
+n_embd_out              = 4096
+n_swa                   = 0
+
+[model.tensor_types]   # counted by the probe from the GGUF tensor table
+F32                     = 145
+Q4_K                    = 217
+Q6_K                    = 37
+total                   = 399
+
+[model.metadata_keys]  # non-tokenizer keys, via llama.cpp's gguf reader
+qwen3.block_count                              type=u32
+qwen3.context_length                           type=u32
+qwen3.embedding_length                         type=u32
+qwen3.feed_forward_length                      type=u32
+qwen3.attention.head_count                     type=u32
+qwen3.attention.head_count_kv                  type=u32
+qwen3.rope.freq_base                           type=f32
+qwen3.attention.layer_norm_rms_epsilon         type=f32
+qwen3.attention.key_length                     type=u32
+... 28 keys in total, the rest under tokenizer.*
+
+[tokenizer]
+# text = "The quick brown fox", add_special = true, parse_special = true
+n_pieces = 4
+  [0] id=  785 piece="The"
+  [1] id= 3974 piece=" quick"
+  [2] id=13876 piece=" brown"
+  [3] id=38835 piece=" fox"
+
+# Read the way to read these: the vocabulary is 151936, not the 128k GPT-2 the
+# Saphira tokenizer implements, and the pieces carry a leading space. A
+# tokenizer that is merely close produces a model that scores badly rather than
+# one that is visibly wrong, which is why byte-exact ids are the gate and not
+# top-1 agreement.
