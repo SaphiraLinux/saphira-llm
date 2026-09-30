@@ -20,11 +20,21 @@
 # model + pre + vocab size, and must never key on general.architecture alone.
 #
 # Evidence that the parameters genuinely differ from GPT-2, not just the label:
-#   '!' is its own token 1879, and '<' '>' are standalone 314 and 29, so
-#   <tag> splits as " <", "tag", ">" -- which is what makes the chat
+#   In "Hello, world! (yes) [no] {maybe} <tag>" every bracket and comma is its
+#   own token: 11 is ",", 0 is "!", 320 is " (", 314 is " {", 366 is " <" and
+#   29 is ">". So <tag> splits into three tokens, which is what makes the chat
 #   template's angle-bracket control tokens addressable at all.
 #   Repeated spaces are preserved as increasing-run tokens 220 " ", 262
 #   "   ", so whitespace normalisation is wrong even in the trivial case.
+#
+#   CORRECTION, 2026-09-30, after reading the raw vocab bytes. An earlier
+#   revision of this file said "1879 is !" and "314 is <". Both were wrong.
+#   1879 is " world" and 314 is " {"; the exclamation mark is id 0 and the
+#   opening angle bracket is id 366. The conclusion was unaffected -- the
+#   punctuation still splits into standalone tokens and the angle brackets are
+#   still individually addressable -- but the ids cited as evidence were not.
+#   Worth recording that the ids were taken by eye off an aligned list rather
+#   than read out of the file, and that reading them is what caught it.
 #
 # Hard gate: Saphira must produce these ids byte-exactly. Correctness is
 # never to be inferred from logits or generated text.
@@ -134,3 +144,32 @@
   [empty] 0 bytes -> n=0
      ids =
      pieces =
+
+## BYTE ALPHABET PROOF (2026-09-30, tools/s0_alphabet_probe.cpp)
+
+Qwen2 was NOT assumed to share GPT-2's bytes_to_unicode map. The raw bytes of
+tokenizer.ggml.tokens were read straight out of the GGUF, because asking
+llama.cpp to render a piece byte-DECODES it and would have hidden the answer.
+
+  TEST 1  the full 256-entry GPT-2 byte alphabet is present: 256 / 256.
+  TEST 2  a token whose bytes are 20 (a raw space) is ABSENT. A token whose
+          bytes are C4 A0 is id 220. That is the decisive pair.
+  TEST 3  raw stored bytes: 220 = C4 A0, 198 = C4 8A, 262 = C4 A0 C4 A0 C4 A0,
+          576 = C4 A0 54 68 65, 314 = C4 A0 7B, 1879 = C4 A0 77 6F 72 6C 64.
+  TEST 4  byte-decoding those stored bytes with the inverse map reproduces the
+          llama.cpp fixture pieces exactly, on all ten checked.
+  TEST 5  the CJK sample arrives as 6 tokens decoding to E6 97 A5 E6 9C AC
+          E6 97 A5 E8 AA 9E E3 82 AD E3 83 86 -- correct UTF-8, split per byte.
+
+VERDICT: identical alphabet. The existing vocab loading path is reused
+UNCHANGED, and no separate byte-mapping property is introduced. Had the
+alphabet differed, it would have been isolated rather than folded into
+split_gpt2, since a shared-and-wrong map would shift every id at once and no
+splitting fixture would localise the fault.
+
+Two bugs in this probe's own first pass are recorded because both produced a
+misleading "absent" rather than an error: the forward map was built with
+printable bytes mapped to 0 instead of to themselves, which reported 0/256 and
+looked like a different alphabet; and the inverse map was built with its
+direction reversed, which printed "?" for every non-ASCII byte. Both are the
+fourth instance this stage of a broken tool reporting something absent.
