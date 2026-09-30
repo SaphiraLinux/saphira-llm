@@ -188,3 +188,45 @@ Q4_K_M is on this machine and is a reasonable first target: it exercises Q4_K,
 Q6_K and F16, it is GQA, it uses NEOX RoPE, and its tokenizer is a known,
 bounded problem. Llama-family is a reasonable second.
 This choice is not made in this document and should not be inferred from it.
+
+---
+
+## 6. Decisions taken at Step 0 (2026-09-30, `f256f61`)
+
+**Architecture: a per-architecture vtable, not branching in the one forward.**
+`general.architecture` dispatches once, at model load, to a registered handler.
+`bitnet-b1.58` moves onto the vtable *first*, with no behavioural change, so the
+existing 35904 checks are its regression gate. Every later family is a new
+handler over the shared `sllm_ctx`, pool and chunking. Branching inside
+`sllm_forward_chunk` is the alternative and is rejected: it puts two arithmetic
+paths in one function, which is how they begin to disagree silently, and it
+makes "which architectures exist" unanswerable except by reading the body.
+
+**Type contract: the I2_S row-width rule stays attached to the type, never to
+the architecture.** `ne[0] % SLLM_I2S_QK` is a property of the I2_S *encoding*,
+because the encoding is blocked at 128 elements and read row-wise. A Qwen3
+`Q4_K`, `Q6_K` or `F16` tensor must never be subjected to it. Two invariants
+hold today and must be preserved by the vtable:
+
+1. `need_i2s()` re-tests the type internally, so a non-I2_S tensor cannot reach
+   the check even if a call site is wrong.
+2. Each architecture declares the types it consumes and the dimensional contract
+   for *those* types, rather than a per-model width rule. A mainstream family has
+   no I2_S tensors at all and should therefore never be asked the question.
+
+This is the same lesson as the `fdd4730` capability correction, applied to a
+second surface: a constraint that is true of one encoding is not a property of
+the file, and must not be applied to whatever else happens to be in it.
+
+## 7. Step 0 state
+
+Reference tooling: the vendored `third_party/llama.cpp`, built CPU-only with no
+network, driven by `tools/s0_probe.cpp`. Captured so far in
+`tests/golden/mainstream-qwen3-ref.txt`: model shape, tensor type census,
+non-tokenizer metadata keys, and tokenizer input ids.
+
+Still to capture: embedding lookup, a representative tensor dequantisation,
+norm, Q/K/V projections, RoPE, attention, MLP, and final logits/top-1.
+
+No comparison has been performed. No discrepancy has been seen, and none has
+been normalised away. The golden file is a fixed point, not a verdict.
