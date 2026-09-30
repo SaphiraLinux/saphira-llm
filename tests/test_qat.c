@@ -147,8 +147,30 @@ TEST(test_gradient_matches_central_difference) {
     CHECK(worst < 1e-1);
     CHECK(checked > 40);
     CHECK(nonzero_grads > checked / 2);
-    /* If almost nothing were resolvable the test would be vacuous, so require
-     * that a real share of the sampled entries cleared the noise floor. */
+    /*
+     * If almost nothing were resolvable the test would be vacuous, so require
+     * that a real share of the sampled entries cleared the noise floor.
+     *
+     * THIS ASSERTION IS THE ONE THAT KEEPS THE TEST HONEST, and it exists
+     * because the test once stopped checking anything while still passing. The
+     * fixture moved from 64 wide to 128, per-weight gradients halved, they fell
+     * below the float32 cancellation floor, and every sampled entry became
+     * unresolvable -- so the loop above compared nothing and the relative-error
+     * assertion was satisfied vacuously. Nothing about worst < 1e-1 would have
+     * caught it.
+     *
+     * PERTURBATION RULE, do not revert this to a fixed absolute step:
+     *
+     *   eps = 0.5 * sllm_qat_weight_scale(parameter)
+     *
+     * i.e. a step RELATIVE to each parameter tensor's own magnitude, so the
+     * same fraction of every parameter is probed. A fixed absolute step is only
+     * valid for one model width and silently becomes too small for any larger
+     * one, at which point the finite difference measures rounding noise and the
+     * comparison below is meaningless while still green. If you change the step
+     * size, change it to a scale-relative form, and re-check that resolvable
+     * stays well above the floor below.
+     */
     CHECK(resolvable >= 8);
 
     sllm_qat_free(q);

@@ -133,6 +133,14 @@ typedef struct sllm_qat_batch {
  */
 double sllm_qat_loss(sllm_qat * q, const sllm_qat_batch * batch);
 
+/* Top-1 count over a batch: how many scored positions the model's argmax
+ * matches, under the SAME quantised forward sllm_qat_loss uses. It exists so
+ * that trainer and exported-runtime top-1 can be compared like for like
+ * without either side being measured by a different code path, which is how a
+ * parity table stops being evidence and starts being a narrative. Returns the
+ * count, or a negative value on a bad argument. */
+int sllm_qat_top1(sllm_qat * q, const sllm_qat_batch * batch);
+
 /* One AdamW step. Explicit, not a black box: the betas, epsilon and weight
  * decay are all in the header so they can be stated rather than assumed. */
 #define SLLM_QAT_ADAM_BETA1  0.9f

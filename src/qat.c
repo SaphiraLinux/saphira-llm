@@ -1163,6 +1163,23 @@ double sllm_qat_loss(sllm_qat * q, const sllm_qat_batch * batch) {
     return loss;
 }
 
+int sllm_qat_top1(sllm_qat * q, const sllm_qat_batch * batch) {
+    qws * w = ws_of(q);
+    if (w == NULL) { return -1; }
+    const int n_tok = batch->n_tokens;
+    if (n_tok < 2 || n_tok > q->cfg.n_ctx) { return -1; }
+    (void) qat_forward(w, q, batch->tokens, n_tok, n_tok - 1, false);
+    const int V = q->cfg.n_vocab;
+    int hit = 0;
+    for (int t = 0; t < n_tok - 1; ++t) {
+        const float * lg = w->logits + (size_t) t * V;
+        int best = 0;
+        for (int v = 1; v < V; ++v) { if (lg[v] > lg[best]) { best = v; } }
+        if (best == batch->tokens[t + 1]) { ++hit; }
+    }
+    return hit;
+}
+
 double sllm_qat_clip_grad(sllm_qat * q, float max_norm) {
     double ss = 0.0;
     for (int i = 0; i < q->n_p; ++i) {
