@@ -139,10 +139,30 @@ gcc and clang figures differ by 0.34% (perplexity 145.0836 against 145.5773),
 which is the same order as a small real improvement and would be easy to
 mistake for one. `saphira-llm-eval` prints this warning for that reason.
 
-Whether to add `-ffp-contract=off` to the release build is an open decision and
-is **not** taken here: it would change the shipped arithmetic of a sealed
-release, which is a larger call than an evaluation stage should make on its
-own. It is worth doing, and it should be a deliberate, documented change.
+### The arithmetic contract
+
+Adding `-ffp-contract=off` to the **release** build is **not** done: it would
+change the shipped arithmetic of a sealed release, which is a larger call than
+an evaluation stage should make on its own.
+
+For work **after** the sealed tag it is decided, and the rule is in
+`DECISIONS.md`:
+
+- `v0.0.1` at `7dbcc67` is not touched.
+- The **evaluation and training validation path** builds with
+  `-ffp-contract=off`, so regression arithmetic is deterministic across
+  compilers.
+- A fresh canonical baseline is established under that arithmetic. **The golden
+  value in `test_eval.c` was captured under the default (contracted) build and
+  is provisional until re-recorded.** Once the contract is in force the 5e-3
+  tolerance that currently absorbs the FMA spread becomes unnecessary and
+  should become exact equality.
+- A contracted baseline is never compared against a non-contracted build, and
+  the difference is never reported as a model improvement.
+- If production inference later deliberately uses FMA for performance, that is
+  benchmarked separately and does not become the quality baseline by accident.
+
+Not yet applied; it is the first item in the next-actions list.
 
 ## Evaluation is not a correctness gate
 

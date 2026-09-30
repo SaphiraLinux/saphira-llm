@@ -130,6 +130,9 @@ microsoft/BitNet tooling.
 | docs/PHASE4-CONTRACT.md | the forward graph as read from the pinned source |
 | docs/PHASE4-GAP.md | the logit gap: what it was, what is fixed, and its floor |
 | docs/PHASE4-ACCEPTANCE.md | the sealed Phase 4 boundary, and what would reopen it |
+| docs/EVALUATION.md | perplexity and cross-entropy: what is scored, and the FMA arithmetic contract |
+| docs/BITNET-LIFECYCLE.md | what the vendored upstream actually contains: activation quantisation, conversion, training |
+| docs/DECISIONS.md | the standing decisions and their consequences, newest first |
 | tools/reference/README.md | the reference-only golden-vector tooling |
 | tests/golden/README.md | the fixtures and the rules for regenerating them |
 
