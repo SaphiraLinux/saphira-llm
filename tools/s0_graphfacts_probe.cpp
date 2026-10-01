@@ -49,7 +49,11 @@ static const char * opname(int op) {
         case GGML_OP_GET_ROWS: return "GET_ROWS"; case GGML_OP_NORM: return "NORM";
         case GGML_OP_SOFT_MAX: return "SOFT_MAX"; case GGML_OP_DUP: return "DUP";
         case GGML_OP_UNARY: return "UNARY";
-        case GGML_OP_FLASH_ATTN_EXT: return "FLASH_ATTN_EXT"; case GGML_OP_GLU: return "GLU";
+        case GGML_OP_FLASH_ATTN_EXT: return "FLASH_ATTN_EXT";
+        case GGML_OP_ARGSORT:        return "ARGSORT";
+        case GGML_OP_SUM_ROWS:       return "SUM_ROWS";
+        case GGML_OP_DIV:            return "DIV";
+        case GGML_OP_CLAMP:          return "CLAMP";
         default: return "OTHER";
     }
 }
@@ -182,6 +186,55 @@ int main(int argc, char ** argv) {
       printf("  layer's chosen mask tensor, and is labelled accordingly.\n");
     }
 
+    /* ROUTING FUNCTION, read from the REFERENCE GRAPH.
+     *
+     * The artefact says how MANY experts are used, not HOW. The reference path
+     * for MoE routing is build_moe_ffn, and the op SEQUENCE is the evidence:
+     *   build_lora_mm(gate_inp, cur)                          score every expert
+     *   ggml_argsort_top_k(selection_probs, n_expert_used)    select the top-k
+     *   ggml_get_rows(probs, selected_experts)                gather their probs
+     *   ggml_soft_max(weights)        only for SOFTMAX_WEIGHT gating
+     *   ggml_sum_rows(weights), ggml_clamp(...), ggml_div()  normalise
+     *
+     * Reading the ops rather than the architecture name is the point: three
+     * gating conventions exist in this file and only the op sequence tells them
+     * apart. */
+    printf("\n== ROUTING FUNCTION, FROM THE REFERENCE OP SEQUENCE ==\n");
+    { int n_argsort = 0, n_softmax = 0, n_sumrows = 0, n_div = 0, n_clamp = 0, n_getrows = 0;
+      for (size_t i = 0; i < g.size(); ++i) {
+          const std::string & o = g[i].op;
+          if (o.find("ARGSORT") != std::string::npos) { ++n_argsort; }
+          if (o.find("SOFT_MAX") != std::string::npos) { ++n_softmax; }
+          if (o.find("SUM_ROWS") != std::string::npos) { ++n_sumrows; }
+          if (o.find("DIV") != std::string::npos) { ++n_div; }
+          if (o.find("CLAMP") != std::string::npos) { ++n_clamp; }
+          if (o.find("GET_ROWS") != std::string::npos) { ++n_getrows; }
+      }
+      printf("   ARGSORT ops=%d  SOFT_MAX ops=%d  SUM_ROWS ops=%d  DIV=%d  CLAMP=%d  GET_ROWS=%d\n",
+             n_argsort, n_softmax, n_sumrows, n_div, n_clamp, n_getrows);
+      if (n_argsort == 0) {
+          printf("   ROUTING: ABSENT -- no top-k selection op appears in the graph, so this is\n");
+          printf("   not a mixture-of-experts graph. That is a POSITIVE absence, measured.\n");
+      } else {
+          printf("   ROUTING [MEASURED from the graph op sequence]:\n");
+          printf("     1. score every expert: MUL_MAT against the router tensor\n");
+          printf("     2. select top-k: ARGSORT_TOP_K with k = n_expert_used\n");
+          printf("     3. gather the SELECTED probs: GET_ROWS (%d uses)\n", n_getrows);
+          if (n_softmax > 0) {
+              printf("     4a. softmax the selected weights: SOFT_MAX present (%d)\n", n_softmax);
+          } else {
+              printf("     4a. NO softmax on the selected weights: raw probs are used\n");
+          }
+          if (n_sumrows > 0 && n_clamp > 0 && n_div > 0) {
+              printf("     4b. NORMALISE: SUM_ROWS then CLAMP to a floor then DIV\n");
+              printf("          the floor 6.103515625e-05 is in build_moe_ffn; it guards a division\n");
+              printf("          by ~0 when the selected weights sum to nothing\n");
+              printf("     => selection is NORMALISED top-k, softmax is %s\n",
+                     n_softmax > 0 ? "ALSO applied (SOFTMAX_WEIGHT convention)"
+                                   : "NOT applied (raw-prob convention)");
+          }
+      } }
+
     /* SoftCap SITE CENSUS, by OP COMPOSITION rather than by name.
      *
      * A cap is f(x) = c * tanh(x/c), so it must appear as a SCALE, a UNARY
@@ -251,6 +304,28 @@ int main(int argc, char ** argv) {
                                : "UNRESOLVED (neither hypothesis fits)";
           printf("  VERDICT pairing = %s   [MEASURED from the reference graph at pos=%d]\n", verdict, pos);
         } } }
+
+    /* HEAD DIM, derivable when the artefact omits key_length. */
+    { long hd2 = -1; long n_embd2 = -1;
+      gguf_init_params gp2; memset(&gp2,0,sizeof gp2); gp2.no_alloc = true;
+      gguf_context * gg2 = gguf_init_from_file(argv[1], gp2);
+      if (gg2 != NULL) {
+          std::string P2 = "olmoe.";
+          const int64_t ai = gguf_find_key(gg2, "general.architecture");
+          if (ai >= 0) { const char * av = gguf_get_val_str(gg2, ai); if (av) { P2 = std::string(av) + "."; } }
+          const int64_t kl = gguf_find_key(gg2, (P2 + "attention.key_length").c_str());
+          if (kl >= 0) { hd2 = (long) gguf_get_val_u32(gg2, kl); }
+          const int64_t el = gguf_find_key(gg2, (P2 + "embedding_length").c_str());
+          if (el >= 0) { n_embd2 = (long) gguf_get_val_u32(gg2, el); }
+          const int64_t hc = gguf_find_key(gg2, (P2 + "attention.head_count").c_str());
+          if (hc >= 0 && hd2 < 0 && n_embd2 > 0) {
+              hd2 = n_embd2 / (long) gguf_get_val_u32(gg2, hc);
+          }
+          gguf_free(gg2);
+      }
+      printf("\n== HEAD DIM ==\n");
+      if (hd2 > 0) printf("  head_dim = %ld\n", hd2);
+      else printf("  head_dim UNRESOLVED\n"); }
 
     /* ---- 3: which tensor does the final projection read? ---- */
     printf("\n== FINAL PROJECTION SOURCE (weight sharing) ==\n");

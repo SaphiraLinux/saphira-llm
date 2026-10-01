@@ -1,0 +1,79 @@
+compiling (quiet)
+running fresh binary
+events=934
+-- OP HISTOGRAM --
+   ADD            144
+   ARGSORT        16
+   FLASH_ATTN_EXT 16
+   GET_ROWS       19
+   MUL            81
+   MUL_MAT        81
+   OTHER          144
+   RESHAPE        96
+   RMS_NORM       65
+   ROPE           32
+   SOFT_MAX       16
+   VIEW           224
+
+== FUSED SOFTCAP, FROM op_params ==
+  FLASH_ATTN_EXT nodes with op_params = 16
+  op_params[2] (logit_softcap) = 0   [MEASURED from the graph]
+  op_params[0] (scale)          = 0.0883883461
+  every node carries the same cap: yes
+  logit_softcap is 0 => NO fused cap at this node. This is a POSITIVE
+  measurement from op_params, unlike the histogram which could only fail
+  to see something.
+
+== PER-LAYER ATTENTION PATTERN (from the reference mask path) ==
+  architecture [olmoe]
+  olmoe.attention.sliding_window_pattern is ABSENT, so the reference DEFAULT pattern applies
+  reference rule (llama-hparams.cpp set_swa_pattern, dense_first=false):
+      is_swa[il] = (il mod n_pattern != 0)
+  gemma2.cpp:6 calls load_swa_pattern(ml, 2)  => n_pattern = 2
+  therefore EVEN layers are dense and ODD layers are sliding:
+    layer 0   pattern = full
+    layer 1   pattern = sliding_window
+    layer 2   pattern = full
+    layer 3   pattern = sliding_window
+    layer 4   pattern = full
+    layer 5   pattern = sliding_window
+  evidence class: INFERRED from the reference RULE, not MEASURED per-layer.
+  The rule is read from llama-hparams.cpp, which is weaker than observing each
+  layer's chosen mask tensor, and is labelled accordingly.
+
+== ROUTING FUNCTION, FROM THE REFERENCE OP SEQUENCE ==
+   ARGSORT ops=16  SOFT_MAX ops=16  SUM_ROWS ops=0  DIV=0  CLAMP=0  GET_ROWS=19
+   ROUTING [MEASURED from the graph op sequence]:
+     1. score every expert: MUL_MAT against the router tensor
+     2. select top-k: ARGSORT_TOP_K with k = n_expert_used
+     3. gather the SELECTED probs: GET_ROWS (19 uses)
+     4a. softmax the selected weights: SOFT_MAX present (16)
+   SCALE ops=0  UNARY(tanh) ops=0
+   an UNFUSED SoftCap site is 2 SCALE + 1 UNARY, so unfused tanh sites = 0
+   FLASH_ATTN_EXT ops=16
+   MEASUREMENT LIMIT: attention softcapping FUSED INTO FLASH_ATTN_EXT is
+   invisible to an op histogram. The cap is a PARAMETER of that node, not a
+   separate node, so counting SCALE/UNARY finds only UNFUSED cap sites. That
+   is a limit of this probe, NOT evidence that the attention cap is absent.
+
+== ROPE, LOCATED BY OP ==
+  rope node seq=7 ne=[128,16,1,1]
+  producer seq=6 op=RESHAPE  head_dim=128  n_heads_dim1=16
+  PAIRING adjacent(k,k+1)  worst rel=5.648e+04 <= NOT GPT pairing
+  PAIRING NEOX(k,k+64)    worst rel=1.214e-07 <= consistent with NEOX pairing
+  whole-head L2 rel=5.227e-09  rotation=YES
+  VERDICT pairing = NEOX (measured)   [MEASURED from the reference graph at pos=7]
+
+== HEAD DIM ==
+  head_dim = 128
+
+== FINAL PROJECTION SOURCE (weight sharing) ==
+  final MUL_MAT seq=933  ne=[50304,1]
+  src[0] WEIGHT     : "output.weight"
+  src[1] activation : "result_norm"
+  SHARING: final projection reads output.weight -- weights are NOT shared.
+           MEASURED.
+  output.weight present = YES
+  token_embd.weight present = YES
+  => weight sharing is decided by tensor IDENTITY in the graph, not by whether
+     output.weight exists; a model may reuse token_embd with no separate tensor.

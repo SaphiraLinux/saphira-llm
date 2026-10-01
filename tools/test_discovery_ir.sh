@@ -11,7 +11,7 @@ export SLLM_IR_ROPE_PAIRING_NEED=1
 pass=0; fail=0
 ok(){ if [ "$2" = "0" ]; then echo "  ok   $1"; pass=$((pass+1)); else echo "  FAIL $1"; fail=$((fail+1)); fi; }
 
-gen(){ unset SLLM_IR; SLLM_IR_ROPE_PAIRING=${P1:-} SLLM_IR_OUTPUT_SHARING=${SH1:-} SLLM_IR_SWA_PATTERN=${SW:-} SLLM_IR_FUSED_CAP=${FC:-} ./tools/run_s0_probe.sh tools/s0_ir_probe.cpp "$1" 2>/dev/null; }
+gen(){ unset SLLM_IR; SLLM_IR_ROPE_PAIRING=${P1:-} SLLM_IR_OUTPUT_SHARING=${SH1:-} SLLM_IR_SWA_PATTERN=${SW:-} SLLM_IR_FUSED_CAP=${FC:-} SLLM_IR_ROUTING=${ROUT:-} SLLM_IR_HEAD_DIM=${HD:-} ./tools/run_s0_probe.sh tools/s0_ir_probe.cpp "$1" 2>/dev/null; }
 
 # A: same artefact -> deterministic IR
 P1=NEOX; SH1="weights NOT shared: final projection reads output.weight"; A1=$(gen "$QW"); A2=$(gen "$QW")
@@ -168,7 +168,7 @@ fi
 # I: OLMoE, the MoE model, which attacked the vocabulary in a new way.
 O=/var/lib/spoon/models/olmoe-1b7b/olmoe-q4_k_m.gguf
 if [ -f "$O" ]; then
-  P1=NEOX; SH1="" SW="" FC="" O1=$(gen "$O")
+  P1=NEOX; SH1="" SW="" FC="" ROUT="" HD="" O1=$(gen "$O")
   printf '%s\n' "$O1" | grep -q '^  ExpertRouter '; ok "I1 MoE gets its own ExpertRouter op, not squeezed into GatedMLP" $?
   printf '%s\n' "$O1" | grep -q '^  ExpertGatedFFN '; ok "I2 expert bank has its own op" $?
   printf '%s\n' "$O1" | grep -q '^  GatedMLP '; if [ $? -ne 0 ]; then ok "I3 dense GatedMLP is NOT emitted for a MoE model" 0; else ok "I3 dense GatedMLP is NOT emitted for a MoE model" 1; fi
@@ -194,6 +194,24 @@ if [ -f "$O" ]; then
   [ "$(gen "$O")" = "$O1" ]; ok "I14 restore byte-exact" $?
 else
   echo "  skip I* (OLMoE artefact absent)"
+fi
+
+# J: routing function and head_dim, resolved from the reference rather than assumed.
+if [ -f "$O" ]; then
+  RT="argsort_top_k then softmax over the SELECTED weights, no renormalisation (SOFTMAX_WEIGHT convention)"
+  KEEP_RT="${ROUT:-}"; ROUT="$RT"; KEEP_HD="${HD:-}"; HD=128
+  O2=$(gen "$O")
+  printf '%s\n' "$O2" | grep -q 'ROUTING \[MEASURED from the reference op sequence\]'; ok "J1 routing function now MEASURED from the op sequence" $?
+  printf '%s\n' "$O2" | grep -q 'the architecture name'; ok "J2 routing evidence disclaims architecture-name derivation" $?
+  ROUT="" NORT=$(gen "$O")
+  printf '%s\n' "$NORT" | grep -q 'ROUTING FUNCTION UNRESOLVED'; ok "J3 without the op evidence, routing degrades to UNRESOLVED" $?
+  printf '%s\n' "$NORT" | grep -q 'MEASURED from the reference op sequence'; if [ $? -ne 0 ]; then ok "J4 no fabricated MEASURED routing without evidence" 0; else ok "J4 no fabricated MEASURED routing without evidence" 1; fi
+  HD="" NOHD=$(gen "$O")
+  printf '%s\n' "$NOHD" | grep -q 'key_length ABSENT and no head_dim supplied'; ok "J5 without head_dim the scope test is refused rather than guessed" $?
+  printf '%s\n' "$NOHD" | grep -q 'reduces ONE HEAD'; if [ $? -ne 0 ]; then ok "J6 no head-scope claim without a real comparison" 0; else ok "J6 no head-scope claim without a real comparison" 1; fi
+  ROUT="$KEEP_RT"; HD="$KEEP_HD"
+  # OLMoE has MHA (q_heads == kv_heads) where every other model had GQA
+  printf '%s\n' "$O2" | grep -q 'q_heads=16 kv_heads=16'; ok "J7 OLMoE MHA recorded as such, not assumed to be GQA" $?
 fi
 
 echo

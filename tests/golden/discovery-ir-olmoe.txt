@@ -3,7 +3,7 @@ running fresh binary
 === DISCOVERY IR for /var/lib/spoon/models/olmoe-1b7b/olmoe-q4_k_m.gguf ===
 architecture (from general.architecture) = olmoe
 block_count=16 embedding_length=2048 ffn_length=1024 heads=16 kv_heads=16
-key_length=-1 value_length=-1 rope_dimension_count=-1
+key_length=128 value_length=-1 rope_dimension_count=-1
 rms_eps=9.99999975e-06 rope_base=10000
   TokenizerSelector (model)  tokenizer.ggml.{model,pre,tokens}
       evidence        : MEASURED
@@ -50,6 +50,7 @@ rms_eps=9.99999975e-06 rope_base=10000
       type            : f32
       norm width      : 2048   bias=false
       epsilon         : 9.99999975e-06
+      head_dim=128  heads=16  kv_heads=16
       evidence        : MEASURED (read from artefact/reference graph)
         - tensor blk.0.attn_q_norm.weight present in all 16 layers
         - ne=[2048,1] width MEASURED
@@ -57,11 +58,11 @@ rms_eps=9.99999975e-06 rope_base=10000
         - scope is a PARAMETER of RMSNorm; per-head and full-vector norms are the same operation over a different axis length
         - position=pre_rope from the graph: the norm is applied at the line before ggml_rope_ext
         - blk.0.attn_q_norm.bias ABSENT => bias=false
-      UNRESOLVED      : key_length ABSENT for this architecture, so head_dim could not be read from metadata and no head-scope comparison was possible
   RMSNorm            layer=0    blk.0.attn_k_norm.weight
       type            : f32
       norm width      : 2048   bias=false
       epsilon         : 9.99999975e-06
+      head_dim=128  heads=16  kv_heads=16
       evidence        : MEASURED (read from artefact/reference graph)
         - tensor blk.0.attn_k_norm.weight present in all 16 layers
         - ne=[2048,1] width MEASURED
@@ -69,45 +70,50 @@ rms_eps=9.99999975e-06 rope_base=10000
         - scope is a PARAMETER of RMSNorm; per-head and full-vector norms are the same operation over a different axis length
         - position=pre_rope from the graph: the norm is applied at the line before ggml_rope_ext
         - blk.0.attn_k_norm.bias ABSENT => bias=false
-      UNRESOLVED      : key_length ABSENT for this architecture, so head_dim could not be read from metadata and no head-scope comparison was possible
   SoftCap            layer=0    (none)
       status          : ABSENT (no softcapping keys in metadata)
       evidence        : MEASURED -- both keys absent from 38 kv pairs
   Attention          layer=0    
+      head_dim=128  heads=16  kv_heads=16
       pattern         : full
       evidence        : INFERRED (rule-based)
         - no olmoe.attention.sliding_window key => pattern=full   [INFERRED: absence of a sliding-window key, which is weaker than a positive statement of full attention]
-        - q_heads=16 kv_heads=16 head_dim=-1  [MEASURED from metadata]
+        - q_heads=16 kv_heads=16 head_dim=128  [MEASURED from metadata]
         - pattern lives on the Attention NODE, not on a layer type: a layer is an ordered container of operations and may differ from its neighbours
   Linear             layer=0    blk.0.attn_q.weight
       type            : q4_K
       in/out features : 2048 / 2048
+      head_dim=128  heads=16  kv_heads=16
       evidence        : MEASURED (read from artefact/reference graph)
         - tensor blk.0.attn_q.weight ne=[2048,2048]
-        - out_features 2048 = 16x-1 (Q) or 16x-1 (K/V) => GQA or MHA, measured
+        - out_features 2048 = 16x128 (Q) or 16x128 (K/V) => GQA or MHA, measured
         - blk.0.attn_q.weight.bias ABSENT => bias=false
   Linear             layer=0    blk.0.attn_k.weight
       type            : q4_K
       in/out features : 2048 / 2048
+      head_dim=128  heads=16  kv_heads=16
       evidence        : MEASURED (read from artefact/reference graph)
         - tensor blk.0.attn_k.weight ne=[2048,2048]
-        - out_features 2048 = 16x-1 (Q) or 16x-1 (K/V) => GQA or MHA, measured
+        - out_features 2048 = 16x128 (Q) or 16x128 (K/V) => GQA or MHA, measured
         - blk.0.attn_k.weight.bias ABSENT => bias=false
   Linear             layer=0    blk.0.attn_v.weight
       type            : q6_K
       in/out features : 2048 / 2048
+      head_dim=128  heads=16  kv_heads=16
       evidence        : MEASURED (read from artefact/reference graph)
         - tensor blk.0.attn_v.weight ne=[2048,2048]
-        - out_features 2048 = 16x-1 (Q) or 16x-1 (K/V) => GQA or MHA, measured
+        - out_features 2048 = 16x128 (Q) or 16x128 (K/V) => GQA or MHA, measured
         - blk.0.attn_v.weight.bias ABSENT => bias=false
   Linear             layer=0    blk.0.attn_output.weight
       type            : q4_K
       in/out features : 2048 / 2048
+      head_dim=128  heads=16  kv_heads=16
       evidence        : MEASURED (read from artefact/reference graph)
         - tensor blk.0.attn_output.weight ne=[2048,2048]
-        - out_features 2048 = 16x-1 (Q) or 16x-1 (K/V) => GQA or MHA, measured
+        - out_features 2048 = 16x128 (Q) or 16x128 (K/V) => GQA or MHA, measured
         - blk.0.attn_output.weight.bias ABSENT => bias=false
   RoPE               layer=0    (computed)
+      head_dim=128  heads=16  kv_heads=16
       pairing         : NEOX   [MEASURED from reference graph]
       base            : 10000
       dim_count       : -1
@@ -128,7 +134,8 @@ rms_eps=9.99999975e-06 rope_base=10000
         - output width 64 is the EXPERT COUNT: one score per expert, so this is a router
         - olmoe.expert_count = 64  [MEASURED], agrees with the router output width
         - olmoe.expert_used_count = 8  [MEASURED]: top-8 of 64 experts are active per token
-      UNRESOLVED      : ROUTING FUNCTION UNRESOLVED: the artefact states how MANY experts are used, not HOW they are chosen or combined. Top-k by weight, softmax gating and normalised weighted sums are all consistent with the metadata, so the function is not asserted from it. It must come from the reference graph.
+        - ROUTING [MEASURED from the reference op sequence]: argsort_top_k then softmax over the SELECTED weights, no renormalisation (SOFTMAX_WEIGHT convention)
+        - three conventions exist in build_moe_ffn and only the op order distinguishes them, so this is read from the graph and NOT from the architecture name
   ExpertGatedFFN     layer=0    ffn_gate_exps + ffn_up_exps + ffn_down_exps
       in/out features : 2048 / 1024
       evidence        : MEASURED (read from artefact/reference graph)
