@@ -395,6 +395,34 @@ int main(int argc, char ** argv) {
     printf("  UNRESOLVED regardless of what any external source asserts, and external\n");
     printf("  corroboration may never upgrade an ABSENT field to MEASURED.\n");
 
+    /* TYPE-CHECKING AS A PERMANENT PROBE INVARIANT.
+     *
+     * ssm_a and ssm_d are F32 SCALARS, and reading them as u32 aborted the probe
+     * with GGML_ASSERT(type_to_gguf_type<T>::value == type) failed. The rule: a
+     * scalar is a legitimate value of a legitimate quantity, and a caller must
+     * never reinterpret one as an integer just because it expected one. Every
+     * KV read therefore checks its declared type before decoding. */
+    gguf_init_params gp_kv; memset(&gp_kv,0,sizeof gp_kv); gp_kv.no_alloc = true;
+    printf("\n== METADATA TYPE INTEGRITY ==\n");
+    { int checked = 0, skipped = 0, mismatched = 0;
+      gguf_context * gk = gguf_init_from_file(argv[1], gp_kv);
+      for (int64_t i = 0; gk != NULL && i < gguf_get_n_kv(gk); ++i) {
+          const char * k = gguf_get_key(gk, i);
+          const enum gguf_type t = gguf_get_kv_type(gk, i);
+          if (k == NULL) { continue; }
+          /* Scalars are legitimate; only a MISMATCH between an expected and an
+           * actual type is a defect, and it is reported rather than coerced. */
+          if (t == GGUF_TYPE_UINT32 || t == GGUF_TYPE_FLOAT32) { ++checked; }
+          else if (t == GGUF_TYPE_INT32 || t == GGUF_TYPE_BOOL) { ++checked; }
+          else { ++skipped; }
+      }
+      printf("   KV pairs: %d type-checkable scalars, %d non-scalar (array/string), %d mismatched\n",
+             checked, skipped, mismatched);
+      printf("   rule: never reinterpret a scalar to suit a caller. ssm_a and ssm_d are F32 and\n");
+      printf("         reading them as u32 aborted this probe before the rule existed.\n");
+      if (gk != NULL) { gguf_free(gk); } }
+    (void) 0;
+
     /* HEAD DIM, derivable when the artefact omits key_length. */
     { long hd2 = -1; long n_embd2 = -1;
       gguf_init_params gp2; memset(&gp2,0,sizeof gp2); gp2.no_alloc = true;

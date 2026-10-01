@@ -59,6 +59,7 @@ rms_eps=9.99999975e-06 rope_base=10000
       norm width      : 2048   bias=false
       epsilon         : 9.99999975e-06
       evidence        : MEASURED (read from artefact/reference graph)
+        - tensor name as written: "ffn_norm.weight" -- norms appear with and without the .weight suffix across models, which is a naming variant and not a different construct
         - ne=[4096,1] => width == embedding_length
         - applied to the post-attention residual before the FFN
   RMSNorm            layer=0    blk.0.attn_q_norm.weight
@@ -161,9 +162,11 @@ rms_eps=9.99999975e-06 rope_base=10000
         - expert_ff = 1024 per expert, read from the EXPERT TENSOR SHAPE
         - olmoe.feed_forward_length=1024 happens to EQUAL expert_ff here; expert_ff is still taken from the tensor shape, not from this key
         - shared expert ABSENT: no ffn_gate_exps_shear weight, so there is no always-on dense FFN alongside the experts
-  SelectiveScan      layer=0    ssm_in -> ssm_out with ssm_a, ssm_d and an input-derived step size
-      evidence        : MEASURED (read from artefact/reference graph)
-        - NO attention mathematics anywhere in this block: no Q, no K, no softmax over keys, no KV cache. A recurrence over a carried state is DIFFERENT mathematics, so it gets its own composable op rather than being renamed Attention
+  SelectiveScan      layer=0    (none)
+      status          : ABSENT -- no ssm_a, ssm_in or ssm_conv1d tensor exists, so
+                       there is no recurrence to describe
+      evidence        : MEASURED -- emitting it would invent a state-space model from an
+                       architecture name.
 
 -- PER-LAYER ROLE COVERAGE (all layers identical?) --
   layers seen=16  distinct roles=12  every layer has the same role set: YES

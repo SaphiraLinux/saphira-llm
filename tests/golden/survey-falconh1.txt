@@ -1,0 +1,94 @@
+compiling (quiet)
+running fresh binary
+########## FH1 ##########
+file = /var/lib/spoon/models/falcon-h1-0.5b/falcon-h1-0.5b-q8_0.gguf
+kv_pairs = 39   tensors = 579
+
+-- ARCHITECTURE-RELEVANT METADATA (tokenizer.* excluded) --
+  general.architecture                                 = "falcon-h1"
+  general.type                                         = "model"
+  general.name                                         = "Original"
+  general.size_label                                   = "521M"
+  general.license                                      = "other"
+  general.license.name                                 = "falcon-llm-license"
+  general.license.link                                 = "https://falconllm.tii.ae/falcon-terms-and-conditions.html"
+  general.base_model.count                             = 1
+  general.base_model.0.name                            = "Falcon H1 0.5B Base"
+  general.base_model.0.organization                    = "Tiiuae"
+  general.base_model.0.repo_url                        = "https://huggingface.co/tiiuae/Falcon-H1-0.5B-Base"
+  general.tags                                         = <arr>
+  falcon-h1.context_length                             = 16384
+  falcon-h1.embedding_length                           = 1024
+  falcon-h1.feed_forward_length                        = 2048
+  falcon-h1.attention.head_count                       = 8
+  falcon-h1.block_count                                = 36
+  falcon-h1.ssm.conv_kernel                            = 4
+  falcon-h1.ssm.inner_size                             = 1536
+  falcon-h1.ssm.state_size                             = 128
+  falcon-h1.ssm.time_step_rank                         = 24
+  falcon-h1.ssm.group_count                            = 1
+  falcon-h1.attention.layer_norm_rms_epsilon           = 9.99999975e-06
+  falcon-h1.vocab_size                                 = 32784
+  falcon-h1.attention.head_count_kv                    = 2
+  falcon-h1.attention.key_length                       = 64
+  falcon-h1.attention.value_length                     = 64
+  falcon-h1.rope.freq_base                             = 9.9999998e+10
+  general.quantization_version                         = 2
+  general.file_type                                    = 7
+
+-- TOKENIZER TUPLE (the selector, all three legs) --
+  tokenizer.ggml.model                   = "gpt2"
+  tokenizer.ggml.pre                     = "falcon-h1"
+  tokenizer.ggml.bos_token_id            = 17
+  tokenizer.ggml.eos_token_id            = 11
+  tokenizer.ggml.padding_token_id        = 32768
+  tokenizer.ggml.unknown_token_id        ABSENT
+  tokenizer.ggml.add_bos_token           ABSENT
+  tokenizer.ggml.add_eos_token           ABSENT
+  tokenizer.ggml.add_space_prefix        ABSENT
+  tokenizer.ggml.ignore_merges           ABSENT
+  tokenizer.ggml.tokens n                = 32784
+  tokenizer.ggml.merges                  = present
+
+-- TENSOR TYPE HISTOGRAM --
+  f32          253
+  q8_0         326
+
+-- TENSOR INVENTORY, layer indices resolved --
+  max layer index = 35  => layer count = 36
+  attn_k.weight            layers=36   ne=[1024,128]
+  attn_norm.weight         layers=36   ne=[1024,1]
+  attn_output.weight       layers=36   ne=[512,1024]
+  attn_q.weight            layers=36   ne=[1024,512]
+  attn_v.weight            layers=36   ne=[1024,128]
+  ffn_down.weight          layers=36   ne=[2048,1024]
+  ffn_gate.weight          layers=36   ne=[1024,2048]
+  ffn_norm                 layers=36   ne=[1024,1]
+  ffn_up.weight            layers=36   ne=[1024,2048]
+  ssm_a                    layers=36   ne=[1,24]
+  ssm_conv1d.bias          layers=36   ne=[1792,1]
+  ssm_conv1d.weight        layers=36   ne=[4,1792]
+  ssm_d                    layers=36   ne=[1,24]
+  ssm_dt.bias              layers=36   ne=[24,1]
+  ssm_in.weight            layers=36   ne=[1024,3352]
+  ssm_out.weight           layers=36   ne=[1536,1024]
+
+-- NON-LAYER TENSORS --
+  output.weight
+  output_norm.weight
+  token_embd.weight
+
+-- OPTIONAL PER-LAYER TENSORS: PRESENT OR ABSENT --
+  attn_q_norm.weight         ABSENT
+  attn_k_norm.weight         ABSENT
+  attn_q_norm.bias           ABSENT
+  attn_k_norm.bias           ABSENT
+  attn_q.bias                ABSENT
+  attn_k.bias                ABSENT
+  attn_v.bias                ABSENT
+  attn_output.bias           ABSENT
+  ffn_gate_inp.weight        ABSENT
+  ffn_norm.bias              ABSENT
+  attn_norm.bias             ABSENT
+  (a genuine per-layer tensor is verified at layer 0 AND its count
+   matches the layer count above, so it is not a single stray tensor)

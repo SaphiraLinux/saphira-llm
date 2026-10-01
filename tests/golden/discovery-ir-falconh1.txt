@@ -1,0 +1,163 @@
+compiling (quiet)
+running fresh binary
+=== DISCOVERY IR for /var/lib/spoon/models/falcon-h1-0.5b/falcon-h1-0.5b-q8_0.gguf ===
+architecture (from general.architecture) = falcon-h1
+block_count=36 embedding_length=1024 ffn_length=2048 heads=8 kv_heads=2
+key_length=64 value_length=64 rope_dimension_count=-1
+rms_eps=9.99999975e-06 rope_base=9.9999998e+10
+  TokenizerSelector (model)  tokenizer.ggml.{model,pre,tokens}
+      evidence        : MEASURED
+        - leg model   = "gpt2"
+        - leg pre     = "falcon-h1"
+        - leg tokens  = 32784
+        - falcon-h1.vocab_size = 32784   [ARTEFACT MEASURED, the declared route]
+        - tokenizer_token_count = 32784   [ARTEFACT MEASURED]
+        - embedding_row_count   = 32784   [ARTEFACT MEASURED]: the physical capacity ids index
+        - output_projection_rows= 32784   [ARTEFACT MEASURED] (untied: a distinct output.weight exists)
+        - RELATION: declared vocab_size == tokenizer_token_count, EXACT MATCH, no padding  [MEASURED outcome]
+      NOTE            : model alone is NOT a sufficient selector; Qwen3 declares
+                        model=gpt2 while requiring pre=qwen2.
+      VOCAB DIMENSIONS ARE DISTINCT QUANTITIES, not one scalar: token count is
+                        how many tokens the tokenizer lists, embedding rows are the
+                        physical capacity ids index, and output rows are the head
+                        capacity. Equality between them is a MEASURED OUTCOME, not an
+                        invariant of this vocabulary, and a padded vocabulary is a
+                        DESIGN rather than a defect.
+      EXTERNAL UPSTREAM INFORMATION MAY NOT UPGRADE AN ABSENT FIELD TO MEASURED.
+                        A web search reports Gemma-2 rope_theta 10000 and OLMoE built
+                        with vocab_size = tokenizer.padded_vocab_size(); both may be
+                        true of those upstream configs, and neither is a reading of
+                        THESE files.
+
+-- MODEL SCOPE --
+  Embedding          (model)     token_embd.weight
+      type            : q8_0
+      in/out features : 1024 / 32784
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor token_embd.weight present, ne=[1024,32784]
+        - tokenizer.ggml.tokens n=32784
+  OutputProjection   (model)     output.weight
+      type            : q8_0
+      in/out features : 1024 / 32784
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor output.weight present, ne=[1024,32784]
+        - a DISTINCT output tensor exists => weights are NOT shared with the embedding, whatever the dimensions happen to be
+        - falcon-h1.embedding_length=1024 vs output in_features=1024 (dimensions match, weights still separate)
+
+-- LAYER 0 (representative body) --
+  RMSNorm            layer=0    blk.0.attn_norm.weight
+      type            : f32
+      norm width      : 1024   bias=false
+      epsilon         : 9.99999975e-06
+      evidence        : MEASURED (read from artefact/reference graph)
+        - falcon-h1.attention.layer_norm_rms_epsilon=0.000010
+        - ne=[4096,1] i.e. width == embedding_length => reduces the residual
+        - blk.0.attn_norm.bias ABSENT => bias=false
+        - qwen3/Llama graph applies it to the residual before the QKV projection
+  RMSNorm            layer=0    blk.0.ffn_norm
+      type            : f32
+      norm width      : 1024   bias=false
+      epsilon         : 9.99999975e-06
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor name as written: "ffn_norm" -- norms appear with and without the .weight suffix across models, which is a naming variant and not a different construct
+        - ne=[4096,1] => width == embedding_length
+        - applied to the post-attention residual before the FFN
+  RMSNorm            layer=0    blk.0.attn_q_norm.weight
+      status          : ABSENT for this architecture
+      evidence        : MEASURED -- tensor not present in the inventory,
+                       and not present in ANY layer (0 of 36)
+      NOTE            : ABSENT is not UNKNOWN. Absent means looked-and-
+                       not-there; UNKNOWN means could-not-determine.
+  RMSNorm            layer=0    blk.0.attn_k_norm.weight
+      status          : ABSENT for this architecture
+      evidence        : MEASURED -- tensor not present in the inventory,
+                       and not present in ANY layer (0 of 36)
+      NOTE            : ABSENT is not UNKNOWN. Absent means looked-and-
+                       not-there; UNKNOWN means could-not-determine.
+  SoftCap            layer=0    (none)
+      status          : ABSENT (no softcapping keys in metadata)
+      evidence        : MEASURED -- both keys absent from 39 kv pairs
+  Attention          layer=0    
+      head_dim=64  heads=8  kv_heads=2
+      pattern         : full
+      evidence        : INFERRED (rule-based)
+        - no falcon-h1.attention.sliding_window key => pattern=full   [INFERRED: absence of a sliding-window key, which is weaker than a positive statement of full attention]
+        - q_heads=8 kv_heads=2 head_dim=64  [MEASURED from metadata]
+        - pattern lives on the Attention NODE, not on a layer type: a layer is an ordered container of operations and may differ from its neighbours
+  Linear             layer=0    blk.0.attn_q.weight
+      type            : q8_0
+      in/out features : 1024 / 512
+      head_dim=64  heads=8  kv_heads=2
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor blk.0.attn_q.weight ne=[1024,512]
+        - out_features 512 = 8x64 (Q) or 2x64 (K/V) => GQA or MHA, measured
+        - blk.0.attn_q.weight.bias ABSENT => bias=false
+  Linear             layer=0    blk.0.attn_k.weight
+      type            : q8_0
+      in/out features : 1024 / 128
+      head_dim=64  heads=8  kv_heads=2
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor blk.0.attn_k.weight ne=[1024,128]
+        - out_features 128 = 8x64 (Q) or 2x64 (K/V) => GQA or MHA, measured
+        - blk.0.attn_k.weight.bias ABSENT => bias=false
+  Linear             layer=0    blk.0.attn_v.weight
+      type            : q8_0
+      in/out features : 1024 / 128
+      head_dim=64  heads=8  kv_heads=2
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor blk.0.attn_v.weight ne=[1024,128]
+        - out_features 128 = 8x64 (Q) or 2x64 (K/V) => GQA or MHA, measured
+        - blk.0.attn_v.weight.bias ABSENT => bias=false
+  Linear             layer=0    blk.0.attn_output.weight
+      type            : q8_0
+      in/out features : 512 / 1024
+      head_dim=64  heads=8  kv_heads=2
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor blk.0.attn_output.weight ne=[512,1024]
+        - out_features 1024 = 8x64 (Q) or 2x64 (K/V) => GQA or MHA, measured
+        - blk.0.attn_output.weight.bias ABSENT => bias=false
+  RoPE               layer=0    (computed)
+      head_dim=64  heads=8  kv_heads=2
+      pairing         : NEOX   [MEASURED from reference graph]
+      base            : 9.9999998e+10
+      dim_count       : -1
+      scaling         : none
+      position_source : position index (pos), from inp_pos
+      evidence        : MEASURED (read from artefact/reference graph)
+        - rope applied to Q and K only, not V (graph)
+        - falcon-h1.rope.freq_base=99999997952.000000
+        - falcon-h1.rope.dimension_count=ABSENT
+        - falcon-h1.rope.scaling.type=none
+        - pairing=NEOX MEASURED from the reference graph: the ROPE node located by ggml op, its immediate producer snapshotted, both pairing hypotheses tested numerically
+        - not derived from general.architecture; the two models differ here despite both being decoder-only transformers
+  GatedMLP           layer=0    ffn_gate.weight + ffn_up.weight + ffn_down.weight
+      in/out features : 1024 / 2048
+      scope           : gated (SwiGLU-family): gate and up share out_features, down returns to in_features
+      evidence        : MEASURED (read from artefact/reference graph)
+        - ffn_gate ne=[1024,2048]
+        - ffn_up   ne=[1024,2048]  same shape as gate => parallel projections
+        - ffn_down ne=[2048,1024]  transpose of the gate shape => contraction
+        - falcon-h1.feed_forward_length=2048
+        - ffn_gate_inp.weight ABSENT => not MoE, and not inferred from the architecture name
+  DepthwiseConv1D    layer=0    blk.0.ssm_conv1d.weight
+      type            : f32
+      in/out features : 4 / 1792
+      evidence        : MEASURED (read from artefact/reference graph)
+        - falcon-h1.ssm.conv_kernel = 4   [ARTEFACT MEASURED]
+        - ssm_conv1d.weight ne[0]=4, which agrees with conv_kernel: the weights ARE the kernel taps
+        - ne[1]=1792 channels with a matching ssm_conv1d.bias, one bias per channel: that is what makes it DEPTHWISE rather than a dense convolution
+        - convolved over SEQUENCE, not over an attention axis
+  SelectiveScan      layer=0    ssm_in -> ssm_out with ssm_a, ssm_d and an input-derived step size
+      evidence        : MEASURED (read from artefact/reference graph)
+        - falcon-h1.ssm.state_size = 128   [ARTEFACT MEASURED]: the recurrent state width
+        - falcon-h1.ssm.inner_size = 1536   [ARTEFACT MEASURED]
+        - falcon-h1.ssm.time_step_rank = 24   [ARTEFACT MEASURED]: the step size is COMPUTED FROM THE INPUT by projecting the sequence to this rank, which is what makes the block SELECTIVE rather than a fixed-step recurrence
+        - falcon-h1.ssm.group_count = 1   [ARTEFACT MEASURED]
+        - ssm_a ne=[1,24]   [ARTEFACT MEASURED]: per-head state transition, one row per state dimension
+        - ssm_d ne=[1,24]   [ARTEFACT MEASURED]: per-head skip coefficient, so the recurrence carries a direct term as well as the state
+        - ssm_in.weight ne=[1024,3352]: projects the residual into the inner space, mixing the state and step-size paths
+        - ssm_out.weight ne=[1536,1024]: projects back out
+        - NO attention mathematics anywhere in this block: no Q, no K, no softmax over keys, no KV cache. A recurrence over a carried state is DIFFERENT mathematics, so it gets its own composable op rather than being renamed Attention
+
+-- PER-LAYER ROLE COVERAGE (all layers identical?) --
+  layers seen=36  distinct roles=16  every layer has the same role set: YES

@@ -58,6 +58,7 @@ rms_eps=9.99999975e-06 rope_base=-1
       norm width      : 0   bias=false
       epsilon         : 9.99999975e-06
       evidence        : MEASURED (read from artefact/reference graph)
+        - tensor name as written: "ffn_norm.weight" -- norms appear with and without the .weight suffix across models, which is a naming variant and not a different construct
         - ne=[4096,1] => width == embedding_length
         - applied to the post-attention residual before the FFN
   RMSNorm            layer=0    blk.0.attn_q_norm.weight

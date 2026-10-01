@@ -324,6 +324,71 @@ if [ -f "$MB" ]; then
   printf '%s\n' "$MBX" | grep -q '^  Attention  *layer=0  *$'; if [ $? -ne 0 ]; then ok "M16 no Attention node emitted at all for Mamba-2" 0; else ok "M16 no Attention node emitted at all for Mamba-2" 1; fi
 fi
 
+# N: HYBRID composition -- Falcon-H1 has BOTH families in EVERY layer.
+FH=/var/lib/spoon/models/falcon-h1-0.5b/falcon-h1-0.5b-q8_0.gguf
+if [ -f "$FH" ]; then
+  KP1="$P1"; KROUT="$ROUT"; KHD="$HD"; KRS="$RS"; KRB="$RB"
+  P1=""; ROUT=""; HD=""; RS=""; RB=""
+  FHX=$(gen "$FH")
+  # The central question: do both families coexist WITHOUT a family template?
+  printf '%s\n' "$FHX" | grep -q '^  Attention '; ok "N1 hybrid emits Attention" $?
+  printf '%s\n' "$FHX" | grep -q '^  SelectiveScan '; ok "N2 AND SelectiveScan, same layer body" $?
+  printf '%s\n' "$FHX" | grep -q '^  DepthwiseConv1D '; ok "N3 AND DepthwiseConv1D" $?
+  printf '%s\n' "$FHX" | grep -q '^  GatedMLP '; ok "N4 AND GatedMLP" $?
+  printf '%s\n' "$FHX" | grep -q '^  RoPE '; ok "N5 AND RoPE" $?
+  # No family template: the ops coexist because tensors exist, not because a
+  # hybrid architecture was recognised.
+  printf '%s\n' "$FHX" | grep -q 'NO attention mathematics anywhere in this block'; ok "N6 SSM block still declares its own mathematics" $?
+  printf '%s\n' "$FHX" > /tmp/fhx.txt; grep -c 'UNKNOWN role' /tmp/fhx.txt > /tmp/fhc.txt
+  [ "$(cat /tmp/fhc.txt)" = "0" ] && ok "N7 zero UNKNOWN roles for the hybrid" 0 || ok "N7 zero UNKNOWN roles for the hybrid" 1
+  # The naming variant that would have forced a per-model special case.
+  printf '%s\n' "$FHX" | grep -q 'as written: "ffn_norm"'; ok "N8 ffn_norm WITHOUT .weight suffix recognised as a naming variant" $?
+  printf '%s\n' "$FHX" | grep -q 'naming variant and not a different construct'; ok "N9 variant stated, not special-cased" $?
+  P1="$KP1"; ROUT="$KROUT"; HD="$KHD"; RS="$KRS"; RB="$KRB"
+  # ANTI-VACUITY in both directions on the hybrid
+  cp tools/s0_ir_probe.cpp /tmp/ir6.bak
+  sed -i 's/known_roles.insert("ssm_a");//' tools/s0_ir_probe.cpp
+  P1=""; ROUT=""; HD=""; RS=""; RB=""
+  BRK=$(gen "$FH")
+  printf '%s\n' "$BRK" | grep -q 'UNKNOWN role: ssm_a'
+  if [ $? -eq 0 ]; then ok "N10 non-vacuity: hybrid SSM role unlearns to UNKNOWN" 0; else ok "N10 non-vacuity: hybrid SSM role unlearns to UNKNOWN" 1; fi
+  cp /tmp/ir6.bak tools/s0_ir_probe.cpp
+  P1="$KP1"; ROUT="$KROUT"; HD="$KHD"; RS="$KRS"; RB="$KRB"
+fi
+
+# O: STRUCTURAL NEGATIVE ASSERTIONS across every model, both directions.
+# Written to FILES, not command substitution: capture-into-a-variable followed by
+# piped grep has produced three separate false failures in this suite, and the
+# assertion must be the thing under test rather than the shell plumbing.
+emit_ir(){ P1="$2" ROUT="" HD="" RS="" RB="" ./tools/run_s0_probe.sh tools/s0_ir_probe.cpp "$1" 2>/dev/null > "$3"; }
+
+emit_ir "$MB" "" /tmp/n_mamba.txt
+emit_ir "$QW" "NEOX" /tmp/n_qwen3.txt
+emit_ir "$LL" "NEOX" /tmp/n_llama.txt
+emit_ir "$G"  "NEOX" /tmp/n_gemma.txt
+emit_ir "$O"  "NEOX" /tmp/n_olmoe.txt
+emit_ir "$FH" "NEOX" /tmp/n_falcon.txt
+
+absent(){ if grep -E "^  $2 +layer=0" "$1" 2>/dev/null | grep -qv '(none)'; then
+            ok "$3 (node present when it must be absent)" 1
+         else ok "$3" 0; fi; }
+present(){ if grep -E "^  $2 +layer=0" "$1" 2>/dev/null | grep -qv '(none)'; then
+            ok "$3" 0
+         else ok "$3 (node missing when evidenced)" 1; fi; }
+
+absent  /tmp/n_mamba.txt Attention "O1 Mamba-2 has NO Attention node"
+absent  /tmp/n_mamba.txt RoPE      "O2 Mamba-2 has NO RoPE node"
+absent  /tmp/n_mamba.txt GatedMLP   "O3 Mamba-2 has NO GatedMLP node"
+absent  /tmp/n_qwen3.txt SelectiveScan "O4 Qwen3 has NO SelectiveScan"
+absent  /tmp/n_llama.txt SelectiveScan "O5 Llama-3.2 has NO SelectiveScan"
+absent  /tmp/n_gemma.txt SelectiveScan "O6 Gemma-2 has NO SelectiveScan"
+absent  /tmp/n_olmoe.txt SelectiveScan "O7 OLMoE has NO SelectiveScan"
+absent  /tmp/n_qwen3.txt DepthwiseConv1D "O8 Qwen3 has NO DepthwiseConv1D"
+absent  /tmp/n_gemma.txt DepthwiseConv1D "O9 Gemma-2 has NO DepthwiseConv1D"
+present /tmp/n_falcon.txt SelectiveScan "O10 Falcon-H1 DOES emit SelectiveScan (evidenced)"
+present /tmp/n_falcon.txt Attention     "O11 Falcon-H1 DOES emit Attention (evidenced)"
+present /tmp/n_mamba.txt  SelectiveScan "O12 Mamba-2 DOES emit SelectiveScan (evidenced)"
+
 echo
 echo "discovery-ir structural tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

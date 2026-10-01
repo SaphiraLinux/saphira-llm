@@ -238,8 +238,21 @@ static void emit_ssm_block(gguf_context * g, const std::string & P,
 
     /* SelectiveScan: the recurrence. Different mathematics from attention: a
      * linear recurrence over a carried state, with NO score matrix, NO softmax
-     * over keys, NO KV cache and NO position-wise FFN. */
-    {
+     * over keys, NO KV cache and NO position-wise FFN.
+     *
+     * GATED ON EVIDENCE, and this gate was MISSING: the block was emitted
+     * unconditionally, so every transformer model grew a SelectiveScan node out
+     * of nothing. It was caught by a structural NEGATIVE assertion rather than
+     * by a positive one, which is the strongest argument for having them: a
+     * test asserting "SSM exists" would have passed here forever. */
+    if (!dims.count("ssm_a") && !dims.count("ssm_in.weight") &&
+        !dims.count("ssm_conv1d.weight")) {
+        printf("  SelectiveScan      layer=%-3d  (none)\n", L);
+        printf("      status          : ABSENT -- no ssm_a, ssm_in or ssm_conv1d tensor exists, so\n");
+        printf("                       there is no recurrence to describe\n");
+        printf("      evidence        : MEASURED -- emitting it would invent a state-space model from an\n");
+        printf("                       architecture name.\n");
+    } else {
         ir_node n = mk(IR_SCAN, L);
         n.tensor = "ssm_in -> ssm_out with ssm_a, ssm_d and an input-derived step size";
         n.measured = true;
@@ -415,6 +428,13 @@ int main(int argc, char ** argv) {
      * known vocabulary that the IR simply had not learned yet. Recorded here as
      * a vocabulary gap rather than an UNKNOWN construct, which is a weaker and
      * wrong statement about them. */
+    /* A norm tensor may or may not carry the .weight suffix: Falcon-H1 writes
+     * "ffn_norm" where every other model writes "ffn_norm.weight". A missing
+     * suffix is a NAMING VARIANT, not a different construct, and treating it as
+     * unknown was a vocabulary gap that would have forced a special case per
+     * model. Both spellings are now known. */
+    known_roles.insert("ffn_norm");
+    known_roles.insert("attn_norm");
     known_roles.insert("post_attention_norm.weight");
     known_roles.insert("post_ffw_norm.weight");
     std::set<std::string> unknown_layer_roles;
@@ -664,9 +684,16 @@ int main(int argc, char ** argv) {
       n.measured = true; emit(n, arch); }
 
     { ir_node n = mk(IR_RMSNORM, L);
-      n.tensor = TN("ffn_norm.weight"); n.norm_width = dims["ffn_norm.weight"].first;
-      n.type_name = types["ffn_norm.weight"]; n.eps = eps; n.scope = "residual";
+      const char * ffn_key = dims.count("ffn_norm.weight") ? "ffn_norm.weight"
+                              : (dims.count("ffn_norm") ? "ffn_norm" : NULL);
+      if (ffn_key == NULL) { ffn_key = "ffn_norm.weight"; }
+      n.tensor = TN(ffn_key);
+      n.norm_width = dims[ffn_key].first;
+      n.type_name = types[ffn_key]; n.eps = eps; n.scope = "residual";
       n.position = "post_attention";
+      n.evidence.push_back(std::string("tensor name as written: \"") + ffn_key +
+          "\" -- norms appear with and without the .weight suffix across models, which is a "
+          "naming variant and not a different construct");
       n.evidence.push_back("ne=[4096,1] => width == embedding_length");
       n.evidence.push_back("applied to the post-attention residual before the FFN");
       n.measured = true; emit(n, arch); }
