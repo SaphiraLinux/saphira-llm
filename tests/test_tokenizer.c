@@ -796,7 +796,7 @@ static void run_qwen3_tokenizer_parity(void) {
         if (gn != c->expect_n) {
             printf("    FAIL %-18s token count: got %d, expected %d\n",
                    c->label, (int) gn, (int) c->expect_n);
-            ++fails; continue;
+            ++fails; ++sllm_tests_run; ++sllm_tests_failed; continue;
         }
 
         /* Compare the middle, dropping BOS/EOS only if the file asked for them. */
@@ -812,7 +812,7 @@ static void run_qwen3_tokenizer_parity(void) {
             printf("    FAIL %-18s ids differ:", c->label);
             for (int k = 0; k < c->expect_n; ++k) { printf(" %d", (int) got[k]); }
             printf("\n");
-            ++fails; continue;
+            ++fails; ++sllm_tests_run; ++sllm_tests_failed; continue;
         }
 
         /* Empty input must be exactly zero tokens, stated as its own check so
@@ -820,6 +820,7 @@ static void run_qwen3_tokenizer_parity(void) {
         if (c->input_len == 0) {
             printf("    empty input is exactly zero tokens\n"); CHECK(gn == 0);
             printf("    ok   %-18s 0 tokens\n", c->label);
+            ++sllm_tests_run;
             continue;
         }
 
@@ -830,18 +831,156 @@ static void run_qwen3_tokenizer_parity(void) {
             if (dlen != c->out_len || memcmp(buf, c->out, dlen) != 0) {
                 printf("    FAIL %-18s detokenized bytes: got %zu, expected %zu\n",
                        c->label, dlen, c->out_len);
-                ++fails; continue;
+                ++fails; ++sllm_tests_run; ++sllm_tests_failed; continue;
             }
         }
         printf("    ok   %-18s %2d tokens, bytes exact\n", c->label, (int) c->expect_n);
+        sllm_tests_run++;                 /* one harness check per fixture case */
     }
 
     printf("    %d cases run, %d failed\n", ran, fails);
-    printf("    every Qwen3 fixture matches llama.cpp exactly\n"); CHECK(fails == 0);
-    printf("    at least 20 fixtures actually ran\n"); CHECK(ran >= 20);
+    /* Every case contributes its OWN harness check. The loop used to report a
+     * single aggregate CHECK, which meant 21 cases moved the counter by 1 --
+     * so the printed total could not tell you how much evidence it rested on.
+     * The aggregate is kept as well, so a failure is still visible as one. */
+    printf("    per-case: %d cases, %d failed, each case is its own check\n", ran, fails);
+    CHECK(ran >= 20);
+    CHECK(fails == 0);
 
     sllm_tok_free(tok);
     sllm_gguf_close(&g);
+}
+
+
+/* ==================================================================== *
+ * qwen2 PRETOKEN boundaries, asserted directly.
+ *
+ * The id-level Qwen3 fixture test is structurally blind to pretokenisation
+ * differences that BPE later absorbs: widening the digit cap from 3 to 4
+ * changes "0123" from one pretoken to two, yet both collapse to the same
+ * final ids because there is no 4-digit merge. So the boundaries have to be
+ * observed BEFORE the merge loop erases them, which is what this does.
+ *
+ * sllm_tok_pretokenize needs no vocabulary and no model file, so these run
+ * in the hermetic suite with no gigabyte fixture.
+ * ==================================================================== */
+
+typedef struct { const char * in; const char * want; const char * why; } pt_case;
+
+static void pretoken_qwen2_expect(const char * in, const char * want, const char * why) {
+    char got[512];
+    int n = 0;
+    const sllm_status rc = sllm_tok_pretokenize(SLLM_PRE_QWEN2, in, strlen(in),
+                                                 got, sizeof(got), &n);
+    sllm_tests_run++;
+    if (rc != SLLM_OK) {
+        sllm_tests_failed++;
+        fprintf(stderr, "  FAIL pretokenize_qwen2(\"%s\"): %s\n", in, sllm_status_string(rc));
+        return;
+    }
+    if (strcmp(got, want) != 0) {
+        sllm_tests_failed++;
+        fprintf(stderr, "  FAIL pretokenize_qwen2(\"%s\"): %s\n         got  [%s]\n         want [%s]\n",
+                in, why, got, want);
+    }
+}
+
+TEST(pre_qwen2_digit_cap_is_three_not_four) {
+    printf("pre_qwen2_digit_cap_is_three_not_four\n");
+    /* The distinguishing case. At {1,4} "0123" would be ONE piece; the
+     * reference splits it 3+1, and the id-level fixture cannot see it. */
+    pretoken_qwen2_expect("0123", "012\0003", "digit runs cap at three");
+    pretoken_qwen2_expect("012",  "012",       "three digits stay together");
+    pretoken_qwen2_expect("12",   "12",        "two digits stay together");
+    pretoken_qwen2_expect("1",    "1",         "a single digit is fine");
+    /* No leading space is permitted on a digit run, unlike GPT-2. */
+    pretoken_qwen2_expect(" 12", "\xC4\xA0\000\xC4\xA0\00012", "two spaces: each leads, then the digits take none");
+}
+
+TEST(pre_qwen2_optional_leading_char_is_any_non_letter) {
+    printf("pre_qwen2_optional_leading_char_is_any_non_letter\n");
+    /* Not only a space: the rule is [^\r\n\p{L}\p{N}]?, so a TAB may lead a
+     * word. This is what makes "a\tb" a single pretoken. */
+    pretoken_qwen2_expect("\tThe", "\xC4\x89The", "a tab may lead a word");
+    pretoken_qwen2_expect(" The", "\xC4\xA0The", "a space may lead a word");
+    pretoken_qwen2_expect("_The", "_The", "an underscore may lead a word");
+    /* But CR and LF are excluded from the class, so they never lead a word. */
+    pretoken_qwen2_expect("a\nThe", "a\000\nThe", "LF never leads a word");
+    pretoken_qwen2_expect("a\rThe", "a\000\rThe", "CR never leads a word");
+    /* Only ONE optional char, never two. */
+    pretoken_qwen2_expect("  The", "\xC4\xA0\000\xC4\xA0The", "at most one leading char");
+}
+
+TEST(pre_qwen2_newline_runs_stay_together) {
+    printf("pre_qwen2_newline_runs_stay_together\n");
+    /* \s*[\r\n]+ consumes up to and including the LAST newline in the run, so
+     * a blank line is ONE piece. Getting this wrong splits it in two and
+     * changes the fixture ids. */
+    pretoken_qwen2_expect("a\n\nb", "a\000\n\n\000b", "a blank line is one piece");
+    pretoken_qwen2_expect("a\nb",   "a\000\n\000b",   "a single LF is one piece");
+    pretoken_qwen2_expect("a \n \nb", "a\000 \n \n\000b",
+                          "whitespace before a newline run stays with it");
+    pretoken_qwen2_expect("a   ", "a\000  ", "trailing spaces: all but one");
+    pretoken_qwen2_expect("a  b", "a\000\xC4\xA0\000\xC4\xA0b", "the last space leads the next word");
+}
+
+TEST(pre_qwen2_contractions_are_case_insensitive) {
+    printf("pre_qwen2_contractions_are_case_insensitive\n");
+    /* (?i:) plus first-in-alternation. Uppercase must split identically, which
+     * a case-sensitive rule would silently miss. */
+    pretoken_qwen2_expect("don't", "don\000't", "lower-case contraction");
+    pretoken_qwen2_expect("DON'T", "DON\000'T", "upper-case contraction is the same rule");
+    pretoken_qwen2_expect("Don'T", "Don\000'T", "mixed case too");
+    pretoken_qwen2_expect("it's",   "it\000's",  "short form");
+    pretoken_qwen2_expect("we're",  "we\000're", "two-letter form");
+    pretoken_qwen2_expect("I'll",   "I\000'll",  "ll form");
+    pretoken_qwen2_expect("I'm",    "I\000'm",   "m form");
+    pretoken_qwen2_expect("they've","they\000've","ve form");
+    /* A lone apostrophe is not a contraction and falls to punctuation. */
+    pretoken_qwen2_expect("'s alone", "'s\000\xC4\xA0alone", "a contraction still binds when it stands alone");
+}
+
+TEST(pre_qwen2_punctuation_boundaries_and_space_ownership) {
+    printf("pre_qwen2_punctuation_boundaries_and_space_ownership\n");
+    /* The optional leading space is part of the punctuation match, so " (" is
+     * one piece. Testing the guard against the space instead made it two, which
+     * is the bug that failed four fixtures. */
+    pretoken_qwen2_expect("a, b", "a\000,\000\xC4\xA0b", "comma then space-led word");
+    pretoken_qwen2_expect(" (",   "\xC4\xA0(",  "a space belongs to the punctuation run");
+    pretoken_qwen2_expect("a <b>", "a\000\xC4\xA0<\000b\000>", "angle brackets split");
+    pretoken_qwen2_expect("!x",    "!x",  "punct-then-letters is ONE piece under [^^\\r\\n\\p{L}\\p{N}]?\\p{L}+");
+    /* Punctuation runs do not merge across a letter. */
+    pretoken_qwen2_expect("!!!",   "!!!", "a punctuation run stays whole");
+    pretoken_qwen2_expect("a.b",   "a\000.\000b", "a period splits from letters");
+}
+
+TEST(qwen2_splitter_always_makes_forward_progress) {
+    printf("qwen2_splitter_always_makes_forward_progress\n");
+    /* The invariant that a hung gate would have hidden. Every input here is
+     * driven through the splitter, and completion is itself the assertion: a
+     * splitter that stopped advancing would not return at all, which is why
+     * the loop now carries an explicit no-progress check that returns a status
+     * instead of spinning. Inputs deliberately include the shapes that most
+     * easily stall a hand-written scanner: leading/trailing whitespace, bare
+     * newlines, empty runs, lone apostrophes, lone punctuation, and a run of
+     * only digits. */
+    static const char * const inputs[] = {
+        "", " ", "  ", "\n", "\r\n", "\n\n\n", "a", ".", "'", "'s", "0123",
+        "  a", "a  ", "  a  ", "\t", "a\tb", "don't", "DON'T", "a\r\nb",
+        "!!!", "a <b>", "   \n   ", "\t\t", "9", "1234", "5678", "0",
+    };
+    char got[1024];
+    for (size_t i = 0; i < sizeof inputs / sizeof inputs[0]; ++i) {
+        int n = 0;
+        const sllm_status rc = sllm_tok_pretokenize(SLLM_PRE_QWEN2, inputs[i],
+                                                     strlen(inputs[i]), got, sizeof(got), &n);
+        sllm_tests_run++;
+        if (rc != SLLM_OK) {
+            sllm_tests_failed++;
+            fprintf(stderr, "  FAIL no-progress: pretokenize_qwen2(\"%s\") returned %s\n",
+                    inputs[i], sllm_status_string(rc));
+        }
+    }
 }
 
 void sllm_test_tokenizer(void) {
@@ -856,5 +995,11 @@ void sllm_test_tokenizer(void) {
     RUN(regression_whitespace_is_a_list_not_a_category);
     RUN(regression_byte_encoding_returns_a_utf8_encoding_not_a_byte);
     RUN(regression_bpe_rejects_stale_bigrams);
+    RUN(pre_qwen2_digit_cap_is_three_not_four);
+    RUN(pre_qwen2_optional_leading_char_is_any_non_letter);
+    RUN(pre_qwen2_newline_runs_stay_together);
+    RUN(pre_qwen2_contractions_are_case_insensitive);
+    RUN(pre_qwen2_punctuation_boundaries_and_space_ownership);
+    RUN(qwen2_splitter_always_makes_forward_progress);
     run_qwen3_tokenizer_parity();
 }

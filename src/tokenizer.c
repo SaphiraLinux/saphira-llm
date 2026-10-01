@@ -995,7 +995,7 @@ static void split_gpt2(const uint32_t * cp, const u32vec * segs, u32vec * out) {
  * same reason: the engine would have to be a dependency, and the split is the
  * part most worth being able to read.
  */
-static void split_qwen2(const uint32_t * cp, const u32vec * segs, u32vec * out) {
+static sllm_status split_qwen2(const uint32_t * cp, const u32vec * segs, u32vec * out) {
     const size_t n_in = cp == NULL ? 0 : segs->n;
 
     size_t base = 0;
@@ -1019,6 +1019,7 @@ static void split_qwen2(const uint32_t * cp, const u32vec * segs, u32vec * out) 
         #define LOWER(c_) ( ((c_) >= 'A' && (c_) <= 'Z') ? (c_) + 32 : (c_) )
 
         for (size_t pos = ini; pos < end; ) {
+            const size_t pos_before = pos;
             const uint32_t cpt = cp[pos];
             const uint16_t fl  = sllm_uni_flags(cpt);
 
@@ -1130,10 +1131,29 @@ static void split_qwen2(const uint32_t * cp, const u32vec * segs, u32vec * out) 
             }
 
             ADD_TOKEN(++pos);
+
+            /*
+             * FORWARD-PROGRESS INVARIANT.
+             *
+             * Every branch above either consumes a character or returns. If one
+             * ever does not, this loop spins forever: a real defect in the
+             * splitter becomes an apparent hang rather than an error, which is
+             * the worst way for it to present because a hung gate looks like a
+             * slow machine. This was observed for real, by injecting a fault
+             * that dropped the optional leading character and made every
+             * iteration consume nothing.
+             *
+             * So the invariant is checked rather than assumed, and failing it
+             * returns a deterministic status instead of never returning.
+             */
+            if (pos == pos_before) {
+                return SLLM_ERR_ARG;
+            }
         }
         #undef ADD_TOKEN
         #undef LOWER
     }
+    return (out != NULL && out->oom) ? SLLM_ERR_NOMEM : SLLM_OK;
 }
 
 /*
@@ -1159,10 +1179,9 @@ static sllm_status pretokenize_cpts(sllm_pre_type pre, const uint32_t * cp,
     }
 
     if (pre == SLLM_PRE_QWEN2) {
-        split_qwen2(cp, &a, out);
-        const bool bad = a.oom || out->oom;
+        const sllm_status rc = split_qwen2(cp, &a, out);
         uv_free(&a);
-        return bad ? SLLM_ERR_NOMEM : SLLM_OK;
+        return rc;
     }
 
     split_runs(cp, &a, &b, pass1_punct);   /* [\p{P}\$\+<=>\^~\|]+  */
