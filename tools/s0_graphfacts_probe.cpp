@@ -363,7 +363,15 @@ int main(int argc, char ** argv) {
           /* pairing test on head 0 */
           const std::vector<float> & A = pre->bytes;   /* pre-rope  */
           const std::vector<float> & B = rope->bytes;  /* post-rope */
-          double whole = fabs(l2(A,0,hd) - l2(B,0,hd)) / l2(A,0,hd);
+          const double den = l2(A,0,hd);
+          /* Same class of guard: never divide by a quantity that can be zero, and
+           * report NOT APPLICABLE rather than trapping. An empty vector means
+           * there was no node to compare, which is not a zero norm. */
+          double whole = (den > 0) ? (fabs(l2(A,0,hd) - l2(B,0,hd)) / den) : -1.0;
+          if (den <= 0) {
+              printf("  pairing: NOT APPLICABLE -- no usable node to compare, which is NOT a\n");
+              printf("           zero norm and NOT a measured zero.\n");
+          }
           double adj = 0;
           for (int p = 0; p < hd/2; ++p) {
               const double a = l2(A,(size_t)p*2,2), b = l2(B,(size_t)p*2,2);
@@ -489,7 +497,7 @@ int main(int argc, char ** argv) {
     (void) 0;
 
     /* HEAD DIM, derivable when the artefact omits key_length. */
-    { long hd2 = -1; long n_embd2 = -1;
+    { bool head_count_zero = false; long hd2 = -1; long n_embd2 = -1;
       gguf_init_params gp2; memset(&gp2,0,sizeof gp2); gp2.no_alloc = true;
       gguf_context * gg2 = gguf_init_from_file(argv[1], gp2);
       if (gg2 != NULL) {
@@ -502,13 +510,39 @@ int main(int argc, char ** argv) {
           if (el >= 0) { n_embd2 = (long) gguf_get_val_u32(gg2, el); }
           const int64_t hc = gguf_find_key(gg2, (P2 + "attention.head_count").c_str());
           if (hc >= 0 && hd2 < 0 && n_embd2 > 0) {
-              hd2 = n_embd2 / (long) gguf_get_val_u32(gg2, hc);
+              /* SIGFPE FIXED HERE. This divided by head_count without checking it.
+               * Mamba-2 declares attention.head_count = 0 because it has no
+               * attention at all, so the division trapped -- and the probe died
+               * silently at the last section instead of reporting a result.
+               *
+               * head_count = 0 is not an error to divide through. It is a
+               * MEASURED STATEMENT that there are no attention heads, and the
+               * head_dim derivation is therefore NOT APPLICABLE rather than
+               * undefined-but-computable. Dividing by a count that has been
+               * measured to be zero is the arithmetic form of the same error as
+               * reading a missing tensor as a zero. */
+              const long hcv = (long) gguf_get_val_u32(gg2, hc);
+              if (hcv > 0) {
+                  hd2 = n_embd2 / hcv;
+              } else {
+                  head_count_zero = true;
+                  printf("  head_count = 0 (MEASURED, not inferred): this model declares no\n");
+                  printf("  attention heads, so head_dim is NOT APPLICABLE and is not derived.\n");
+              }
           }
           gguf_free(gg2);
       }
       printf("\n== HEAD DIM ==\n");
       if (hd2 > 0) printf("  head_dim = %ld\n", hd2);
-      else printf("  head_dim UNRESOLVED\n"); }
+      else if (head_count_zero) {
+          /* UNRESOLVED would be the WRONG WORD. Unresolved means the evidence is
+           * insufficient to decide. Here the evidence is SUFFICIENT and the
+           * answer is that the quantity does not apply: head_count was measured
+           * to be 0, so there are no heads and no head dimension. Reporting
+           * UNRESOLVED would imply we failed to find out, when in fact we found
+           * out exactly. Same discipline as ABSENT versus UNKNOWN. */
+          printf("  head_dim NOT APPLICABLE -- head_count was measured to be 0\n");
+      } else printf("  head_dim UNRESOLVED\n"); }
 
     /* ---- 3: which tensor does the final projection read? ---- */
     printf("\n== FINAL PROJECTION SOURCE (weight sharing) ==\n");

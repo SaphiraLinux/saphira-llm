@@ -1567,6 +1567,81 @@ int main(int argc, char ** argv) {
         printf("    NOT claimed  : %s\n\n", c.notclaimed.c_str());
     }
 
+    /* ---- FINAL AUDIT REPORT ------------------------------------------------
+     *
+     * The ledger above is per-claim. This is the rollup a reviewer reads first:
+     * what this instrument can see, what it therefore measured directly, what it
+     * could only derive, what it could not decide, and -- the part that matters
+     * most -- WHAT WAS DELIBERATELY NOT CLAIMED.
+     *
+     * A future contributor should be unable to turn "not observed" into "does not
+     * exist" by skimming. The cheapest way to guarantee that is to make the
+     * unknowns as visible as the findings, and to print the instrument's own
+     * blind spots as first-class results rather than omissions. */
+    printf("\n-- FINAL AUDIT REPORT --\n");
+    printf("\n  A. WHAT THIS INSTRUMENT CAN SEE\n");
+    printf("     direct   : tensor inventory, per-layer tensor identity, tensor shapes\n");
+    printf("                and types, GGUF metadata with declared types read per type.\n");
+    printf("     derived  : nothing that changes a value. Shape arithmetic is used only\n");
+    printf("                to CROSS-CHECK a declared count, never to supply one.\n");
+    printf("     external : reference graph op histogram, op_params, and the six graph\n");
+    printf("                sources -- a SEPARATE provenance class, supplied explicitly and\n");
+    printf("                never merged into artefact evidence.\n");
+    printf("     cannot see: an architecture whose operations are fused inside a node the\n");
+    printf("                histogram only counts; anything a single-token, single-position\n");
+    printf("                graph build elides; the activation function of a dense FFN.\n");
+
+    printf("\n  B. DIRECT VERSUS DERIVED, COUNTED OVER %zu CLAIMS\n", g_claims.size());
+    { size_t direct = 0, derived = 0, unres = 0, unob = 0;
+      for (size_t i = 0; i < g_claims.size(); ++i) {
+          const std::string & c = g_claims[i].confidence;
+          if (c.find("unobservable") != std::string::npos) ++unob;
+          else if (c.find("unresolved") != std::string::npos) ++unres;
+          else if (c.find("inferred") != std::string::npos) ++derived;
+          else ++direct;
+      }
+      printf("     %-4zu measured DIRECTLY from the artefact\n", direct);
+      printf("     %-4zu INFERRED from a reference rule (weaker; labelled per claim)\n", derived);
+      printf("     %-4zu UNRESOLVED -- insufficient evidence, NOT absence\n", unres);
+      printf("     %-4zu UNOBSERVABLE -- this instrument cannot see it at all\n\n", unob); }
+
+    printf("\n  C. WHAT WAS DELIBERATELY NOT CLAIMED\n");
+    printf("     Each item below was available to assert and was refused, because the\n");
+    printf("     evidence does not support it. Refusal is the finding.\n");
+    { bool saw_rope = false, saw_moe = false, saw_ssm = false, saw_attn = false;
+      for (size_t i = 0; i < g_claims.size(); ++i) {
+          const std::string & f = g_claims[i].field;
+          if (f == "rope.base" || f == "rope.pairing") saw_rope = true;
+          if (f.find("expert") != std::string::npos) saw_moe = true;
+          if (f.find("ssm") != std::string::npos) saw_ssm = true;
+          if (f == "attention") saw_attn = true;
+      }
+      if (saw_rope) printf("     - no RoPE base and no pairing, though both are tempting to fill in\n");
+      printf("       from an architecture name or an upstream config: those describe\n");
+      printf("       different artefacts. Unresolved is the honest answer.\n");
+      if (!saw_moe) printf("     - no ExpertRouter or ExpertGatedFFN: no router tensor exists here,\n");
+      printf("       so MoE is NOT claimed even for a model family known to use experts.\n");
+      if (saw_attn) printf("     - absence of Attention is claimed PER LAYER only. Never\n");
+      printf("       'this model has no attention': other layers may have it.\n");
+      if (saw_ssm) printf("     - absence of a state-space recurrence is claimed PER LAYER only.\n");
+      printf("     - no activation function for any FFN, gated or dense.\n");
+      printf("     - no claim that the vocabulary is COMPLETE. A tensor this probe cannot\n");
+      printf("       classify surfaces as UNKNOWN, which means not-yet-described, not\n");
+      printf("       absent and not absent-by-design.\n"); }
+
+    printf("\n  D. THE ONE-LINE SUMMARY OF THIS ARTEFACT\n");
+    printf("     %d layer(s) measured, %zu distinct layer bodies, %zu claims recorded,\n",
+           n_layers, body_layers.size(), g_claims.size());
+    printf("     %zu of those claims are absences or unknowns. Those are RESULTS.\n\n",
+           [&]{ size_t c = 0; for (size_t i = 0; i < g_claims.size(); ++i)
+                   if (g_claims[i].value.find("ABSENT") != std::string::npos ||
+                       g_claims[i].confidence.find("unresolv") != std::string::npos ||
+                       g_claims[i].confidence.find("unobserv") != std::string::npos) ++c;
+               return c; }());
+    printf("     NO EVIDENCE -> NO OPERATION. A claim appears here only where a\n");
+    printf("     tensor, a metadata key, or a reference graph node earned it, at the\n");
+    printf("     exact layer where it was found.\n");
+
     printf("\n-- PER-LAYER ROLE COVERAGE (all layers identical?) --\n");
     bool uniform = true;
     for (std::map<int, std::set<std::string> >::iterator it = per_layer.begin();

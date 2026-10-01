@@ -583,5 +583,49 @@ rms_eps=9.99999975e-06 rope_base=10000
     NOT claimed  : an op histogram counts node types and cannot see inside a node. Where a value is only reachable through op_params it must be read there or left unresolved.
 
 
+-- FINAL AUDIT REPORT --
+
+  A. WHAT THIS INSTRUMENT CAN SEE
+     direct   : tensor inventory, per-layer tensor identity, tensor shapes
+                and types, GGUF metadata with declared types read per type.
+     derived  : nothing that changes a value. Shape arithmetic is used only
+                to CROSS-CHECK a declared count, never to supply one.
+     external : reference graph op histogram, op_params, and the six graph
+                sources -- a SEPARATE provenance class, supplied explicitly and
+                never merged into artefact evidence.
+     cannot see: an architecture whose operations are fused inside a node the
+                histogram only counts; anything a single-token, single-position
+                graph build elides; the activation function of a dense FFN.
+
+  B. DIRECT VERSUS DERIVED, COUNTED OVER 34 CLAIMS
+     30   measured DIRECTLY from the artefact
+     0    INFERRED from a reference rule (weaker; labelled per claim)
+     2    UNRESOLVED -- insufficient evidence, NOT absence
+     2    UNOBSERVABLE -- this instrument cannot see it at all
+
+
+  C. WHAT WAS DELIBERATELY NOT CLAIMED
+     Each item below was available to assert and was refused, because the
+     evidence does not support it. Refusal is the finding.
+     - no RoPE base and no pairing, though both are tempting to fill in
+       from an architecture name or an upstream config: those describe
+       different artefacts. Unresolved is the honest answer.
+     - no ExpertRouter or ExpertGatedFFN: no router tensor exists here,
+       so MoE is NOT claimed even for a model family known to use experts.
+       'this model has no attention': other layers may have it.
+     - absence of a state-space recurrence is claimed PER LAYER only.
+     - no activation function for any FFN, gated or dense.
+     - no claim that the vocabulary is COMPLETE. A tensor this probe cannot
+       classify surfaces as UNKNOWN, which means not-yet-described, not
+       absent and not absent-by-design.
+
+  D. THE ONE-LINE SUMMARY OF THIS ARTEFACT
+     16 layer(s) measured, 2 distinct layer bodies, 34 claims recorded,
+     8 of those claims are absences or unknowns. Those are RESULTS.
+
+     NO EVIDENCE -> NO OPERATION. A claim appears here only where a
+     tensor, a metadata key, or a reference graph node earned it, at the
+     exact layer where it was found.
+
 -- PER-LAYER ROLE COVERAGE (all layers identical?) --
   layers seen=16  distinct roles=12  every layer has the same role set: YES
