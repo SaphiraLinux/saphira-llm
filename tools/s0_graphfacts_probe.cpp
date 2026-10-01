@@ -23,7 +23,8 @@
 #include <algorithm>
 #include <map>
 
-struct Ev { int seq; std::string op; const void * ptr; const void * src0;
+struct Ev {
+    int rawop; int seq; std::string op; const void * ptr; const void * src0;
             int64_t ne[4]; std::vector<float> bytes;
             /* op_params, captured RAW. FLASH_ATTN_EXT folds the attention
              * softcapping into the node itself: op_params[0]=scale,
@@ -60,14 +61,40 @@ static const char * opname(int op) {
         case GGML_OP_SUM_ROWS:       return "SUM_ROWS";
         case GGML_OP_DIV:            return "DIV";
         case GGML_OP_CLAMP:          return "CLAMP";
+        /* Named from the vendored ggml.h enum, not guessed from a count. SSM_CONV
+         * and SSM_SCAN appearing 24 times each independently corroborate the 24
+         * state-space layers measured from tensor names. SET_ROWS is the KV
+         * cache write path. An op the probe cannot NAME is an op the probe
+         * cannot report absent, so the blind spot is closed rather than left as
+         * an anonymous OTHER count. */
+        case GGML_OP_CONCAT:         return "CONCAT";
+        case GGML_OP_CPY:            return "CPY";
+        case GGML_OP_PERMUTE:        return "PERMUTE";
+        case GGML_OP_TRANSPOSE:      return "TRANSPOSE";
+        case GGML_OP_SET_ROWS:       return "SET_ROWS";
+        case GGML_OP_SSM_CONV:       return "SSM_CONV";
+        case GGML_OP_SSM_SCAN:       return "SSM_SCAN";
+        case GGML_OP_GLU:            return "GLU";
         default: return "OTHER";
     }
 }
 static bool ev(ggml_tensor * t, bool ask, void *) {
-    if (!g_rec || ask || t == NULL || t->data == NULL || t->buffer == NULL) { return true; }
-    const int64_t n = ggml_nelements(t);
-    if (n <= 0 || n > (1 << 22)) { return true; }
-    Ev e; e.seq = (int) g.size(); e.op = opname((int) t->op);
+    if (!g_rec || ask || t == NULL) { return true; }
+    /* FIX 1: A NODE IS RECORDED EVEN WHEN IT HAS NO DATA.
+     *
+     * The old guard skipped nodes whose data or buffer was NULL, so the
+     * histogram was INCOMPLETE -- 1318 of 1463 nodes on Nemotron-H -- and the
+     * probe then printed "NO ROPE NODE FOUND in the graph: this architecture
+     * does not apply RoPE". Nemotron-H applies RoPE on its attention layers.
+     * The nodes were missing, not the mathematics.
+     *
+     * This was the worst bug in the instrument: incomplete observation silently
+     * became a false statement about a MODEL. Recording a node is therefore
+     * never conditional. Only BYTE CAPTURE is. */
+    Ev e; e.seq = (int) g.size(); e.rawop = (int) t->op; e.op = opname((int) t->op);
+    const bool have_data = (t->data != NULL && t->buffer != NULL);
+    const int64_t nelem = have_data ? ggml_nelements(t) : 0;
+    if (nelem > (1 << 22)) { return true; }
     e.ptr = t->data; e.src0 = t->src[0] != NULL ? t->src[0]->data : NULL;
     for (int i = 0; i < 4; ++i) { e.ne[i] = t->ne[i]; }
     e.has_op_params = false;
@@ -85,8 +112,21 @@ static bool ev(ggml_tensor * t, bool ask, void *) {
         else if (i == 2) { e.n2 = t->src[i]->name; }
         else if (i == 3) { e.n3 = t->src[i]->name; }
     }
-    e.bytes.resize((size_t) n);
-    memcpy(e.bytes.data(), t->data, (size_t) n * sizeof(float));
+    /* FIX 2: AN ELEMENT COUNT IS NOT A BYTE COUNT.
+     *
+     * The old copy length was nelements*4, which is correct only for an F32
+     * tensor. For a quantized or F16 tensor that reads past the allocation, and
+     * it SEGFAULTED on Nemotron-H, whose Mamba state tensors are exactly that
+     * kind. ggml_nbytes is the authority on how many bytes exist, not the
+     * element count. Same family as "a tensor name is not an operation": a
+     * derived quantity is not evidence of the thing it was derived from. */
+    int64_t take = nelem;
+    { const size_t nb = (size_t) ggml_nbytes(t);
+      const size_t cap = nb / sizeof(float);
+      if (cap < (size_t) take) { take = (int64_t) cap; } }
+    if (take <= 0) { g.push_back(e); return true; }
+    e.bytes.resize((size_t) take);
+    memcpy(e.bytes.data(), t->data, (size_t) take * sizeof(float));
     g.push_back(e);
     return true;
 }
@@ -118,6 +158,18 @@ int main(int argc, char ** argv) {
      * appear once, the construct is global; if they appear once per layer, it is
      * per-layer. Counting is evidence, reading a paper is not. */
     { std::map<std::string,int> h; for (size_t i = 0; i < g.size(); ++i) { h[g[i].op]++; }
+      /* OTHER IS A BLIND SPOT, NOT A CATEGORY. If a node type is unclassified
+       * here, the probe cannot see inside it and must not conclude anything from
+       * its absence. The raw op ids are named so the blind spot is auditable
+       * rather than silent. */
+      { std::map<int,int> raw; for (size_t i = 0; i < g.size(); ++i) if (g[i].op == "OTHER") raw[g[i].rawop]++;
+        if (!raw.empty()) {
+            printf("   UNCLASSIFIED ops (named so the blind spot is auditable):");
+            for (std::map<int,int>::iterator ri = raw.begin(); ri != raw.end(); ++ri)
+                printf(" op=%d x%d", ri->first, ri->second);
+            printf("\n   NOTE: absence of an UNCLASSIFIED op proves nothing. A probe that\n");
+            printf("         cannot name a node type cannot report it absent.\n");
+        } }
       printf("-- OP HISTOGRAM --\n");
       for (std::map<std::string,int>::iterator it = h.begin(); it != h.end(); ++it) {
           printf("   %-14s %d\n", it->first.c_str(), it->second); } }
@@ -276,7 +328,20 @@ int main(int argc, char ** argv) {
     printf("\n== ROPE, LOCATED BY OP ==\n");
     { const Ev * rope = NULL;
       for (size_t i = 0; i < g.size() && rope == NULL; ++i) { if (g[i].op == "ROPE") { rope = &g[i]; } }
-      if (rope == NULL) { printf("  NO ROPE NODE FOUND in the graph: this architecture does not apply RoPE\n"); }
+      /* Is a ROPE op present AT ALL, including nodes with no readable data? The
+       * presence check and the usable-node check are different questions and
+       * conflating them is how an incomplete histogram becomes a false claim. */
+      { int n_rope_any = 0;
+        for (size_t i = 0; i < g.size(); ++i) if (g[i].op == "ROPE") ++n_rope_any;
+        printf("  ROPE ops in graph (any, data-bearing or not): %d\n", n_rope_any); }
+      if (rope == NULL) {
+          printf("  NO USABLE ROPE NODE in this build.\n");
+          printf("  This is an observation ABOUT THE GRAPH BUILT HERE, not a claim about the\n");
+          printf("  model. A graph built for one token at one position is NARROW: a node may\n");
+          printf("  be absent because the build elides it, because the position makes it\n");
+          printf("  degenerate, or because the reference folds the rotation into another op.\n");
+          printf("  ROPE pairing is therefore UNRESOLVED -- not NEOX, not GPT, and not absent.\n");
+      }
       else {
         printf("  rope node seq=%d ne=[%lld,%lld,%lld,%lld]\n", rope->seq,
                (long long) rope->ne[0], (long long) rope->ne[1],

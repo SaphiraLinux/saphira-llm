@@ -2,7 +2,14 @@
 # Structural tests for the discovery IR. Deliberately includes a NON-VACUITY
 # PROOF: each negative test is shown to actually fail when its guard is removed,
 # because a negative test that cannot fail is decoration.
-set -uo pipefail
+# pipefail is DELIBERATELY OFF. With it on, `awk ... | grep -q PATTERN` returns
+# non-zero whenever awk receives SIGPIPE because grep exited early on its first
+# match. Whether that happens depends on how much output is still in flight, so
+# the SAME assertion passed or failed at random -- roughly 1 run in 3 -- while
+# every individual grep was in fact correct. A test suite that fails at random
+# trains you to ignore it, which is worse than no suite. Assertions here test the
+# greps themselves, not upstream writers, so pipefail adds nothing but noise.
+set -u
 cd "$(dirname "$0")/.."
 QW=/var/lib/spoon/models/qwen3-8b/Qwen3-8B-Q4_K_M.gguf
 LL=/var/lib/spoon/models/llama32-1b/Llama-3.2-1B-Instruct-Q4_K_M.gguf
