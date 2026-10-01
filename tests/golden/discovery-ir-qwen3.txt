@@ -29,7 +29,7 @@ rms_eps=9.99999997e-07 rope_base=1000000
         - a DISTINCT output tensor exists => weights are NOT shared with the embedding, whatever the dimensions happen to be
         - qwen3.embedding_length=4096 vs output in_features=4096 (dimensions match, weights still separate)
 
--- LAYER 0 (representative; verified present in every layer) --
+-- LAYER 0 (representative body) --
   RMSNorm            layer=0    blk.0.attn_norm.weight
       type            : f32
       norm width      : 4096   bias=false

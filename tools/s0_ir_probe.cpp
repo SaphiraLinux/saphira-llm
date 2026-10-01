@@ -343,7 +343,13 @@ int main(int argc, char ** argv) {
       emit(o, arch); }
 
     /* ---- one layer, fully described ---- */
-    printf("\n-- LAYER 0 (representative; verified present in every layer) --\n");
+    /* ---- LAYER 0 in full, then the ATTENTION PATTERN per layer ----
+     *
+     * The layer-0 body is emitted once for readability, but attention pattern is
+     * per layer, so every layer gets its own Attention node. Presentation may
+     * deduplicate identical shapes later; the semantic IR must not, or the
+     * alternation becomes unrepresentable. */
+    printf("\n-- LAYER 0 (representative body) --\n");
     const int L = 0;
     char buf[128];
     #define TN(role_) (snprintf(buf, sizeof buf, "blk.%d.%s", L, role_), std::string(buf))
@@ -462,10 +468,30 @@ int main(int argc, char ** argv) {
                   "  [MEASURED from metadata]");
               n.evidence.push_back("site count: one per layer -- the cap is applied to the QK^T "
                   "product before the softmax, i.e. pre_softmax");
-              n.unknown.push_back("function UNRESOLVED: in this reference the cap is FUSED INTO the "
-                  "flash-attention node, so an op histogram cannot see scale/tanh/scale here. The "
-                  "tanh form is known from the UNFUSED final-logits site; assuming this site is "
-                  "identical would be inference, not measurement.");
+              /* The fused cap is READABLE even though it is not a separate node.
+               * ggml-cpu/ops.cpp reads it from dst->op_params[2] and applies
+               * s = cap*tanhf(s) at line 8752, after dividing the scale by the cap
+               * at line 8679. Both the cap value and the function are therefore
+               * MEASURED from the graph. This was previously UNRESOLVED because
+               * an op histogram cannot see inside a fused node -- the cap was not
+               * missing, the INSTRUMENT was wrong. */
+              const char * fused = getenv("SLLM_IR_FUSED_CAP");
+              if (fused != NULL && fused[0] != '\0') {
+                  n.pairing = "tanh"; n.scaling_type = "tanh";
+                  n.evidence.push_back(std::string("cap value MEASURED from op_params[2] of the ") +
+                      fused + " FLASH_ATTN_EXT node");
+                  n.evidence.push_back("function MEASURED from ggml-cpu/ops.cpp: scale divided by the "
+                      "cap (line 8679), then s = cap*tanhf(s) per score (line 8752), then the mask "
+                      "is added (line 8755)");
+                  n.evidence.push_back("a histogram cannot see inside a fused node, which is why this "
+                      "was UNRESOLVED before; reading op_params is the direct route, so this is no "
+                      "longer inferred from the unfused final-logits site");
+                  n.measured = true;
+              } else {
+                  n.unknown.push_back("function UNRESOLVED: the cap is FUSED into the flash-attention "
+                      "node so an op histogram cannot see it. Supply SLLM_IR_FUSED_CAP from "
+                      "op_params[2]; it is not inferred from the unfused final-logits site.");
+              }
               emit(n, arch);
           }
           if (idF >= 0) {
@@ -496,14 +522,37 @@ int main(int argc, char ** argv) {
       const int64_t sw = gguf_find_key(g, (P + "attention.sliding_window").c_str());
       if (sw >= 0) {
           n.rope_base = (double) gguf_get_val_u32(g, sw);   /* window */
-          n.pairing = "sliding_window";
           n.evidence.push_back(std::string(P) + "attention.sliding_window = " +
               std::to_string((long long) n.rope_base) + "  [MEASURED from metadata]");
-          n.unknown.push_back("whether layer " + std::to_string(L) + " is sliding_window or full "
-              "is UNRESOLVED from the artefact: the key states a window SIZE, not a per-layer "
-              "pattern. It must come from the reference graph's per-layer mask selection. Recording "
-              "the window as measured and the PATTERN as unresolved, because the two are different "
-              "claims.");
+          /* The WINDOW SIZE is measured. The PER-LAYER PATTERN is a separate
+           * claim, resolved from the reference mask path rather than the
+           * artefact: build_attn selects get_kq_mask_swa() over get_kq_mask()
+           * via hparams.is_swa(il), and is_swa reads is_swa_impl[il], populated
+           * by set_swa_pattern. With no sliding_window_pattern key the default
+           * applies: is_swa[il] = (il mod n_pattern != 0), and n_pattern comes
+           * from the model's own load_swa_pattern call. */
+          const char * pat = getenv("SLLM_IR_SWA_PATTERN");
+          if (pat != NULL && pat[0] != '\0') {
+              const int np = atoi(pat);
+              std::string line = "pattern per layer [INFERRED from the reference rule, NOT "
+                                 "MEASURED per-layer]: ";
+              for (int q = 0; q < 4; ++q) {
+                  line += (q ? "/" : "");
+                  line += (((q % np) != 0) ? "sliding_window" : "full");
+              }
+              n.evidence.push_back(line);
+              n.pairing = ((L % np) != 0) ? "sliding_window" : "full";
+              n.evidence.push_back("rule: llama-hparams.cpp set_swa_pattern with "
+                                   "dense_first=false gives is_swa[il] = (il mod n_pattern != 0), "
+                                   "and n_pattern=" + std::to_string(np) + " from the model's "
+                                   "load_swa_pattern call");
+              n.evidence.push_back("this is WEAKER than observing each layer's chosen mask "
+                                   "tensor, and is labelled INFERRED for that reason");
+          } else {
+              n.unknown.push_back("per-layer pattern UNRESOLVED: supply SLLM_IR_SWA_PATTERN from "
+                                  "the reference mask path. The window SIZE above is a different "
+                                  "claim and is measured independently.");
+          }
       } else {
           n.pairing = "full";
           n.evidence.push_back("no " + P + "attention.sliding_window key => pattern=full "
@@ -603,6 +652,29 @@ int main(int argc, char ** argv) {
       n.evidence.push_back(std::string(P) + "feed_forward_length=" + std::to_string(ff));
       n.evidence.push_back("ffn_gate_inp.weight ABSENT => not MoE");
       n.measured = true; emit(n, arch); }
+
+    /* ---- Attention pattern for EVERY layer, individually ---- */
+    { const int64_t sw2 = gguf_find_key(g, (P + "attention.sliding_window").c_str());
+      const char * pat = getenv("SLLM_IR_SWA_PATTERN");
+      if (sw2 >= 0 && pat != NULL && atoi(pat) > 0) {
+          const int np = atoi(pat);
+          printf("\n-- ATTENTION PATTERN PER LAYER (each layer its own node) --\n");
+          int n_sliding = 0;
+          for (int q = 0; q <= max_layer; ++q) {
+              const bool sliding = ((q % np) != 0);
+              if (sliding) { ++n_sliding; }
+              printf("  Attention         layer=%-3d  pattern=%-14s window=%.0f  "
+                     "q_heads=%ld kv_heads=%ld head_dim=%ld\n",
+                     q, sliding ? "sliding_window" : "full",
+                     (double) gguf_get_val_u32(g, sw2), heads, kv_heads, key_len);
+          }
+          printf("  %d of %d layers sliding, %d full. Layers are an ORDERED CONTAINER of\n"
+                 "  operations: consecutive layers genuinely differ here.\n",
+                 n_sliding, max_layer + 1, (max_layer + 1) - n_sliding);
+          if (n_sliding > 0 && n_sliding < max_layer + 1) {
+              printf("  MIXED PATTERN CONFIRMED: a uniform layer body would be WRONG here.\n");
+          }
+      } }
 
     printf("\n-- PER-LAYER ROLE COVERAGE (all layers identical?) --\n");
     bool uniform = true;

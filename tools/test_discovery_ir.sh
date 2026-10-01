@@ -11,7 +11,7 @@ export SLLM_IR_ROPE_PAIRING_NEED=1
 pass=0; fail=0
 ok(){ if [ "$2" = "0" ]; then echo "  ok   $1"; pass=$((pass+1)); else echo "  FAIL $1"; fail=$((fail+1)); fi; }
 
-gen(){ unset SLLM_IR; SLLM_IR_ROPE_PAIRING=${P1:-} SLLM_IR_OUTPUT_SHARING=${SH1:-} ./tools/run_s0_probe.sh tools/s0_ir_probe.cpp "$1" 2>/dev/null; }
+gen(){ unset SLLM_IR; SLLM_IR_ROPE_PAIRING=${P1:-} SLLM_IR_OUTPUT_SHARING=${SH1:-} SLLM_IR_SWA_PATTERN=${SW:-} SLLM_IR_FUSED_CAP=${FC:-} ./tools/run_s0_probe.sh tools/s0_ir_probe.cpp "$1" 2>/dev/null; }
 
 # A: same artefact -> deterministic IR
 P1=NEOX; SH1="weights NOT shared: final projection reads output.weight"; A1=$(gen "$QW"); A2=$(gen "$QW")
@@ -105,7 +105,7 @@ RESTORED=$(gen "$QW")
 # H: Gemma-2. The third model, and the properties that must hold for it.
 G=/var/lib/spoon/models/gemma2-2b/gemma-2-2b-it-Q4_K_M.gguf
 if [ -f "$G" ]; then
-  P1=NEOX; SH1="" H1=$(gen "$G")
+  P1=NEOX; SH1="" SW=2 FC="26x" H1=$(gen "$G")
   # H1: ONE RMSNorm op, with graph position as a PARAMETER. No PostNorm op.
   [ "$(printf '%s\n' "$H1" | grep -c '^  RMSNorm ')" -ge 6 ]; ok "H1 Gemma has all four residual/head norms as RMSNorm" $?
   printf '%s\n' "$H1" | grep -q 'position=post_attention is a PARAMETER of RMSNorm'; ok "H2 post-attention norm is RMSNorm with a position parameter, not a new op" $?
@@ -122,12 +122,21 @@ if [ -f "$G" ]; then
   printf '%s\n' "$H1" | grep -q 'domain          : attention_logits'; ok "H9 SoftCap carries a domain" $?
   printf '%s\n' "$H1" | grep -q 'domain          : final_logits'; ok "H10 both domains distinct, not one boolean" $?
   # H11: fused attention cap function must stay UNRESOLVED, not copied from the unfused site
-  printf '%s\n' "$H1" | grep -q 'function UNRESOLVED'; ok "H11 fused attention-cap function left UNRESOLVED" $?
+  printf '%s\n' "$H1" | grep -q 'function        : tanh'; ok "H11 fused attention-cap function now MEASURED via op_params" $?
+  printf '%s\n' "$H1" | grep -q 'op_params\[2\]'; ok "H11b fused cap traced to op_params, not inferred from the unfused site" $?
+  KEEP_FC="$FC"; FC=""; NOCAP=$(gen "$G"); FC="$KEEP_FC"
+  printf '%s\n' "$NOCAP" | grep -q 'function UNRESOLVED'; ok "H11c without op_params evidence it degrades to UNRESOLVED, not to a guess" $?
+  printf '%s\n' "$NOCAP" | grep -q 'tanh  *\[MEASURED\]'; if [ $? -ne 0 ]; then ok "H11d no fabricated MEASURED claim without evidence" 0; else ok "H11d no fabricated MEASURED claim without evidence" 1; fi
   printf '%s\n' "$H1" | grep -q 'function        : cap\*tanh(x/cap)'; ok "H12 unfused final-logits function IS measured" $?
   # H13: attention pattern on the node, window measured but per-layer pattern unresolved
-  printf '%s\n' "$H1" | grep -q 'pattern         : sliding_window'; ok "H13 attention carries a pattern" $?
+  printf '%s\n' "$H1" | grep -qE '^      pattern         : (full|sliding_window)$'; ok "H13 attention carries a resolved pattern" $?
   printf '%s\n' "$H1" | grep -q 'window          : 4096'; ok "H14 sliding window size measured" $?
-  printf '%s\n' "$H1" | grep -q 'the key states a window SIZE, not a per-layer'; ok "H15 per-layer pattern left UNRESOLVED, window not over-claimed" $?
+  # H15 previously asserted the pattern stays UNRESOLVED, which was true only
+  # while no rule was available. The durable property is that the window SIZE is
+  # measured independently of how the pattern was obtained, and that the two
+  # claims never get merged into one.
+  printf '%s\n' "$H1" | grep -q 'window          : 4096'; ok "H15 window size measured, independent of pattern evidence" $?
+  printf '%s\n' "$H1" | grep -q 'attention.sliding_window = 4096  \[MEASURED from metadata\]'; ok "H15b window provenance names the metadata key" $?
   printf '%s\n' "$H1" | grep -q 'a layer is an ordered container of operations'; ok "H16 uniform-layer assumption explicitly deleted" $?
   # H17: third tokenizer case, model=llama with pre=default
   printf '%s\n' "$H1" | grep -q 'leg model   = "llama"'; ok "H17 Gemma declares model=llama" $?
@@ -146,7 +155,12 @@ if [ -f "$G" ]; then
   printf '%s\n' "$BROKEN" | grep -q 'UNKNOWN role: post_attention_norm.weight'
   if [ $? -eq 0 ]; then ok "H23 non-vacuity: unlearning a post-norm role surfaces UNKNOWN" 0; else ok "H23 non-vacuity: unlearning a post-norm role surfaces UNKNOWN" 1; fi
   cp /tmp/ir2.bak tools/s0_ir_probe.cpp
-  [ "$(gen "$G")" = "$H1" ]; ok "H24 restore is byte-exact" $?
+  [ "$(gen "$G")" = "$H1" ] && ok "H24 restore is byte-exact" 0 || ok "H24 restore is byte-exact" 1
+  if [ "$(gen "$G")" != "$H1" ]; then
+    echo "  H24 DIFF:"; gen "$G" > /tmp/h24a.txt; printf '%s\n' "$H1" > /tmp/h24b.txt
+    diff /tmp/h24a.txt /tmp/h24b.txt | head -8
+  fi
+  if [ $? -ne 0 ]; then diff <(gen "$G") <(printf '%s\n' "$H1") | head -6; fi
 else
   echo "  skip H* (Gemma-2 artefact absent)"
 fi

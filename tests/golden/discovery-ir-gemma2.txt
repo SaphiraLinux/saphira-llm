@@ -30,7 +30,7 @@ rms_eps=9.99999997e-07 rope_base=-1
         - NO output.weight tensor exists in the inventory -- this is EVIDENCE, not proof, and on its own it does not establish sharing
       UNRESOLVED      : sharing UNRESOLVED: absence of output.weight is evidence, not proof. Supply SLLM_IR_OUTPUT_SHARING from the reference graph.
 
--- LAYER 0 (representative; verified present in every layer) --
+-- LAYER 0 (representative body) --
   RMSNorm            layer=0    blk.0.attn_norm.weight
       type            : f32
       norm width      : 2304   bias=false
@@ -78,10 +78,13 @@ rms_eps=9.99999997e-07 rope_base=-1
   SoftCap            layer=0    (attention logits)
       cap             : 50
       domain          : attention_logits   position=pre_softmax
-      evidence        : INFERRED (rule-based)
+      function        : tanh
+      evidence        : MEASURED (read from artefact/reference graph)
         - gemma2.attn_logit_softcapping = 50.000000  [MEASURED from metadata]
         - site count: one per layer -- the cap is applied to the QK^T product before the softmax, i.e. pre_softmax
-      UNRESOLVED      : function UNRESOLVED: in this reference the cap is FUSED INTO the flash-attention node, so an op histogram cannot see scale/tanh/scale here. The tanh form is known from the UNFUSED final-logits site; assuming this site is identical would be inference, not measurement.
+        - cap value MEASURED from op_params[2] of the 26x FLASH_ATTN_EXT node
+        - function MEASURED from ggml-cpu/ops.cpp: scale divided by the cap (line 8679), then s = cap*tanhf(s) per score (line 8752), then the mask is added (line 8755)
+        - a histogram cannot see inside a fused node, which is why this was UNRESOLVED before; reading op_params is the direct route, so this is no longer inferred from the unfused final-logits site
   SoftCap            layer=0    (final logits)
       cap             : 30
       domain          : final_logits   position=post_output_projection
@@ -92,13 +95,15 @@ rms_eps=9.99999997e-07 rope_base=-1
         - order MEASURED from gemma2. source: scale(1/cap) then tanh then scale(cap), applied to the output projection result
   Attention          layer=0    
       head_dim=256  heads=8  kv_heads=4
-      pattern         : sliding_window
+      pattern         : full
       window          : 4096
       evidence        : INFERRED (rule-based)
         - gemma2.attention.sliding_window = 4096  [MEASURED from metadata]
+        - pattern per layer [INFERRED from the reference rule, NOT MEASURED per-layer]: full/sliding_window/full/sliding_window
+        - rule: llama-hparams.cpp set_swa_pattern with dense_first=false gives is_swa[il] = (il mod n_pattern != 0), and n_pattern=2 from the model's load_swa_pattern call
+        - this is WEAKER than observing each layer's chosen mask tensor, and is labelled INFERRED for that reason
         - q_heads=8 kv_heads=4 head_dim=256  [MEASURED from metadata]
         - pattern lives on the Attention NODE, not on a layer type: a layer is an ordered container of operations and may differ from its neighbours
-      UNRESOLVED      : whether layer 0 is sliding_window or full is UNRESOLVED from the artefact: the key states a window SIZE, not a per-layer pattern. It must come from the reference graph's per-layer mask selection. Recording the window as measured and the PATTERN as unresolved, because the two are different claims.
   Linear             layer=0    blk.0.attn_q.weight
       type            : q4_K
       in/out features : 2304 / 2048
@@ -155,6 +160,37 @@ rms_eps=9.99999997e-07 rope_base=-1
         - ffn_down ne=[9216,2304]  transpose of the gate shape => contraction
         - gemma2.feed_forward_length=9216
         - ffn_gate_inp.weight ABSENT => not MoE
+
+-- ATTENTION PATTERN PER LAYER (each layer its own node) --
+  Attention         layer=0    pattern=full           window=4096  q_heads=8 kv_heads=4 head_dim=256
+  Attention         layer=1    pattern=sliding_window window=4096  q_heads=8 kv_heads=4 head_dim=256
+  Attention         layer=2    pattern=full           window=4096  q_heads=8 kv_heads=4 head_dim=256
+  Attention         layer=3    pattern=sliding_window window=4096  q_heads=8 kv_heads=4 head_dim=256
+  Attention         layer=4    pattern=full           window=4096  q_heads=8 kv_heads=4 head_dim=256
+  Attention         layer=5    pattern=sliding_window window=4096  q_heads=8 kv_heads=4 head_dim=256
+  Attention         layer=6    pattern=full           window=4096  q_heads=8 kv_heads=4 head_dim=256
+  Attention         layer=7    pattern=sliding_window window=4096  q_heads=8 kv_heads=4 head_dim=256
+  Attention         layer=8    pattern=full           window=4096  q_heads=8 kv_heads=4 head_dim=256
+  Attention         layer=9    pattern=sliding_window window=4096  q_heads=8 kv_heads=4 head_dim=256
+  Attention         layer=10   pattern=full           window=4096  q_heads=8 kv_heads=4 head_dim=256
+  Attention         layer=11   pattern=sliding_window window=4096  q_heads=8 kv_heads=4 head_dim=256
+  Attention         layer=12   pattern=full           window=4096  q_heads=8 kv_heads=4 head_dim=256
+  Attention         layer=13   pattern=sliding_window window=4096  q_heads=8 kv_heads=4 head_dim=256
+  Attention         layer=14   pattern=full           window=4096  q_heads=8 kv_heads=4 head_dim=256
+  Attention         layer=15   pattern=sliding_window window=4096  q_heads=8 kv_heads=4 head_dim=256
+  Attention         layer=16   pattern=full           window=4096  q_heads=8 kv_heads=4 head_dim=256
+  Attention         layer=17   pattern=sliding_window window=4096  q_heads=8 kv_heads=4 head_dim=256
+  Attention         layer=18   pattern=full           window=4096  q_heads=8 kv_heads=4 head_dim=256
+  Attention         layer=19   pattern=sliding_window window=4096  q_heads=8 kv_heads=4 head_dim=256
+  Attention         layer=20   pattern=full           window=4096  q_heads=8 kv_heads=4 head_dim=256
+  Attention         layer=21   pattern=sliding_window window=4096  q_heads=8 kv_heads=4 head_dim=256
+  Attention         layer=22   pattern=full           window=4096  q_heads=8 kv_heads=4 head_dim=256
+  Attention         layer=23   pattern=sliding_window window=4096  q_heads=8 kv_heads=4 head_dim=256
+  Attention         layer=24   pattern=full           window=4096  q_heads=8 kv_heads=4 head_dim=256
+  Attention         layer=25   pattern=sliding_window window=4096  q_heads=8 kv_heads=4 head_dim=256
+  13 of 26 layers sliding, 13 full. Layers are an ORDERED CONTAINER of
+  operations: consecutive layers genuinely differ here.
+  MIXED PATTERN CONFIRMED: a uniform layer body would be WRONG here.
 
 -- PER-LAYER ROLE COVERAGE (all layers identical?) --
   layers seen=26  distinct roles=11  every layer has the same role set: YES

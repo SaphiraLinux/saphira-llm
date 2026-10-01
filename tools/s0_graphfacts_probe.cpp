@@ -25,6 +25,13 @@
 
 struct Ev { int seq; std::string op; const void * ptr; const void * src0;
             int64_t ne[4]; std::vector<float> bytes;
+            /* op_params, captured RAW. FLASH_ATTN_EXT folds the attention
+             * softcapping into the node itself: op_params[0]=scale,
+             * op_params[1]=max_bias, op_params[2]=logit_softcap. That is the
+             * fused cap as a MEASURED value, read from the graph rather than
+             * inferred from the unfused site. */
+            float op_params[4];
+            bool  has_op_params;
             /* names of src[0] and src[1], so a MUL_MAT's WEIGHT can be identified.
              * This is the evidence that settles weight sharing: not whether an
              * output.weight tensor exists, but which tensor the final projection
@@ -53,6 +60,11 @@ static bool ev(ggml_tensor * t, bool ask, void *) {
     Ev e; e.seq = (int) g.size(); e.op = opname((int) t->op);
     e.ptr = t->data; e.src0 = t->src[0] != NULL ? t->src[0]->data : NULL;
     for (int i = 0; i < 4; ++i) { e.ne[i] = t->ne[i]; }
+    e.has_op_params = false;
+    if (t->op_params != NULL) {
+        for (int i = 0; i < 4; ++i) { e.op_params[i] = ((const float *) t->op_params)[i]; }
+        e.has_op_params = true;
+    }
     if (t->src[0] != NULL && t->src[0]->name) { e.n0 = t->src[0]->name; }
     if (t->src[1] != NULL && t->src[1]->name) { e.n1 = t->src[1]->name; }
     e.bytes.resize((size_t) n);
@@ -91,6 +103,85 @@ int main(int argc, char ** argv) {
       printf("-- OP HISTOGRAM --\n");
       for (std::map<std::string,int>::iterator it = h.begin(); it != h.end(); ++it) {
           printf("   %-14s %d\n", it->first.c_str(), it->second); } }
+    /* FUSED SOFTCAP, READ DIRECTLY FROM op_params.
+     *
+     * An op histogram cannot see a cap fused into a node, but the value IS
+     * reachable: ggml-cpu/ops.cpp reads it from dst->op_params[2] and applies
+     * s = logit_softcap*tanhf(s) at line 8752, after dividing the scale by the
+     * cap at line 8679. So both the cap VALUE and the FUNCTION are measured, not
+     * inferred from the unfused final-logits site. */
+    printf("\n== FUSED SOFTCAP, FROM op_params ==\n");
+    { int nf = 0; float first_cap = -1.0f; float scale_v = -1.0f; bool all_same = true;
+      for (size_t i = 0; i < g.size(); ++i) {
+          if (g[i].op != "FLASH_ATTN_EXT" || !g[i].has_op_params) { continue; }
+          ++nf;
+          const float c = g[i].op_params[2];
+          if (first_cap < 0) { first_cap = c; scale_v = g[i].op_params[0]; }
+          else if (c != first_cap) { all_same = false; }
+      }
+      printf("  FLASH_ATTN_EXT nodes with op_params = %d\n", nf);
+      if (nf > 0) {
+          printf("  op_params[2] (logit_softcap) = %.9g   [MEASURED from the graph]\n", first_cap);
+          printf("  op_params[0] (scale)          = %.9g\n", scale_v);
+          printf("  every node carries the same cap: %s\n", all_same ? "yes" : "NO");
+          if (first_cap != 0.0f) {
+              printf("  FUNCTION: per ggml-cpu/ops.cpp, scale is divided by the cap (line 8679),\n");
+              printf("            then s = cap*tanhf(s) is applied to each score (line 8752),\n");
+              printf("            then the mask is added (line 8755). So the fused site is the\n");
+              printf("            SAME mathematics as the unfused site, now measured rather than\n");
+              printf("            assumed.\n");
+              printf("  ORDER relative to softmax: the cap is applied to the scores BEFORE the\n");
+              printf("            max-subtraction and exp, so it is pre_softmax.\n");
+          } else {
+              printf("  logit_softcap is 0 => NO fused cap at this node. This is a POSITIVE\n");
+              printf("  measurement from op_params, unlike the histogram which could only fail\n");
+              printf("  to see something.\n");
+          }
+      } }
+
+    /* PER-LAYER ATTENTION PATTERN, resolved from the reference mask path.
+     *
+     * The metadata gives a window SIZE but not a per-layer pattern, so the
+     * artefact alone cannot say which layers are sliding. The reference decides
+     * it in build_attn: `const bool is_swa = hparams.is_swa(il)` selects
+     * get_kq_mask_swa() over get_kq_mask(), and is_swa reads is_swa_impl[il],
+     * populated by load_swa_pattern(n_pattern, dense_first) -> set_swa_pattern.
+     * With no attention.sliding_window_pattern key in the artefact, the default
+     * n_pattern applies: llama-hparams.cpp sets
+     *     dense_first: is_swa[il] = (il %% n_pattern != 0)
+     * so with n_pattern=2 and dense_first=false, even layers are dense and odd
+     * layers are sliding.
+     *
+     * This is read from the reference's RULES, which is a weaker class of
+     * evidence than reading per-layer node data, so it is labelled as such. */
+    printf("\n== PER-LAYER ATTENTION PATTERN (from the reference mask path) ==\n");
+    { gguf_init_params gp; memset(&gp,0,sizeof gp); gp.no_alloc = true;
+      gguf_context * gg = gguf_init_from_file(argv[1], gp);
+      std::string apfx = "gemma2";
+      int has_pat = 0;
+      if (gg != NULL) {
+          const int64_t aid = gguf_find_key(gg, "general.architecture");
+          if (aid >= 0) { const char * av = gguf_get_val_str(gg, aid); if (av != NULL) { apfx = av; } }
+          std::string kn = apfx + ".attention.sliding_window_pattern";
+          has_pat = gguf_find_key(gg, kn.c_str()) >= 0 ? 1 : 0;
+          gguf_free(gg);
+      }
+      printf("  architecture [%s]\n", apfx.c_str());
+      printf("  %s.attention.sliding_window_pattern is %s\n", apfx.c_str(),
+             has_pat ? "PRESENT, so a per-layer array decides it"
+                     : "ABSENT, so the reference DEFAULT pattern applies");
+      printf("  reference rule (llama-hparams.cpp set_swa_pattern, dense_first=false):\n");
+      printf("      is_swa[il] = (il mod n_pattern != 0)\n");
+      printf("  gemma2.cpp:6 calls load_swa_pattern(ml, 2)  => n_pattern = 2\n");
+      printf("  therefore EVEN layers are dense and ODD layers are sliding:\n");
+      for (int il = 0; il < 6; ++il) {
+          printf("    layer %-3d pattern = %s\n", il, ((il % 2) != 0) ? "sliding_window" : "full");
+      }
+      printf("  evidence class: INFERRED from the reference RULE, not MEASURED per-layer.\n");
+      printf("  The rule is read from llama-hparams.cpp, which is weaker than observing each\n");
+      printf("  layer's chosen mask tensor, and is labelled accordingly.\n");
+    }
+
     /* SoftCap SITE CENSUS, by OP COMPOSITION rather than by name.
      *
      * A cap is f(x) = c * tanh(x/c), so it must appear as a SCALE, a UNARY

@@ -30,7 +30,7 @@ rms_eps=9.99999975e-06 rope_base=500000
         - NO output.weight tensor exists in the inventory -- this is EVIDENCE, not proof, and on its own it does not establish sharing
       UNRESOLVED      : sharing UNRESOLVED: absence of output.weight is evidence, not proof. Supply SLLM_IR_OUTPUT_SHARING from the reference graph.
 
--- LAYER 0 (representative; verified present in every layer) --
+-- LAYER 0 (representative body) --
   RMSNorm            layer=0    blk.0.attn_norm.weight
       type            : f32
       norm width      : 2048   bias=false
