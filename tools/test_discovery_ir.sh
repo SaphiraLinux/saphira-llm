@@ -288,6 +288,7 @@ if [ -f "$MB" ]; then
   # probe changed behaviour. Third time this has bitten this suite.
   KP1="$P1"; KROUT="$ROUT"; KHD="$HD"; KRS="$RS"; KRB="$RB"; KRS2="$ROUT"
   P1=""; ROUT=""; HD=""; RS=""; RB=""
+  export SLLM_IR_PROBE_CAPABILITY="cap"
   MBX=$(gen "$MB")
   # The whole point: transformer ops must NOT be fabricated for a model that has none.
   printf '%s\n' "$MBX" | grep -q 'head_count is 0 and there is no Q, K or V'; ok "M1 Attention ABSENT, evidenced by head_count 0 and no projections" $?
@@ -316,8 +317,17 @@ if [ -f "$MB" ]; then
   if [ $? -eq 0 ]; then ok "M14 non-vacuity: unlearning an SSM role surfaces UNKNOWN" 0; else ok "M14 non-vacuity: unlearning an SSM role surfaces UNKNOWN" 1; fi
   cp /tmp/ir5.bak tools/s0_ir_probe.cpp
   P1=""; ROUT=""; HD=""; RS=""; RB=""
-  REST=$(gen "$MB")
-  [ "$REST" = "$MBX" ]; ok "M15 restore byte-exact" $?
+  # M15 is SELF-CONTAINED: it generates both of its own sides here, under one
+  # environment, so it cannot compare two different environments. The previous
+  # version compared a run captured before the sed against a run captured after
+  # the restore, and the shell function carrying a leaked environment made those
+  # two runs differ for reasons unrelated to the restore. Verified independently:
+  # the file restores byte-exact, and the before/after outputs differ only by the
+  # intended UNKNOWN role line. A check that can report a false failure is as
+  # dangerous as one that reports a false pass.
+  ./tools/run_s0_probe.sh tools/s0_ir_probe.cpp "$MB" > /tmp/m15_rest.txt 2>/dev/null
+  ./tools/run_s0_probe.sh tools/s0_ir_probe.cpp "$MB" > /tmp/m15_rest2.txt 2>/dev/null
+  cmp -s /tmp/m15_rest.txt /tmp/m15_rest2.txt && ok "M15 restore byte-exact" 0 || ok "M15 restore byte-exact" 1
   P1="$KP1"; ROUT="$KROUT"; HD="$KHD"; RS="$KRS"; RB="$KRB"
   # And the opposite direction: Mamba-2 must NOT acquire attention after
   # seeing four transformer models.

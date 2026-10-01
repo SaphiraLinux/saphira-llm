@@ -218,7 +218,7 @@ static void emit_ssm_block(gguf_context * g, const std::string & P,
 
     /* DepthwiseConv1D: a causal convolution over the SEQUENCE axis. There is no
      * key axis here, which is why this is not a projection and not attention. */
-    if (dims.count("ssm_conv1d.weight")) {
+    if (AT("ssm_conv1d.weight", L)) {
         ir_node n = mk(IR_CONV1D, L);
         char buf[128]; snprintf(buf, sizeof buf, "blk.%d.ssm_conv1d.weight", L);
         n.tensor = buf;
@@ -244,7 +244,7 @@ static void emit_ssm_block(gguf_context * g, const std::string & P,
 
     /* The RMSNorm that gates the SSM inner space: SAME op as every other norm,
      * with scope as the parameter that distinguishes it. */
-    if (dims.count("ssm_norm.weight")) {
+    if (AT("ssm_norm.weight", L)) {
         ir_node n = mk(IR_RMSNORM, L);
         char nb[128]; snprintf(nb, sizeof nb, "blk.%d.ssm_norm.weight", L);
         n.tensor = nb;
@@ -305,22 +305,22 @@ static void emit_ssm_block(gguf_context * g, const std::string & P,
             n.evidence.push_back(P + "ssm.group_count = " + std::to_string(group_count) +
                 "   [ARTEFACT MEASURED]");
         }
-        if (dims.count("ssm_a")) {
+        if (AT("ssm_a", L)) {
             n.evidence.push_back("ssm_a ne=[" + std::to_string(dims["ssm_a"].first) + "," +
                 std::to_string(dims["ssm_a"].second) + "]   [ARTEFACT MEASURED]: per-head state "
                 "transition, one row per state dimension");
         }
-        if (dims.count("ssm_d")) {
+        if (AT("ssm_d", L)) {
             n.evidence.push_back("ssm_d ne=[" + std::to_string(dims["ssm_d"].first) + "," +
                 std::to_string(dims["ssm_d"].second) + "]   [ARTEFACT MEASURED]: per-head skip "
                 "coefficient, so the recurrence carries a direct term as well as the state");
         }
-        if (dims.count("ssm_in.weight")) {
+        if (AT("ssm_in.weight", L)) {
             n.evidence.push_back("ssm_in.weight ne=[" + std::to_string(dims["ssm_in.weight"].first) +
                 "," + std::to_string(dims["ssm_in.weight"].second) + "]: projects the residual into "
                 "the inner space, mixing the state and step-size paths");
         }
-        if (dims.count("ssm_out.weight")) {
+        if (AT("ssm_out.weight", L)) {
             n.evidence.push_back("ssm_out.weight ne=[" + std::to_string(dims["ssm_out.weight"].first) +
                 "," + std::to_string(dims["ssm_out.weight"].second) + "]: projects back out");
         }
@@ -344,6 +344,13 @@ int main(int argc, char ** argv) {
     long key_len = -1, val_len = -1, rope_dim = -1;
     { const char * hd0 = getenv("SLLM_IR_HEAD_DIM"); if (hd0 != NULL && atoi(hd0) > 0) { key_len = atol(hd0); } }
     double eps = -1.0, rope_base = -1.0;
+    /* Every one of these is INITIALISED to the -1 sentinel. A per-layer ARRAY
+     * such as feed_forward_length or attention.head_count_kv now leaves the
+     * scalar field deliberately unset, which means an unset field is reachable
+     * state -- and an uninitialised local would then be printed as evidence.
+     * That happened: "head_count=140735386808432" was uninitialised memory in
+     * the Attention ABSENT message, and it made output nondeterministic between
+     * two runs of the SAME binary. A sentinel is visible; garbage is not. */
     struct { const char * suffix; long * out; } ints[] = {
         {"block_count", &block_count}, {"embedding_length", &embd},
         {"feed_forward_length", &ff}, {"attention.head_count", &heads},
@@ -817,10 +824,16 @@ int main(int argc, char ** argv) {
       n.measured = true; emit(n, arch); }
 
     { ir_node n = mk(IR_RMSNORM, L);
-      const char * ffn_key = dims.count("ffn_norm.weight") ? "ffn_norm.weight"
-                              : (dims.count("ffn_norm") ? "ffn_norm" : NULL);
+      const char * ffn_key = AT("ffn_norm.weight", L) ? "ffn_norm.weight"
+                              : (AT("ffn_norm", L) ? "ffn_norm" : NULL);
       if (ffn_key == NULL) { ffn_key = "ffn_norm.weight"; }
       n.tensor = TN(ffn_key);
+      if (ffn_key == NULL || dims.count(ffn_key) == 0) {
+        printf("  %-18s layer=%-3d  %s\n", "RMSNorm", L, "(none)");
+        printf("      status          : ABSENT -- no ffn norm tensor exists AT THIS LAYER\n");
+        printf("      evidence        : MEASURED -- a post-attention norm in another layer does not\n");
+        printf("                       license one here\n");
+      } else {
       n.norm_width = dims[ffn_key].first;
       n.type_name = types[ffn_key]; n.eps = eps; n.scope = "residual";
       n.position = "post_attention";
@@ -829,7 +842,7 @@ int main(int argc, char ** argv) {
           "naming variant and not a different construct");
       n.evidence.push_back("ne=[4096,1] => width == embedding_length");
       n.evidence.push_back("applied to the post-attention residual before the FFN");
-      n.measured = true; emit(n, arch); }
+      n.measured = true; emit(n, arch); } }
 
     /* Q/K head norms: PRESENT for Qwen3, ABSENT for Llama-3.2 AND Gemma-2. The
      * IR must be able to express both presence and absence, and must not invent
@@ -1029,7 +1042,8 @@ int main(int argc, char ** argv) {
         printf("      status          : ABSENT -- head_count is %ld and there is no Q, K or V\n", heads);
         printf("                       projection and no KV cache to attend over\n");
         printf("      evidence        : MEASURED -- no Q, K or V projection exists AT THIS LAYER.\n");
-        printf("                       head_count=%ld is model-global metadata and does NOT license an\n");
+        printf("                       head_count=%ld is model-global metadata and does NOT license an\n",
+               heads);
         printf("                       Attention node here: an op present in SOME layers must not be\n");
         printf("                       emitted for every layer.\n");
     } else {
@@ -1093,12 +1107,12 @@ int main(int argc, char ** argv) {
          * at all still received four Linear nodes, a RoPE node and an Attention
          * node with every dimension at -1. Naming a role that does not exist is
          * not evidence that it exists. */
-        if (!dims.count(proj[i].role)) {
+        if (!AT(proj[i].role, L)) {
             printf("  %-18s layer=%-3d  %s\n", "Linear", L, TN(proj[i].role).c_str());
             printf("      status          : ABSENT -- no tensor by this name in this architecture\n");
-            printf("      evidence        : MEASURED -- the role is not in the inventory, so NO node is\n");
-            printf("                       emitted. Emitting one would be fabricating structure from a\n");
-            printf("                       name.\n");
+            printf("      evidence        : MEASURED -- no tensor with this name exists AT THIS LAYER, so\n");
+            printf("                       NO node is emitted. The role may exist at another layer; that is\n");
+            printf("                       not evidence here. Emitting one would be fabricating structure.\n");
             continue;
         }
         ir_node n = mk(IR_LINEAR, L);
@@ -1117,10 +1131,9 @@ int main(int argc, char ** argv) {
         n.measured = true; emit(n, arch);
     }
 
-    if (!dims.count("attn_q.weight") && !dims.count("attn_k.weight")) {
+    if (!AT("attn_q.weight", L) && !AT("attn_k.weight", L)) {
         printf("  RoPE               layer=%-3d  (none)\n", L);
-        printf("      status          : ABSENT -- no Q or K projection exists to rotate, and no\n");
-        printf("                       rope frequency table is shipped\n");
+        printf("      status          : ABSENT -- no Q or K projection exists AT THIS LAYER to rotate\n");
         printf("      evidence        : MEASURED -- RoPE is a property of an attention block, and there\n");
         printf("                       is none. Emitting a RoPE node would invent one.\n");
     } else {

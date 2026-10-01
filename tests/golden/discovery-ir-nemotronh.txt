@@ -62,13 +62,10 @@ rms_eps=9.99999975e-06 rope_base=-1
         - ne=[4096,1] i.e. width == embedding_length => reduces the residual
         - blk.7.attn_norm.bias ABSENT => bias=false
         - qwen3/Llama graph applies it to the residual before the QKV projection
-  RMSNorm            layer=7    blk.7.ffn_norm.weight
-      norm width      : 0   bias=false
-      epsilon         : 9.99999975e-06
-      evidence        : MEASURED (read from artefact/reference graph)
-        - tensor name as written: "ffn_norm.weight" -- norms appear with and without the .weight suffix across models, which is a naming variant and not a different construct
-        - ne=[4096,1] => width == embedding_length
-        - applied to the post-attention residual before the FFN
+  RMSNorm            layer=7    (none)
+      status          : ABSENT -- no ffn norm tensor exists AT THIS LAYER
+      evidence        : MEASURED -- a post-attention norm in another layer does not
+                       license one here
   RMSNorm            layer=7    blk.7.attn_q_norm.weight
       status          : ABSENT for this architecture
       evidence        : MEASURED -- tensor not present in the inventory,
@@ -143,21 +140,6 @@ rms_eps=9.99999975e-06 rope_base=-1
                        emitted. Presence elsewhere in the model does not license it
                        here: an op present in SOME layers must not be emitted for every
                        layer, and that rule is enforced layer-locally.
-  DepthwiseConv1D    layer=7    blk.7.ssm_conv1d.weight
-      type            : f32
-      in/out features : 4 / 10240
-      evidence        : MEASURED (read from artefact/reference graph)
-        - nemotron_h.ssm.conv_kernel = 4   [ARTEFACT MEASURED]
-        - ssm_conv1d.weight ne[0]=4, which agrees with conv_kernel: the weights ARE the kernel taps
-        - ne[1]=10240 channels with a matching ssm_conv1d.bias, one bias per channel: that is what makes it DEPTHWISE rather than a dense convolution
-        - convolved over SEQUENCE, not over an attention axis
-  RMSNorm            layer=7    blk.7.ssm_norm.weight
-      type            : f32
-      norm width      : 1024   bias=false
-      epsilon         : -1
-      evidence        : MEASURED (read from artefact/reference graph)
-        - ssm_norm.weight ne=[1024,1]   [ARTEFACT MEASURED]
-        - SAME RMSNorm op as the residual norms; scope is the parameter that distinguishes it, not a different mathematics
   SelectiveScan      layer=7    (none)
       status          : ABSENT -- no ssm_a, ssm_in or ssm_conv1d tensor exists, so
                        there is no recurrence to describe
@@ -174,13 +156,10 @@ rms_eps=9.99999975e-06 rope_base=-1
         - ne=[4096,1] i.e. width == embedding_length => reduces the residual
         - blk.1.attn_norm.bias ABSENT => bias=false
         - qwen3/Llama graph applies it to the residual before the QKV projection
-  RMSNorm            layer=1    blk.1.ffn_norm.weight
-      norm width      : 0   bias=false
-      epsilon         : 9.99999975e-06
-      evidence        : MEASURED (read from artefact/reference graph)
-        - tensor name as written: "ffn_norm.weight" -- norms appear with and without the .weight suffix across models, which is a naming variant and not a different construct
-        - ne=[4096,1] => width == embedding_length
-        - applied to the post-attention residual before the FFN
+  RMSNorm            layer=1    (none)
+      status          : ABSENT -- no ffn norm tensor exists AT THIS LAYER
+      evidence        : MEASURED -- a post-attention norm in another layer does not
+                       license one here
   RMSNorm            layer=1    blk.1.attn_q_norm.weight
       status          : ABSENT for this architecture
       evidence        : MEASURED -- tensor not present in the inventory,
@@ -200,55 +179,33 @@ rms_eps=9.99999975e-06 rope_base=-1
       status          : ABSENT -- head_count is 32 and there is no Q, K or V
                        projection and no KV cache to attend over
       evidence        : MEASURED -- no Q, K or V projection exists AT THIS LAYER.
-                       head_count=4334689 is model-global metadata and does NOT license an
+                       head_count=32 is model-global metadata and does NOT license an
                        Attention node here: an op present in SOME layers must not be
                        emitted for every layer.
   Linear             layer=1    blk.1.attn_q.weight
-      type            : q2_K
-      in/out features : 4096 / 4096
-      head_dim=128  heads=32  kv_heads=-1
-      evidence        : MEASURED (read from artefact/reference graph)
-        - tensor blk.1.attn_q.weight ne=[4096,4096]
-        - out_features 4096 = 32x128 (Q) or -1x128 (K/V) => GQA or MHA, measured
-        - blk.1.attn_q.weight.bias ABSENT => bias=false
+      status          : ABSENT -- no tensor by this name in this architecture
+      evidence        : MEASURED -- no tensor with this name exists AT THIS LAYER, so
+                       NO node is emitted. The role may exist at another layer; that is
+                       not evidence here. Emitting one would be fabricating structure.
   Linear             layer=1    blk.1.attn_k.weight
-      type            : q2_K
-      in/out features : 4096 / 1024
-      head_dim=128  heads=32  kv_heads=-1
-      evidence        : MEASURED (read from artefact/reference graph)
-        - tensor blk.1.attn_k.weight ne=[4096,1024]
-        - out_features 1024 = 32x128 (Q) or -1x128 (K/V) => GQA or MHA, measured
-        - blk.1.attn_k.weight.bias ABSENT => bias=false
+      status          : ABSENT -- no tensor by this name in this architecture
+      evidence        : MEASURED -- no tensor with this name exists AT THIS LAYER, so
+                       NO node is emitted. The role may exist at another layer; that is
+                       not evidence here. Emitting one would be fabricating structure.
   Linear             layer=1    blk.1.attn_v.weight
-      type            : q3_K
-      in/out features : 4096 / 1024
-      head_dim=128  heads=32  kv_heads=-1
-      evidence        : MEASURED (read from artefact/reference graph)
-        - tensor blk.1.attn_v.weight ne=[4096,1024]
-        - out_features 1024 = 32x128 (Q) or -1x128 (K/V) => GQA or MHA, measured
-        - blk.1.attn_v.weight.bias ABSENT => bias=false
+      status          : ABSENT -- no tensor by this name in this architecture
+      evidence        : MEASURED -- no tensor with this name exists AT THIS LAYER, so
+                       NO node is emitted. The role may exist at another layer; that is
+                       not evidence here. Emitting one would be fabricating structure.
   Linear             layer=1    blk.1.attn_output.weight
-      type            : q3_K
-      in/out features : 4096 / 4096
-      head_dim=128  heads=32  kv_heads=-1
-      evidence        : MEASURED (read from artefact/reference graph)
-        - tensor blk.1.attn_output.weight ne=[4096,4096]
-        - out_features 4096 = 32x128 (Q) or -1x128 (K/V) => GQA or MHA, measured
-        - blk.1.attn_output.weight.bias ABSENT => bias=false
-  RoPE               layer=1    (computed)
-      head_dim=128  heads=32  kv_heads=-1
-      pairing         : UNRESOLVED  (requires measurement from the reference graph)
-      base            : -1
-      dim_count       : 128
-      scaling         : none
-      position_source : position index (pos), from inp_pos
-      evidence        : INFERRED (rule-based)
-        - rope applied to Q and K only, not V (graph)
-        - nemotron_h.rope.freq_base=-1.000000
-        - nemotron_h.rope.dimension_count=128
-        - nemotron_h.rope.scaling.type=none
-      UNRESOLVED      : pairing NOT MEASURED: supply SLLM_IR_ROPE_PAIRING from the reference graph. Deriving it from the architecture name is exactly the error this IR exists to avoid, since Qwen3 is NEOX and Llama-3.2 is GPT.
-      UNRESOLVED      : rope_base UNRESOLVED from the ARTEFACT: no nemotron_h.rope.freq_base key AND no precomputed rope_freqs table in this file. NOT assumed to be 10000, and NOT taken from the upstream paper or the HuggingFace config, which report 10000 but describe a different artefact. Supply SLLM_IR_ROPE_BASE_DEFAULT only to record the REFERENCE default as reference evidence, which is a different provenance class.
+      status          : ABSENT -- no tensor by this name in this architecture
+      evidence        : MEASURED -- no tensor with this name exists AT THIS LAYER, so
+                       NO node is emitted. The role may exist at another layer; that is
+                       not evidence here. Emitting one would be fabricating structure.
+  RoPE               layer=1    (none)
+      status          : ABSENT -- no Q or K projection exists AT THIS LAYER to rotate
+      evidence        : MEASURED -- RoPE is a property of an attention block, and there
+                       is none. Emitting a RoPE node would invent one.
   GatedMLP           layer=1    ffn_gate.weight + ffn_up.weight + ffn_down.weight
       in/out features : 0 / 0
       scope           : gated (SwiGLU-family): gate and up share out_features, down returns to in_features
@@ -258,21 +215,6 @@ rms_eps=9.99999975e-06 rope_base=-1
         - ffn_down ne=[21504,4096]  transpose of the gate shape => contraction
         - nemotron_h.feed_forward_length=-1
         - ffn_gate_inp.weight ABSENT => not MoE, and not inferred from the architecture name
-  DepthwiseConv1D    layer=1    blk.1.ssm_conv1d.weight
-      type            : f32
-      in/out features : 4 / 10240
-      evidence        : MEASURED (read from artefact/reference graph)
-        - nemotron_h.ssm.conv_kernel = 4   [ARTEFACT MEASURED]
-        - ssm_conv1d.weight ne[0]=4, which agrees with conv_kernel: the weights ARE the kernel taps
-        - ne[1]=10240 channels with a matching ssm_conv1d.bias, one bias per channel: that is what makes it DEPTHWISE rather than a dense convolution
-        - convolved over SEQUENCE, not over an attention axis
-  RMSNorm            layer=1    blk.1.ssm_norm.weight
-      type            : f32
-      norm width      : 1024   bias=false
-      epsilon         : -1
-      evidence        : MEASURED (read from artefact/reference graph)
-        - ssm_norm.weight ne=[1024,1]   [ARTEFACT MEASURED]
-        - SAME RMSNorm op as the residual norms; scope is the parameter that distinguishes it, not a different mathematics
   SelectiveScan      layer=1    (none)
       status          : ABSENT -- no ssm_a, ssm_in or ssm_conv1d tensor exists, so
                        there is no recurrence to describe
@@ -289,13 +231,10 @@ rms_eps=9.99999975e-06 rope_base=-1
         - ne=[4096,1] i.e. width == embedding_length => reduces the residual
         - blk.0.attn_norm.bias ABSENT => bias=false
         - qwen3/Llama graph applies it to the residual before the QKV projection
-  RMSNorm            layer=0    blk.0.ffn_norm.weight
-      norm width      : 0   bias=false
-      epsilon         : 9.99999975e-06
-      evidence        : MEASURED (read from artefact/reference graph)
-        - tensor name as written: "ffn_norm.weight" -- norms appear with and without the .weight suffix across models, which is a naming variant and not a different construct
-        - ne=[4096,1] => width == embedding_length
-        - applied to the post-attention residual before the FFN
+  RMSNorm            layer=0    (none)
+      status          : ABSENT -- no ffn norm tensor exists AT THIS LAYER
+      evidence        : MEASURED -- a post-attention norm in another layer does not
+                       license one here
   RMSNorm            layer=0    blk.0.attn_q_norm.weight
       status          : ABSENT for this architecture
       evidence        : MEASURED -- tensor not present in the inventory,
@@ -315,55 +254,33 @@ rms_eps=9.99999975e-06 rope_base=-1
       status          : ABSENT -- head_count is 32 and there is no Q, K or V
                        projection and no KV cache to attend over
       evidence        : MEASURED -- no Q, K or V projection exists AT THIS LAYER.
-                       head_count=4334689 is model-global metadata and does NOT license an
+                       head_count=32 is model-global metadata and does NOT license an
                        Attention node here: an op present in SOME layers must not be
                        emitted for every layer.
   Linear             layer=0    blk.0.attn_q.weight
-      type            : q2_K
-      in/out features : 4096 / 4096
-      head_dim=128  heads=32  kv_heads=-1
-      evidence        : MEASURED (read from artefact/reference graph)
-        - tensor blk.0.attn_q.weight ne=[4096,4096]
-        - out_features 4096 = 32x128 (Q) or -1x128 (K/V) => GQA or MHA, measured
-        - blk.0.attn_q.weight.bias ABSENT => bias=false
+      status          : ABSENT -- no tensor by this name in this architecture
+      evidence        : MEASURED -- no tensor with this name exists AT THIS LAYER, so
+                       NO node is emitted. The role may exist at another layer; that is
+                       not evidence here. Emitting one would be fabricating structure.
   Linear             layer=0    blk.0.attn_k.weight
-      type            : q2_K
-      in/out features : 4096 / 1024
-      head_dim=128  heads=32  kv_heads=-1
-      evidence        : MEASURED (read from artefact/reference graph)
-        - tensor blk.0.attn_k.weight ne=[4096,1024]
-        - out_features 1024 = 32x128 (Q) or -1x128 (K/V) => GQA or MHA, measured
-        - blk.0.attn_k.weight.bias ABSENT => bias=false
+      status          : ABSENT -- no tensor by this name in this architecture
+      evidence        : MEASURED -- no tensor with this name exists AT THIS LAYER, so
+                       NO node is emitted. The role may exist at another layer; that is
+                       not evidence here. Emitting one would be fabricating structure.
   Linear             layer=0    blk.0.attn_v.weight
-      type            : q3_K
-      in/out features : 4096 / 1024
-      head_dim=128  heads=32  kv_heads=-1
-      evidence        : MEASURED (read from artefact/reference graph)
-        - tensor blk.0.attn_v.weight ne=[4096,1024]
-        - out_features 1024 = 32x128 (Q) or -1x128 (K/V) => GQA or MHA, measured
-        - blk.0.attn_v.weight.bias ABSENT => bias=false
+      status          : ABSENT -- no tensor by this name in this architecture
+      evidence        : MEASURED -- no tensor with this name exists AT THIS LAYER, so
+                       NO node is emitted. The role may exist at another layer; that is
+                       not evidence here. Emitting one would be fabricating structure.
   Linear             layer=0    blk.0.attn_output.weight
-      type            : q3_K
-      in/out features : 4096 / 4096
-      head_dim=128  heads=32  kv_heads=-1
-      evidence        : MEASURED (read from artefact/reference graph)
-        - tensor blk.0.attn_output.weight ne=[4096,4096]
-        - out_features 4096 = 32x128 (Q) or -1x128 (K/V) => GQA or MHA, measured
-        - blk.0.attn_output.weight.bias ABSENT => bias=false
-  RoPE               layer=0    (computed)
-      head_dim=128  heads=32  kv_heads=-1
-      pairing         : UNRESOLVED  (requires measurement from the reference graph)
-      base            : -1
-      dim_count       : 128
-      scaling         : none
-      position_source : position index (pos), from inp_pos
-      evidence        : INFERRED (rule-based)
-        - rope applied to Q and K only, not V (graph)
-        - nemotron_h.rope.freq_base=-1.000000
-        - nemotron_h.rope.dimension_count=128
-        - nemotron_h.rope.scaling.type=none
-      UNRESOLVED      : pairing NOT MEASURED: supply SLLM_IR_ROPE_PAIRING from the reference graph. Deriving it from the architecture name is exactly the error this IR exists to avoid, since Qwen3 is NEOX and Llama-3.2 is GPT.
-      UNRESOLVED      : rope_base UNRESOLVED from the ARTEFACT: no nemotron_h.rope.freq_base key AND no precomputed rope_freqs table in this file. NOT assumed to be 10000, and NOT taken from the upstream paper or the HuggingFace config, which report 10000 but describe a different artefact. Supply SLLM_IR_ROPE_BASE_DEFAULT only to record the REFERENCE default as reference evidence, which is a different provenance class.
+      status          : ABSENT -- no tensor by this name in this architecture
+      evidence        : MEASURED -- no tensor with this name exists AT THIS LAYER, so
+                       NO node is emitted. The role may exist at another layer; that is
+                       not evidence here. Emitting one would be fabricating structure.
+  RoPE               layer=0    (none)
+      status          : ABSENT -- no Q or K projection exists AT THIS LAYER to rotate
+      evidence        : MEASURED -- RoPE is a property of an attention block, and there
+                       is none. Emitting a RoPE node would invent one.
   GatedMLP           layer=0    (none)
       status          : ABSENT -- feed_forward_length is -1 and no FFN tensor exists
       evidence        : MEASURED -- NO FFN TENSOR EXISTS AT THIS LAYER, so no gated MLP is
