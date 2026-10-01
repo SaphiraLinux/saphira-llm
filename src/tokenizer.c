@@ -323,6 +323,11 @@ static sllm_status resolve_pre_type(const sllm_gguf * g, sllm_pre_type * out,
         *out = SLLM_PRE_UNSET;
         return SLLM_OK;
     }
+    /* Qwen2 and Qwen3 both declare pre = "qwen2". */
+    if (strcmp(pre, "qwen2") == 0) {
+        *out = SLLM_PRE_QWEN2;
+        return SLLM_OK;
+    }
 
     *out = SLLM_PRE_UNSUPPORTED;
     return SLLM_ERR_UNSUPPORTED;
@@ -334,12 +339,35 @@ sllm_status sllm_tok_load(const sllm_gguf * g, sllm_tok ** out) {
     }
     *out = NULL;
 
+    /*
+     * The tokenizer is selected from a TUPLE, not from one field.
+     *
+     * `tokenizer.ggml.model` says only which BYTE-LEVEL BPE family the vocab
+     * uses, and on its own it is not sufficient: Qwen3-8B declares
+     * model = "gpt2" while pre = "qwen2" and n_vocab = 151936. A backend keyed
+     * on model alone would take the right family with the wrong parameters --
+     * GPT-2's pre-tokeniser pattern and a 50257 vocab, applied to Qwen3
+     * weights. That fails as a FALSE GREEN: ordinary prose tokenises correctly
+     * and the error only shows up on spacing, punctuation and non-ASCII input.
+     *
+     * So the three legs are read together and all three must agree:
+     *   model  the family, which is the ONLY thing this leg is allowed to say
+     *   pre    the pre-tokeniser, which is what actually selects the splitter
+     *   vocab   the size, which is validation evidence and never a shortcut
+     *
+     * `general.architecture` is deliberately not consulted anywhere in this
+     * function. Architecture names what computes; a tokenizer is a property of
+     * the artefact and must be read off the artefact.
+     */
     const char * model = NULL;
     if (sllm_gguf_kv_str(g, "tokenizer.ggml.model", &model) != SLLM_OK) {
-        return SLLM_ERR_UNSUPPORTED;   /* no tokenizer declared */
+        sllm_log(SLLM_LOG_WARN, "no tokenizer.ggml.model declared; refusing to guess a family");
+        return SLLM_ERR_UNSUPPORTED;
     }
     if (strcmp(model, "gpt2") != 0) {
-        return SLLM_ERR_UNSUPPORTED;   /* only the BPE family, for now */
+        sllm_log(SLLM_LOG_WARN, "tokenizer.ggml.model = \"%s\" is not the BPE family this build "
+                    "implements; refusing to tokenise rather than guess", model);
+        return SLLM_ERR_UNSUPPORTED;   /* family leg, and it is not sufficient on its own */
     }
 
     sllm_pre_type pre_type = SLLM_PRE_UNSUPPORTED;
@@ -364,6 +392,35 @@ sllm_status sllm_tok_load(const sllm_gguf * g, sllm_tok ** out) {
     if (sllm_gguf_kv_str_array(g, "tokenizer.ggml.tokens", &tokens, &n_tokens) != SLLM_OK ||
         n_tokens == 0) {
         return SLLM_ERR_KV_MISSING;
+    }
+
+    /* The vocab-size leg. This VALIDATES rather than selects: a byte-level BPE
+     * vocab cannot be smaller than one entry per byte value, so anything under
+     * 256 means the alphabet is incomplete and every id derived from it would be
+     * suspect. It is not used to pick a backend, and no specific size is
+     * hardcoded for any pre-type, because that would be a filename-style
+     * shortcut wearing a numeric disguise. */
+    if (n_tokens < 256u) {
+        sllm_log(SLLM_LOG_WARN, "tokenizer.ggml.tokens has only %llu entries; a byte-level BPE "
+                    "needs at least one per byte value, so the alphabet is incomplete",
+                 (unsigned long long) n_tokens);
+        return SLLM_ERR_KV_MISSING;
+    }
+
+    /* Where the file states a vocab size, it must agree with the array we just
+     * read. A disagreement means the two were written at different times and we
+     * cannot say which one the model was trained against. */
+    {
+        uint32_t declared_n_vocab = 0;
+        if (sllm_gguf_kv_u32(g, "qwen3.vocab_size", &declared_n_vocab) == SLLM_OK ||
+            sllm_gguf_kv_u32(g, "llama.vocab_size", &declared_n_vocab) == SLLM_OK) {
+            if ((uint64_t) declared_n_vocab != n_tokens) {
+                sllm_log(SLLM_LOG_WARN, "vocab size metadata says %u but tokenizer.ggml.tokens has "
+                            "%llu entries; refusing to pick a side", declared_n_vocab,
+                         (unsigned long long) n_tokens);
+                return SLLM_ERR_KV_MISSING;
+            }
+        }
     }
 
     char * const * merges = NULL;
@@ -515,6 +572,7 @@ const char * sllm_tok_pre_type_name(sllm_pre_type pre) {
     switch (pre) {
         case SLLM_PRE_UNSET:       return "default";
         case SLLM_PRE_GPT2:        return "gpt-2";
+        case SLLM_PRE_QWEN2:       return "qwen2";
         case SLLM_PRE_UNSUPPORTED: return "unsupported";
         default:                   return "unknown";
     }
@@ -914,13 +972,167 @@ static void split_gpt2(const uint32_t * cp, const u32vec * segs, u32vec * out) {
 }
 
 /*
+ * The qwen2 pre-tokeniser.
+ *
+ * Same byte alphabet as GPT-2 -- proven against the file's raw
+ * tokenizer.ggml.tokens, see tests/golden/mainstream-qwen3-tokenizer.txt -- so
+ * the vocabulary, the merge loop and the decoder are shared unchanged. Only the
+ * SPLIT differs, and it differs in five ways that each change real tokens:
+ *
+ *   (?i:'s|'t|'re|'ve|'m|'ll|'d)   case-INsensitive, and tried FIRST
+ *   [^\r\n\p{L}\p{N}]?\p{L}+        the optional leading char is any char that
+ *                                   is not a letter, digit, CR or LF -- so a
+ *                                   TAB may lead a word, not only a space
+ *   \p{N}{1,3}                      digits, at most three, and no leading space
+ *   ?[^\s\p{L}\p{N}]+[\r\n]*        punctuation, then any trailing newlines
+ *   \s*[\r\n]+                      whitespace ending in a newline run
+ *
+ * plus the two whitespace rules GPT-2 also has. Order is the alternation order
+ * above and is significant: contractions must beat the letter rule, and the
+ * newline rule must beat the generic whitespace rules.
+ *
+ * Hand-written like split_gpt2 rather than driven by a regex engine, for the
+ * same reason: the engine would have to be a dependency, and the split is the
+ * part most worth being able to read.
+ */
+static void split_qwen2(const uint32_t * cp, const u32vec * segs, u32vec * out) {
+    const size_t n_in = cp == NULL ? 0 : segs->n;
+
+    size_t base = 0;
+    for (size_t s = 0; s < n_in; ++s) {
+        const size_t ini = base;
+        const size_t end = base + segs->v[s];
+        base = end;
+
+        size_t prev_end = ini;
+
+        #define ADD_TOKEN(e_)                                                  \
+            do {                                                               \
+                const size_t e__ = (e_);                                       \
+                if (e__ > prev_end) { uv_push(out, (uint32_t) (e__ - prev_end)); } \
+                prev_end = e__;                                                \
+            } while (0)
+
+        /* ASCII case fold, and only for the ASCII letters the contractions use.
+         * Folding the whole of Unicode here would change which words the
+         * contraction rule fires on, and the reference folds ASCII only. */
+        #define LOWER(c_) ( ((c_) >= 'A' && (c_) <= 'Z') ? (c_) + 32 : (c_) )
+
+        for (size_t pos = ini; pos < end; ) {
+            const uint32_t cpt = cp[pos];
+            const uint16_t fl  = sllm_uni_flags(cpt);
+
+            /* (?i:'s|'t|'re|'ve|'m|'ll|'d) -- first, and case-insensitive */
+            if (cpt == '\'' && pos + 1 < end) {
+                const uint32_t n1 = LOWER(cp[pos + 1]);
+                if (n1 == 's' || n1 == 't' || n1 == 'm' || n1 == 'd') {
+                    pos += 2; ADD_TOKEN(pos); continue;
+                }
+                if (pos + 2 < end) {
+                    const uint32_t n2 = LOWER(cp[pos + 2]);
+                    if ((n1 == 'r' && n2 == 'e') || (n1 == 'v' && n2 == 'e') ||
+                        (n1 == 'l' && n2 == 'l')) {
+                        pos += 3; ADD_TOKEN(pos); continue;
+                    }
+                }
+            }
+
+            /* [^\r\n\p{L}\p{N}]?\p{L}+ */
+            {
+                const bool is_nl = (cpt == '\r' || cpt == '\n');
+                const bool prefixable =
+                    !is_nl && !(fl & (SLLM_UNI_LETTER | SLLM_UNI_NUMBER));
+                size_t at = pos;
+                if (prefixable) {
+                    if (pos + 1 >= end || !(sllm_uni_flags(cp[pos + 1]) & SLLM_UNI_LETTER)) {
+                        goto not_letters;   /* the optional part is not optional enough */
+                    }
+                    at = pos + 1;
+                } else if (!(fl & SLLM_UNI_LETTER)) {
+                    goto not_letters;
+                }
+                while (at < end && (sllm_uni_flags(cp[at]) & SLLM_UNI_LETTER)) { ++at; }
+                pos = at;
+                ADD_TOKEN(pos);
+                continue;
+            }
+        not_letters:;
+
+            /* \p{N}{1,3} -- no leading space, and a hard cap of three. GPT-2
+             * allows an optional space and an unbounded run, so this is the
+             * difference that makes "0123456789" group differently. */
+            if (fl & SLLM_UNI_NUMBER) {
+                size_t at = pos;
+                while (at < end && at < pos + 3 &&
+                       (sllm_uni_flags(cp[at]) & SLLM_UNI_NUMBER)) { ++at; }
+                pos = at;
+                ADD_TOKEN(pos);
+                continue;
+            }
+
+            /* ?[^\s\p{L}\p{N}]+[\r\n]* */
+            if (!(fl & (SLLM_UNI_WHITESPACE | SLLM_UNI_LETTER | SLLM_UNI_NUMBER)) && fl != 0) {
+                size_t at = (cpt == ' ') ? pos + 1 : pos;
+                while (at < end) {
+                    const uint16_t f2 = sllm_uni_flags(cp[at]);
+                    if (f2 & (SLLM_UNI_WHITESPACE | SLLM_UNI_LETTER | SLLM_UNI_NUMBER)) { break; }
+                    ++at;
+                }
+                /* the trailing newline run belongs to this token */
+                while (at < end && (cp[at] == '\r' || cp[at] == '\n')) { ++at; }
+                pos = at;
+                ADD_TOKEN(pos);
+                continue;
+            }
+
+            /* \s*[\r\n]+ : whitespace ending in a newline run. Greedy \s* then
+             * backtrack, so the match runs up to and including the LAST CR or LF
+             * in the whitespace run. Without this a blank line would split
+             * into two tokens instead of one. */
+            {
+                size_t nws = 0;
+                while (pos + nws < end &&
+                       (sllm_uni_flags(cp[pos + nws]) & SLLM_UNI_WHITESPACE)) { ++nws; }
+                if (nws > 0) {
+                    size_t last_nl = 0;
+                    bool have_nl = false;
+                    for (size_t i = 0; i < nws; ++i) {
+                        const uint32_t w = cp[pos + i];
+                        if (w == '\r' || w == '\n') { last_nl = i + 1; have_nl = true; }
+                    }
+                    if (have_nl) {
+                        pos += last_nl;
+                        ADD_TOKEN(pos);
+                        continue;
+                    }
+                    /* \s+(?!\S): keep the last whitespace back for whatever
+                     * follows, but only if something non-space does follow. */
+                    if (pos + nws < end && nws > 1) {
+                        pos += nws - 1;
+                        ADD_TOKEN(pos);
+                        continue;
+                    }
+                    pos += nws;
+                    ADD_TOKEN(pos);
+                    continue;
+                }
+            }
+
+            ADD_TOKEN(++pos);
+        }
+        #undef ADD_TOKEN
+        #undef LOWER
+    }
+}
+
+/*
  * Run the split passes for the model's pre-type, in the reference's order.
  *
  * GPT2 is exactly pass 2 and nothing else. DEFAULT is passes 1, 2, 3 and 4.
- * Both funnel through the same hand-written GPT-2 splitter, which is why the
- * second stage is factored out: the difference between the two pre-types is
- * precisely the passes wrapped around it, and expressing it that way keeps the
- * shared stage in one place.
+ * QWEN2 is a single pass of its own. Both funnel through the same hand-written
+ * GPT-2 splitter, which is why the second stage is factored out: the difference
+ * between the two pre-types is precisely the passes wrapped around it, and
+ * expressing it that way keeps the shared stage in one place.
  */
 static sllm_status pretokenize_cpts(sllm_pre_type pre, const uint32_t * cp,
                                     size_t n, u32vec * out) {
@@ -930,6 +1142,13 @@ static sllm_status pretokenize_cpts(sllm_pre_type pre, const uint32_t * cp,
 
     if (pre == SLLM_PRE_GPT2) {
         split_gpt2(cp, &a, out);
+        const bool bad = a.oom || out->oom;
+        uv_free(&a);
+        return bad ? SLLM_ERR_NOMEM : SLLM_OK;
+    }
+
+    if (pre == SLLM_PRE_QWEN2) {
+        split_qwen2(cp, &a, out);
         const bool bad = a.oom || out->oom;
         uv_free(&a);
         return bad ? SLLM_ERR_NOMEM : SLLM_OK;

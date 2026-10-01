@@ -45,7 +45,8 @@ typedef struct sllm_tok sllm_tok;
 typedef enum sllm_pre_type {
     SLLM_PRE_UNSET     = 0,  /* `pre` absent: the DEFAULT four-pass fallback */
     SLLM_PRE_GPT2      = 1,  /* `pre` = "gpt-2" and friends: one pass       */
-    SLLM_PRE_UNSUPPORTED = 2  /* named in the file, not implemented here     */
+    SLLM_PRE_UNSUPPORTED = 2, /* named in the file, not implemented here     */
+    SLLM_PRE_QWEN2     = 3   /* `pre` = "qwen2" and friends: qwen2 pattern   */
 } sllm_pre_type;
 
 /*
