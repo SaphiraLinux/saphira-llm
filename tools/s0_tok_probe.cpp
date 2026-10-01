@@ -87,6 +87,14 @@ int main(int argc,char**argv){
   printf("\n=== encode cases (add_special=true, parse_special=true) ===\n");
   for(unsigned ci=0; ci<sizeof cases/sizeof*cases; ++ci){
     std::string t = cases[ci].text;
+    /* The exact INPUT BYTES, hex encoded, so the Saphira test can reconstruct
+     * them byte-exactly. Derived here from the same literal the llama.cpp call
+     * receives, so the expectation cannot drift from what was actually run --
+     * and it is bytes, not a UTF-8 string, because these pieces are not
+     * individually valid UTF-8. */
+    { std::string h; char hb[4];
+      for(unsigned char c : t){ snprintf(hb,sizeof hb,"%02X",c); h+=hb; }
+      printf("   text_hex = %s\n", h.c_str()); }
     std::vector<llama_token> toks(512);
     int n = llama_tokenize(v, t.c_str(), (int32_t)t.size(), toks.data(), 512, true, true);
     printf("[%s] %zu bytes -> n=%d\n", cases[ci].label, t.size(), n);
@@ -104,8 +112,10 @@ int main(int argc,char**argv){
       int dn = llama_detokenize(v, toks.data(), n, buf.data(), (int)buf.size(), false, true);
       if(dn>0){
         std::string back(buf.data(), dn);
-        printf("   decode_rt = \"%s\"   byte_identical=%s\n",
-               back.c_str(), (back==t)?"yes":"NO");
+        std::string hb; char cb[4];
+        for(unsigned char c : back){ snprintf(cb,sizeof cb,"%02X",c); hb+=cb; }
+        printf("   decode_hex = %s   byte_identical=%s\n",
+               hb.c_str(), (back==t)?"yes":"NO");
       } else printf("   decode_rt = (failed %d)\n", dn);
     }
   }

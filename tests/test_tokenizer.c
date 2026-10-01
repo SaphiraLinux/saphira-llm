@@ -633,6 +633,217 @@ TEST(regression_bpe_rejects_stale_bigrams) {
     sllm_gguf_close(&g);
 }
 
+
+/* ==================================================================== *
+ * Qwen3 tokenizer parity against the committed llama.cpp reference.
+ *
+ * The expectations are NOT written here. They are read from
+ * tests/golden/mainstream-qwen3-tokenizer.txt, the single source of truth,
+ * so this test cannot drift from what was actually captured.
+ *
+ * Input bytes come from text_hex, never a retyped string. The detokenized
+ * comparison is over BYTES, never a UTF-8 string, because these pieces are
+ * not individually valid UTF-8 and a string comparison would quietly be a
+ * different test.
+ *
+ * Honesty about absence: with no model reachable this prints SKIPPED and is
+ * NOT counted as a pass. "No failure" and "no evidence" share an exit code and
+ * are not the same thing, and a gate that prints green when it measured
+ * nothing is the exact failure this project keeps meeting.
+ * ==================================================================== */
+
+#define SLLM_QWEN3_FIXTURE "tests/golden/mainstream-qwen3-tokenizer.txt"
+#define SLLM_QWEN3_MAX_CASES 64
+#define SLLM_QWEN3_MAX_INPUT 8192
+#define SLLM_QWEN3_MAX_IDS 4096
+#define SLLM_QWEN3_MAX_OUT 8192
+
+typedef struct {
+    char    label[48];
+    char    input[SLLM_QWEN3_MAX_INPUT];
+    size_t  input_len;
+    int32_t expect_n;
+    int32_t ids[SLLM_QWEN3_MAX_IDS];
+    char    out[SLLM_QWEN3_MAX_OUT];
+    size_t  out_len;
+    int     has_out;
+} qwen3_case;
+
+static int qhexval(char c) {
+    if (c >= '0' && c <= '9') { return c - '0'; }
+    if (c >= 'a' && c <= 'f') { return c - 'a' + 10; }
+    if (c >= 'A' && c <= 'F') { return c - 'A' + 10; }
+    return -1;
+}
+
+/* "5468 6F" or "54686f" -> bytes. Returns byte count, or -1 on malformed. */
+static int qhex_bytes(const char * h, char * out, size_t cap) {
+    size_t n = 0;
+    while (*h == ' ' || *h == '\t') { ++h; }
+    while (qhexval(h[0]) >= 0 && qhexval(h[1]) >= 0) {
+        if (n >= cap) { return -1; }
+        out[n++] = (char) ((qhexval(h[0]) << 4) | qhexval(h[1]));
+        h += 2;
+        while (*h == ' ') { ++h; }
+    }
+    return (int) n;
+}
+
+/* Field order in the file is: text_hex, [label]..-> n=, ids =, pieces =,
+ * decode_hex =. So text_hex opens a case and every other field attaches to the
+ * case in progress. Nothing else has to be tracked. */
+static int qwen3_parse(qwen3_case * cs, int cap_cases) {
+    FILE * f = fopen(SLLM_QWEN3_FIXTURE, "rb");
+    if (f == NULL) { return -1; }
+    char line[SLLM_QWEN3_MAX_OUT + 64];
+    int n = 0;
+    int open = 0;                       /* a case is in progress */
+
+    while (fgets(line, sizeof line, f) != NULL) {
+        char * p = NULL;
+        if ((p = strstr(line, "text_hex = ")) != NULL) {
+            if (n >= cap_cases) { continue; }
+            memset(&cs[n], 0, sizeof cs[n]);
+            const int got = qhex_bytes(p + 11, cs[n].input, sizeof cs[n].input);
+            if (got < 0) { fclose(f); return -1; }
+            cs[n].input_len = (size_t) got;
+            ++n; open = 1;
+            continue;
+        }
+        if (!open) { continue; }
+        qwen3_case * c = &cs[n - 1];
+
+        if ((p = strstr(line, "-> n=")) != NULL) {
+            c->expect_n = (int32_t) strtol(p + 5, NULL, 10);
+        } else if ((p = strchr(line, '[')) != NULL && strchr(line, ']') != NULL &&
+                   strstr(line, "bytes ->") != NULL) {
+            char * rb = strchr(p, ']');
+            const size_t len = (size_t) (rb - p - 1);
+            if (len < sizeof c->label) { memcpy(c->label, p + 1, len); c->label[len] = '\0'; }
+        } else if (strncmp(line, "   ids = ", 9) == 0) {
+            char * q = line + 9;
+            int32_t k = 0;
+            for (;;) {
+                while (*q == ' ') { ++q; }
+                if (*q < '0' || *q > '9') { break; }
+                if (k >= SLLM_QWEN3_MAX_IDS) { fclose(f); return -1; }
+                char * endp = NULL;
+                c->ids[k++] = (int32_t) strtol(q, &endp, 10);
+                q = endp;
+            }
+        } else if (strncmp(line, "   decode_hex = ", 16) == 0) {
+            const int got = qhex_bytes(line + 16, c->out, sizeof c->out);
+            if (got < 0) { fclose(f); return -1; }
+            c->out_len = (size_t) got;
+            c->has_out = 1;
+        }
+    }
+    fclose(f);
+    return n;
+}
+
+static void run_qwen3_tokenizer_parity(void) {
+    printf("qwen3-tokenizer-parity\n");
+
+    static qwen3_case cs[SLLM_QWEN3_MAX_CASES];
+    const int n = qwen3_parse(cs, SLLM_QWEN3_MAX_CASES);
+    printf("    qwen3 fixture parsed at least one case\n"); CHECK(n > 0);
+    if (n <= 0) { return; }
+    printf("    %d cases parsed from %s\n", n, SLLM_QWEN3_FIXTURE);
+
+    /* The model path. Env override so the gate can be pointed at any copy. */
+    const char * path = getenv("SLLM_QWEN3_GGUF");
+    if (path == NULL) { path = "/var/lib/spoon/models/qwen3-8b/Qwen3-8B-Q4_K_M.gguf"; }
+
+    sllm_gguf g;
+    char err[256] = "";
+    if (sllm_gguf_open(path, &g, err, sizeof err) != SLLM_OK) {
+        printf("    SKIPPED: cannot open %s (%s)\n", path, err);
+        printf("    NOT a pass. This is an absence of evidence, not evidence of parity.\n");
+        return;
+    }
+
+    sllm_tok * tok = NULL;
+    const sllm_status rc = sllm_tok_load(&g, &tok);
+    printf("    the Qwen3 tokenizer loads and selects the qwen2 splitter\n"); CHECK(rc == SLLM_OK && tok != NULL);
+    if (rc != SLLM_OK || tok == NULL) {
+        printf("    load failed; the loader must have said why in its warning above\n");
+        sllm_gguf_close(&g);
+        return;
+    }
+
+    /* The tuple actually selected, so a failure here is diagnosable. */
+    printf("    selected pre-type = %s (declared \"%s\"), n_vocab = %u, add_bos=%d add_eos=%d\n",
+           sllm_tok_pre_type_name(sllm_tok_pre_type(tok)),
+           sllm_tok_pre_declared(tok),
+           (unsigned) sllm_tok_n_vocab(tok),
+           (int) sllm_tok_add_bos(tok), (int) sllm_tok_add_eos(tok));
+
+    /* add_bos/add_eos must come from the file. If this model asks for neither,
+     * ids are exactly the split output and the fixture needs no unwrapping. */
+    const bool wrapped = sllm_tok_add_bos(tok) || sllm_tok_add_eos(tok);
+
+    int fails = 0, ran = 0;
+    for (int i = 0; i < n; ++i) {
+        const qwen3_case * c = &cs[i];
+        if (c->expect_n < 0) { continue; }
+
+        int32_t got[SLLM_QWEN3_MAX_IDS];
+        const int32_t gn = sllm_tok_encode(tok, c->input, c->input_len, true, true,
+                                           got, SLLM_QWEN3_MAX_IDS);
+        ++ran;
+
+        if (gn != c->expect_n) {
+            printf("    FAIL %-18s token count: got %d, expected %d\n",
+                   c->label, (int) gn, (int) c->expect_n);
+            ++fails; continue;
+        }
+
+        /* Compare the middle, dropping BOS/EOS only if the file asked for them. */
+        int32_t off = 0;
+        if (wrapped && c->expect_n > 0) {
+            off = (sllm_tok_add_bos(tok) && gn > 0) ? 1 : 0;
+        }
+        int bad = 0;
+        for (int k = 0; k < c->expect_n - off; ++k) {
+            if (got[k + off] != c->ids[k]) { bad = 1; break; }
+        }
+        if (bad) {
+            printf("    FAIL %-18s ids differ:", c->label);
+            for (int k = 0; k < c->expect_n; ++k) { printf(" %d", (int) got[k]); }
+            printf("\n");
+            ++fails; continue;
+        }
+
+        /* Empty input must be exactly zero tokens, stated as its own check so
+         * it cannot be satisfied by accident via the count comparison. */
+        if (c->input_len == 0) {
+            printf("    empty input is exactly zero tokens\n"); CHECK(gn == 0);
+            printf("    ok   %-18s 0 tokens\n", c->label);
+            continue;
+        }
+
+        if (c->has_out) {
+            char buf[SLLM_QWEN3_MAX_OUT];
+            const int32_t dn = sllm_tok_decode(tok, got, gn, false, buf, (int32_t) sizeof buf);
+            const size_t dlen = (dn > 0) ? (size_t) dn : 0u;
+            if (dlen != c->out_len || memcmp(buf, c->out, dlen) != 0) {
+                printf("    FAIL %-18s detokenized bytes: got %zu, expected %zu\n",
+                       c->label, dlen, c->out_len);
+                ++fails; continue;
+            }
+        }
+        printf("    ok   %-18s %2d tokens, bytes exact\n", c->label, (int) c->expect_n);
+    }
+
+    printf("    %d cases run, %d failed\n", ran, fails);
+    printf("    every Qwen3 fixture matches llama.cpp exactly\n"); CHECK(fails == 0);
+    printf("    at least 20 fixtures actually ran\n"); CHECK(ran >= 20);
+
+    sllm_tok_free(tok);
+    sllm_gguf_close(&g);
+}
+
 void sllm_test_tokenizer(void) {
     printf("tokenizer\n");
     RUN(tokenizer_matches_the_reference_token_for_token);
@@ -645,4 +856,5 @@ void sllm_test_tokenizer(void) {
     RUN(regression_whitespace_is_a_list_not_a_category);
     RUN(regression_byte_encoding_returns_a_utf8_encoding_not_a_byte);
     RUN(regression_bpe_rejects_stale_bigrams);
+    run_qwen3_tokenizer_parity();
 }

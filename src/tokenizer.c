@@ -1045,7 +1045,7 @@ static void split_qwen2(const uint32_t * cp, const u32vec * segs, u32vec * out) 
                 size_t at = pos;
                 if (prefixable) {
                     if (pos + 1 >= end || !(sllm_uni_flags(cp[pos + 1]) & SLLM_UNI_LETTER)) {
-                        goto not_letters;   /* the optional part is not optional enough */
+                        goto not_letters;
                     }
                     at = pos + 1;
                 } else if (!(fl & SLLM_UNI_LETTER)) {
@@ -1070,8 +1070,18 @@ static void split_qwen2(const uint32_t * cp, const u32vec * segs, u32vec * out) 
                 continue;
             }
 
-            /* ?[^\s\p{L}\p{N}]+[\r\n]* */
-            if (!(fl & (SLLM_UNI_WHITESPACE | SLLM_UNI_LETTER | SLLM_UNI_NUMBER)) && fl != 0) {
+            /* ?[^\s\p{L}\p{N}]+[\r\n]*
+             *
+             * The optional space is PART OF THE MATCH, so the class guard has to
+             * be tested against the character AFTER it. Testing the space itself
+             * makes the whole branch unreachable for a space-led run, which
+             * splits every " (" into " " and "(" and, worse, changes the BPE
+             * result downstream because the pretoken boundary moved. */
+            {
+                const uint16_t fl2 = (cpt == ' ')
+                    ? ((pos + 1 < end) ? sllm_uni_flags(cp[pos + 1]) : 0u)
+                    : fl;
+                if (!(fl2 & (SLLM_UNI_WHITESPACE | SLLM_UNI_LETTER | SLLM_UNI_NUMBER)) && fl2 != 0) {
                 size_t at = (cpt == ' ') ? pos + 1 : pos;
                 while (at < end) {
                     const uint16_t f2 = sllm_uni_flags(cp[at]);
@@ -1083,6 +1093,7 @@ static void split_qwen2(const uint32_t * cp, const u32vec * segs, u32vec * out) 
                 pos = at;
                 ADD_TOKEN(pos);
                 continue;
+                }
             }
 
             /* \s*[\r\n]+ : whitespace ending in a newline run. Greedy \s* then
@@ -1433,7 +1444,9 @@ int32_t sllm_tok_encode_pre(const sllm_tok * t, sllm_pre_type pre,
                             bool add_special, bool parse_special,
                             int32_t * out, int32_t cap) {
     if (t == NULL || (text == NULL && text_len > 0)) { return SLLM_ERR_ARG; }
-    if (pre != SLLM_PRE_UNSET && pre != SLLM_PRE_GPT2) { return SLLM_ERR_UNSUPPORTED; }
+    if (pre != SLLM_PRE_UNSET && pre != SLLM_PRE_GPT2 && pre != SLLM_PRE_QWEN2) {
+        return SLLM_ERR_UNSUPPORTED;
+    }
     if (cap <= 0) { return 0; }
 
     int32_t n = 0;
@@ -1549,7 +1562,9 @@ int32_t sllm_tok_decode(const sllm_tok * t, const int32_t * tokens, int32_t n,
 sllm_status sllm_tok_pretokenize(sllm_pre_type pre, const char * text, size_t text_len,
                                  char * out, size_t cap, int32_t * n_out) {
     if (out == NULL || n_out == NULL) { return SLLM_ERR_ARG; }
-    if (pre != SLLM_PRE_UNSET && pre != SLLM_PRE_GPT2) { return SLLM_ERR_UNSUPPORTED; }
+    if (pre != SLLM_PRE_UNSET && pre != SLLM_PRE_GPT2 && pre != SLLM_PRE_QWEN2) {
+        return SLLM_ERR_UNSUPPORTED;
+    }
     *n_out = 0;
 
     uint32_t * cp = NULL;
