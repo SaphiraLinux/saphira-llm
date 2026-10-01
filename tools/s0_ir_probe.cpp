@@ -162,6 +162,18 @@ static bool sllm_ok(gguf_context * g, const std::string & k, uint32_t * out) {
     *out = gguf_get_val_u32(g, id);
     return true;
 }
+/* File-scope LAYER-LOCAL tensor index. Every emitter asks AT(role, layer):
+ * does THIS tensor exist AT THIS LAYER. The earlier model-global question,
+ * "does this role exist somewhere", is what let SelectiveScan and Attention be
+ * emitted on layers that have neither. A file-scope set (rather than a macro
+ * local to main) is required because emitters live in separate functions. */
+static std::set<std::string> g_at_layer;
+static bool AT(const std::string & role, int layer) {
+    return g_at_layer.count("blk." + std::to_string(layer) + "." + role) > 0;
+}
+
+static bool is_moe_at(int layer) { return AT("ffn_gate_inp.weight", layer); }
+
 static bool kv_f32(gguf_context * g, const std::string & k, double * out) {
     const int64_t id = gguf_find_key(g, k.c_str());
     if (id < 0) { return false; }
@@ -175,15 +187,6 @@ static bool kv_f32(gguf_context * g, const std::string & k, double * out) {
  * legitimate quantity: it says the quantity VARIES BY LAYER. Reading it as a
  * scalar aborts the probe inside ggml, so the type is checked before decoding
  * and an array is reported rather than coerced. */
-/* File-scope LAYER-LOCAL tensor index. Every emitter asks AT(role, layer):
- * does THIS tensor exist AT THIS LAYER. The earlier model-global question,
- * "does this role exist somewhere", is what let SelectiveScan and Attention be
- * emitted on layers that have neither. A file-scope set (rather than a macro
- * local to main) is required because emitters live in separate functions. */
-static std::set<std::string> g_at_layer;
-static bool AT(const std::string & role, int layer) {
-    return g_at_layer.count("blk." + std::to_string(layer) + "." + role) > 0;
-}
 
 static std::vector<std::string> kv_arrays_seen;
 static bool kv_is_array(gguf_context * g, const std::string & k, long * n_out) {
@@ -414,7 +417,15 @@ int main(int argc, char ** argv) {
       if (e >= 0) { n_experts = (long) gguf_get_val_u32(g, e); }
       const int64_t u = gguf_find_key(g, (P + "expert_used_count").c_str());
       if (u >= 0) { n_used = (long) gguf_get_val_u32(g, u); } }
-    const bool is_moe = (dims.count("ffn_gate_inp.weight") > 0);
+    /* MoE LOCALITY. This was a MODEL-GLOBAL test: a router tensor in ANY layer
+     * licensed ExpertRouter and ExpertGatedFFN for EVERY layer. On a model with
+     * experts in only some layers that fabricates a router where none exists. The
+     * same rule as Attention, SelectiveScan and GatedMLP: presence is evidence
+     * ONLY AT ITS OWN LAYER. Verified by a non-vacuity assertion that strips the
+     * router from one OLMoE layer and requires both MoE ops to vanish THERE. */
+    /* Defined before the layer loop, so it must be a FUNCTION of the layer
+     * rather than a value captured from one. */
+
 
     /* ---- OBSERVABILITY: what this instrument can and cannot see ----
      *
@@ -1202,7 +1213,7 @@ int main(int argc, char ** argv) {
     /* MoE is NOT squeezed into GatedMLP. The router and the expert bank are
      * different mathematics from a dense gated MLP: a router produces a top-k
      * selection over experts, and the FFN runs only on the chosen subset. */
-    if (is_moe) {
+    if (is_moe_at(L)) {
         { ir_node r = mk(IR_ROUTER, L);
           r.tensor = "ffn_gate_inp.weight";
           r.in_features = dims["ffn_gate_inp.weight"].first;

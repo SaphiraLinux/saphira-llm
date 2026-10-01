@@ -45,7 +45,13 @@ rms_eps=9.99999997e-07 rope_base=-1
         - NO output.weight tensor exists in the inventory -- this is EVIDENCE, not proof, and on its own it does not establish sharing
         - sharing=weights ARE shared: reads token_embd.weight MEASURED from the reference graph: the final MUL_MAT's src[0] weight tensor was read by name, and it is token_embd.weight. Weight sharing is a question about which tensor the projection READS, not about whether dimensions match.
 
--- LAYER 0 (representative body) --
+-- LAYER TOPOLOGY (measured from tensor names) --
+  layer count = 26   distinct bodies = 1
+  FFN+                       layers 26  indices: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25
+    verdict: UNIFORM -- every layer shares one body.
+  an op present in SOME layers must NOT be emitted for every layer.
+
+-- LAYER 0 (body FFN+, first of 1 distinct) --
   RMSNorm            layer=0    blk.0.attn_norm.weight
       type            : f32
       norm width      : 2304   bias=false
@@ -154,7 +160,7 @@ rms_eps=9.99999997e-07 rope_base=-1
   RoPE               layer=0    (computed)
       head_dim=256  heads=8  kv_heads=4
       pairing         : NEOX   [MEASURED from reference graph]
-      base            : 10000
+      base            : -1
       dim_count       : -1
       scaling         : none
       position_source : position index (pos), from inp_pos
@@ -165,8 +171,7 @@ rms_eps=9.99999997e-07 rope_base=-1
         - gemma2.rope.scaling.type=none
         - pairing=NEOX MEASURED from the reference graph: the ROPE node located by ggml op, its immediate producer snapshotted, both pairing hypotheses tested numerically
         - not derived from general.architecture; the two models differ here despite both being decoder-only transformers
-        - rope_base = 10000  [MEASURED from the reference path: the artefact has NO base key and NO precomputed table, and the reference sets this default and overrides it only if the key is present, so the default stands]
-        - this is the REFERENCE default, so it is a statement about this artefact under this reference, not a universal claim
+      UNRESOLVED      : rope_base UNRESOLVED from the ARTEFACT: no gemma2.rope.freq_base key AND no precomputed rope_freqs table in this file. NOT assumed to be 10000, and NOT taken from the upstream paper or the HuggingFace config, which report 10000 but describe a different artefact. Supply SLLM_IR_ROPE_BASE_DEFAULT only to record the REFERENCE default as reference evidence, which is a different provenance class.
   GatedMLP           layer=0    ffn_gate.weight + ffn_up.weight + ffn_down.weight
       in/out features : 2304 / 9216
       scope           : gated (SwiGLU-family): gate and up share out_features, down returns to in_features

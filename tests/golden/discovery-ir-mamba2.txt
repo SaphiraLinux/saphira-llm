@@ -44,7 +44,13 @@ rms_eps=9.99999975e-06 rope_base=-1
         - a DISTINCT output tensor exists => weights are NOT shared with the embedding, whatever the dimensions happen to be
         - mamba2.embedding_length=768 vs output in_features=768 (dimensions match, weights still separate)
 
--- LAYER 0 (representative body) --
+-- LAYER TOPOLOGY (measured from tensor names) --
+  layer count = 24   distinct bodies = 1
+  SSM+                       layers 24  indices: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23
+    verdict: UNIFORM -- every layer shares one body.
+  an op present in SOME layers must NOT be emitted for every layer.
+
+-- LAYER 0 (body SSM+, first of 1 distinct) --
   RMSNorm            layer=0    blk.0.attn_norm.weight
       type            : f32
       norm width      : 768   bias=false
@@ -79,8 +85,10 @@ rms_eps=9.99999975e-06 rope_base=-1
   Attention          layer=0    (none)
       status          : ABSENT -- head_count is 0 and there is no Q, K or V
                        projection and no KV cache to attend over
-      evidence        : MEASURED -- an Attention node without projections would be
-                       structure invented from an architecture name.
+      evidence        : MEASURED -- no Q, K or V projection exists AT THIS LAYER.
+                       head_count=140732796968656 is model-global metadata and does NOT license an
+                       Attention node here: an op present in SOME layers must not be
+                       emitted for every layer.
   Linear             layer=0    blk.0.attn_q.weight
       status          : ABSENT -- no tensor by this name in this architecture
       evidence        : MEASURED -- the role is not in the inventory, so NO node is
@@ -108,8 +116,10 @@ rms_eps=9.99999975e-06 rope_base=-1
                        is none. Emitting a RoPE node would invent one.
   GatedMLP           layer=0    (none)
       status          : ABSENT -- feed_forward_length is 0 and no FFN tensor exists
-      evidence        : MEASURED -- this architecture has no position-wise feed-forward
-                       block at all, so no gated MLP is emitted
+      evidence        : MEASURED -- NO FFN TENSOR EXISTS AT THIS LAYER, so no gated MLP is
+                       emitted. Presence elsewhere in the model does not license it
+                       here: an op present in SOME layers must not be emitted for every
+                       layer, and that rule is enforced layer-locally.
   DepthwiseConv1D    layer=0    blk.0.ssm_conv1d.weight
       type            : f32
       in/out features : 4 / 1792

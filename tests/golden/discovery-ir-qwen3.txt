@@ -44,7 +44,13 @@ rms_eps=9.99999997e-07 rope_base=1000000
         - a DISTINCT output tensor exists => weights are NOT shared with the embedding, whatever the dimensions happen to be
         - qwen3.embedding_length=4096 vs output in_features=4096 (dimensions match, weights still separate)
 
--- LAYER 0 (representative body) --
+-- LAYER TOPOLOGY (measured from tensor names) --
+  layer count = 36   distinct bodies = 1
+  ATTN+                      layers 36  indices: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35
+    verdict: UNIFORM -- every layer shares one body.
+  an op present in SOME layers must NOT be emitted for every layer.
+
+-- LAYER 0 (body ATTN+, first of 1 distinct) --
   RMSNorm            layer=0    blk.0.attn_norm.weight
       type            : f32
       norm width      : 4096   bias=false

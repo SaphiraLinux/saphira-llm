@@ -449,6 +449,41 @@ if [ -f "$NH" ]; then
   cp /tmp/ir7.bak tools/s0_ir_probe.cpp
 fi
 
+# ---- Q: MoE LAYER-LOCALITY negatives (added BEFORE any hybrid-MoE support) ----
+OL=/var/lib/spoon/models/olmoe-1b7b/olmoe-q4_k_m.gguf
+if [ -f "$OL" ]; then
+  P1="NEOX" HD="128" ROUT="argsort_top_k, then softmax over the SELECTED weights" RS="" RB="" \
+    ./tools/run_s0_probe.sh tools/s0_ir_probe.cpp "$OL" > /tmp/q_moe.txt 2>/dev/null
+  # Positive half first: on a model where experts ARE everywhere, both ops emit.
+  grep -qE '^  ExpertRouter +layer=0 ' /tmp/q_moe.txt
+  if [ $? -eq 0 ]; then ok "Q1 ExpertRouter emits where the router exists" 0; else ok "Q1 ExpertRouter emits where the router exists" 1; fi
+  grep -qE '^  ExpertGatedFFN +layer=0 ' /tmp/q_moe.txt
+  if [ $? -eq 0 ]; then ok "Q2 ExpertGatedFFN emits where experts exist" 0; else ok "Q2 ExpertGatedFFN emits where experts exist" 1; fi
+  # LAYER-LOCAL NEGATIVE, by non-vacuity: strip expert tensors from ONE layer.
+  # The router is present in 23 other layers, so a MODEL-GLOBAL gate stays open and
+  # both MoE ops would still be emitted there. Requiring them to vanish proves the
+  # gate is layer-local. This is the assertion the user required before support.
+  cp tools/s0_ir_probe.cpp /tmp/ir8.bak
+  sed -i 's|g_at_layer.insert("blk." + idx + "." + tn_.substr(d2 + 1));|{ std::string rr = "blk." + idx + "." + tn_.substr(d2 + 1); if (rr.compare(0,6,"blk.5.") != 0) g_at_layer.insert(rr); }|' tools/s0_ir_probe.cpp
+  P1="NEOX" HD="128" ROUT="argsort_top_k, then softmax over the SELECTED weights" RS="" RB="" \
+    ./tools/run_s0_probe.sh tools/s0_ir_probe.cpp "$OL" > /tmp/q_moev.txt 2>/dev/null
+  grep -qE '^  ExpertRouter +layer=5 ' /tmp/q_moev.txt
+  if [ $? -ne 0 ]; then ok "Q3 router absent at layer 5 -> ExpertRouter absent THERE" 0; else ok "Q3 router absent at layer 5 -> ExpertRouter absent THERE" 1; fi
+  grep -qE '^  ExpertGatedFFN +layer=5 ' /tmp/q_moev.txt
+  if [ $? -ne 0 ]; then ok "Q4 experts absent at layer 5 -> ExpertGatedFFN absent THERE" 0; else ok "Q4 experts absent at layer 5 -> ExpertGatedFFN absent THERE" 1; fi
+  # ...and the ops must REMAIN at a layer that still has them, or the negatives
+  # would pass on an emitter that emits nothing anywhere.
+  grep -qE '^  ExpertRouter +layer=0 ' /tmp/q_moev.txt
+  if [ $? -eq 0 ]; then ok "Q5 layer 0 still emits ExpertRouter (negatives not vacuous)" 0; else ok "Q5 layer 0 still emits ExpertRouter (negatives not vacuous)" 1; fi
+  # OLMoE is UNIFORM, so only layer 0 is emitted as the single body
+  # representative and layer 6 is never emitted at all. Assert on the layer that
+  # is emitted; the point stands, which is that stripping one layer's experts did
+  # not silence the ops everywhere.
+  grep -qE '^  ExpertGatedFFN +layer=0 ' /tmp/q_moev.txt
+  if [ $? -eq 0 ]; then ok "Q6 emitted body still emits ExpertGatedFFN" 0; else ok "Q6 emitted body still emits ExpertGatedFFN" 1; fi
+  cp /tmp/ir8.bak tools/s0_ir_probe.cpp
+fi
+
 echo
 echo "discovery-ir structural tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
