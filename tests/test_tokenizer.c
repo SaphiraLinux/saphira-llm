@@ -921,7 +921,7 @@ TEST(pre_qwen2_newline_runs_stay_together) {
     pretoken_qwen2_expect("a \n \nb", "a\000 \n \n\000b",
                           "whitespace before a newline run stays with it");
     pretoken_qwen2_expect("a   ", "a\000  ", "trailing spaces: all but one");
-    pretoken_qwen2_expect("a  b", "a\000\xC4\xA0\000\xC4\xA0b", "the last space leads the next word");
+    pretoken_qwen2_expect("a  b", "a\000\xC4\xA0\000\xC4\xA0" "b", "the last space leads the next word");
 }
 
 TEST(pre_qwen2_contractions_are_case_insensitive) {
@@ -937,7 +937,7 @@ TEST(pre_qwen2_contractions_are_case_insensitive) {
     pretoken_qwen2_expect("I'm",    "I\000'm",   "m form");
     pretoken_qwen2_expect("they've","they\000've","ve form");
     /* A lone apostrophe is not a contraction and falls to punctuation. */
-    pretoken_qwen2_expect("'s alone", "'s\000\xC4\xA0alone", "a contraction still binds when it stands alone");
+    pretoken_qwen2_expect("'s alone", "'s\000\xC4\xA0" "alone", "a contraction still binds when it stands alone");
 }
 
 TEST(pre_qwen2_punctuation_boundaries_and_space_ownership) {
@@ -945,7 +945,7 @@ TEST(pre_qwen2_punctuation_boundaries_and_space_ownership) {
     /* The optional leading space is part of the punctuation match, so " (" is
      * one piece. Testing the guard against the space instead made it two, which
      * is the bug that failed four fixtures. */
-    pretoken_qwen2_expect("a, b", "a\000,\000\xC4\xA0b", "comma then space-led word");
+    pretoken_qwen2_expect("a, b", "a\000,\000\xC4\xA0" "b", "comma then space-led word");
     pretoken_qwen2_expect(" (",   "\xC4\xA0(",  "a space belongs to the punctuation run");
     pretoken_qwen2_expect("a <b>", "a\000\xC4\xA0<\000b\000>", "angle brackets split");
     pretoken_qwen2_expect("!x",    "!x",  "punct-then-letters is ONE piece under [^^\\r\\n\\p{L}\\p{N}]?\\p{L}+");
