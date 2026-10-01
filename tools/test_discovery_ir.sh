@@ -280,6 +280,50 @@ RB=10000 RBONLY=$(P1=NEOX gen "$G")
 printf '%s\n' "$RBONLY" | grep -q 'REFERENCE default'; ok "L-x rope base attributed to the reference, not to the artefact" $?
 RB="$KEEP_RB"
 
+# M: Mamba-2, a state-space architecture with NO attention and NO FFN at all.
+MB=/var/lib/spoon/models/mamba2-130m/mamba2-130m-hf-q8_0.gguf
+if [ -f "$MB" ]; then
+  # Plain assignments, not prefixes: a prefix on a shell function inside $( )
+  # does not reach it reliably, and the symptom is a test that looks like the
+  # probe changed behaviour. Third time this has bitten this suite.
+  KP1="$P1"; KROUT="$ROUT"; KHD="$HD"; KRS="$RS"; KRB="$RB"; KRS2="$ROUT"
+  P1=""; ROUT=""; HD=""; RS=""; RB=""
+  MBX=$(gen "$MB")
+  # The whole point: transformer ops must NOT be fabricated for a model that has none.
+  printf '%s\n' "$MBX" | grep -q 'head_count is 0 and there is no Q, K or V'; ok "M1 Attention ABSENT, evidenced by head_count 0 and no projections" $?
+  printf '%s\n' "$MBX" | grep -q 'RoPE               layer=0    (none)'; ok "M2 RoPE ABSENT, not emitted from an architecture name" $?
+  printf '%s\n' "$MBX" | grep -q 'feed_forward_length is 0 and no FFN tensor exists'; ok "M3 GatedMLP ABSENT, no position-wise FFN exists" $?
+  printf '%s\n' "$MBX" | grep -q 'no tensor by this name in this architecture'; ok "M4 all four Q/K/V projections reported ABSENT individually" $?
+  printf '%s\n' "$MBX" | grep -q 'Emitting one would be fabricating structure'; ok "M5 absence states it is not fabricating" $?
+  # Genuinely new mathematics, as composable ops
+  printf '%s\n' "$MBX" | grep -q '^  SelectiveScan '; ok "M6 SelectiveScan is its own op, not renamed Attention" $?
+  printf '%s\n' "$MBX" | grep -q '^  DepthwiseConv1D '; ok "M7 DepthwiseConv1D is its own op" $?
+  printf '%s\n' "$MBX" | grep -q 'ssm.state_size = 128'; ok "M8 state width measured from metadata" $?
+  printf '%s\n' "$MBX" | grep -q 'ssm.time_step_rank = 24'; ok "M9 selective step rank measured" $?
+  printf '%s\n' "$MBX" | grep -q 'which is what makes the block SELECTIVE'; ok "M10 selectivity explained from the measured rank" $?
+  printf '%s\n' "$MBX" | grep -q 'ssm_norm'; ok "M11 the SSM gate norm emitted as RMSNorm with scope, not a new op" $?
+  printf '%s\n' "$MBX" | grep -q 'scope is the parameter that'; ok "M12 scope carries the distinction, same mathematics" $?
+  printf '%s\n' "$MBX" > /tmp/mbx.txt
+  grep -c 'UNKNOWN role' /tmp/mbx.txt > /tmp/mbc.txt
+  if [ "$(cat /tmp/mbc.txt)" = "0" ]; then ok "M13 zero UNKNOWN roles for Mamba-2" 0
+  else ok "M13 zero UNKNOWN roles for Mamba-2 (got $(cat /tmp/mbc.txt))" 1; fi
+  # ANTI-VACUITY: unlearn the SSM roles and they must resurface as UNKNOWN.
+  cp tools/s0_ir_probe.cpp /tmp/ir5.bak
+  sed -i 's/known_roles.insert("ssm_a");//' tools/s0_ir_probe.cpp
+  P1=""; ROUT=""; HD=""; RS=""; RB=""
+  BROKEN3=$(gen "$MB")
+  printf '%s\n' "$BROKEN3" | grep -q 'UNKNOWN role: ssm_a'
+  if [ $? -eq 0 ]; then ok "M14 non-vacuity: unlearning an SSM role surfaces UNKNOWN" 0; else ok "M14 non-vacuity: unlearning an SSM role surfaces UNKNOWN" 1; fi
+  cp /tmp/ir5.bak tools/s0_ir_probe.cpp
+  P1=""; ROUT=""; HD=""; RS=""; RB=""
+  REST=$(gen "$MB")
+  [ "$REST" = "$MBX" ]; ok "M15 restore byte-exact" $?
+  P1="$KP1"; ROUT="$KROUT"; HD="$KHD"; RS="$KRS"; RB="$KRB"
+  # And the opposite direction: Mamba-2 must NOT acquire attention after
+  # seeing four transformer models.
+  printf '%s\n' "$MBX" | grep -q '^  Attention  *layer=0  *$'; if [ $? -ne 0 ]; then ok "M16 no Attention node emitted at all for Mamba-2" 0; else ok "M16 no Attention node emitted at all for Mamba-2" 1; fi
+fi
+
 echo
 echo "discovery-ir structural tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

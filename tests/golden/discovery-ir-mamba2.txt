@@ -1,0 +1,141 @@
+compiling (quiet)
+running fresh binary
+=== DISCOVERY IR for /var/lib/spoon/models/mamba2-130m/mamba2-130m-hf-q8_0.gguf ===
+architecture (from general.architecture) = mamba2
+block_count=24 embedding_length=768 ffn_length=0 heads=0 kv_heads=-1
+key_length=-1 value_length=-1 rope_dimension_count=-1
+rms_eps=9.99999975e-06 rope_base=-1
+  TokenizerSelector (model)  tokenizer.ggml.{model,pre,tokens}
+      evidence        : MEASURED
+        - leg model   = "gpt2"
+        - leg pre     = "olmo"
+        - leg tokens  = 50288
+        - no mamba2.vocab_size metadata key: that ROUTE is unavailable, which is not the same as validation being impossible
+        - tokenizer_token_count = 50288   [ARTEFACT MEASURED]
+        - embedding_row_count   = 50288   [ARTEFACT MEASURED]: the physical capacity token ids index
+        - output_projection_rows= 50288   [ARTEFACT MEASURED] (untied: a distinct output.weight exists)
+        - RELATION: tokenizer_token_count == embedding_rows, EXACT MATCH, no padding  [MEASURED outcome]
+      NOTE            : model alone is NOT a sufficient selector; Qwen3 declares
+                        model=gpt2 while requiring pre=qwen2.
+      VOCAB DIMENSIONS ARE DISTINCT QUANTITIES, not one scalar: token count is
+                        how many tokens the tokenizer lists, embedding rows are the
+                        physical capacity ids index, and output rows are the head
+                        capacity. Equality between them is a MEASURED OUTCOME, not an
+                        invariant of this vocabulary, and a padded vocabulary is a
+                        DESIGN rather than a defect.
+      EXTERNAL UPSTREAM INFORMATION MAY NOT UPGRADE AN ABSENT FIELD TO MEASURED.
+                        A web search reports Gemma-2 rope_theta 10000 and OLMoE built
+                        with vocab_size = tokenizer.padded_vocab_size(); both may be
+                        true of those upstream configs, and neither is a reading of
+                        THESE files.
+
+-- MODEL SCOPE --
+  Embedding          (model)     token_embd.weight
+      type            : q8_0
+      in/out features : 768 / 50288
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor token_embd.weight present, ne=[768,50288]
+        - tokenizer.ggml.tokens n=50288
+  OutputProjection   (model)     output.weight
+      type            : q8_0
+      in/out features : 768 / 50288
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor output.weight present, ne=[768,50288]
+        - a DISTINCT output tensor exists => weights are NOT shared with the embedding, whatever the dimensions happen to be
+        - mamba2.embedding_length=768 vs output in_features=768 (dimensions match, weights still separate)
+
+-- LAYER 0 (representative body) --
+  RMSNorm            layer=0    blk.0.attn_norm.weight
+      type            : f32
+      norm width      : 768   bias=false
+      epsilon         : 9.99999975e-06
+      evidence        : MEASURED (read from artefact/reference graph)
+        - mamba2.attention.layer_norm_rms_epsilon=0.000010
+        - ne=[4096,1] i.e. width == embedding_length => reduces the residual
+        - blk.0.attn_norm.bias ABSENT => bias=false
+        - qwen3/Llama graph applies it to the residual before the QKV projection
+  RMSNorm            layer=0    blk.0.ffn_norm.weight
+      norm width      : 0   bias=false
+      epsilon         : 9.99999975e-06
+      evidence        : MEASURED (read from artefact/reference graph)
+        - ne=[4096,1] => width == embedding_length
+        - applied to the post-attention residual before the FFN
+  RMSNorm            layer=0    blk.0.attn_q_norm.weight
+      status          : ABSENT for this architecture
+      evidence        : MEASURED -- tensor not present in the inventory,
+                       and not present in ANY layer (0 of 24)
+      NOTE            : ABSENT is not UNKNOWN. Absent means looked-and-
+                       not-there; UNKNOWN means could-not-determine.
+  RMSNorm            layer=0    blk.0.attn_k_norm.weight
+      status          : ABSENT for this architecture
+      evidence        : MEASURED -- tensor not present in the inventory,
+                       and not present in ANY layer (0 of 24)
+      NOTE            : ABSENT is not UNKNOWN. Absent means looked-and-
+                       not-there; UNKNOWN means could-not-determine.
+  SoftCap            layer=0    (none)
+      status          : ABSENT (no softcapping keys in metadata)
+      evidence        : MEASURED -- both keys absent from 35 kv pairs
+  Attention          layer=0    (none)
+      status          : ABSENT -- head_count is 0 and there is no Q, K or V
+                       projection and no KV cache to attend over
+      evidence        : MEASURED -- an Attention node without projections would be
+                       structure invented from an architecture name.
+  Linear             layer=0    blk.0.attn_q.weight
+      status          : ABSENT -- no tensor by this name in this architecture
+      evidence        : MEASURED -- the role is not in the inventory, so NO node is
+                       emitted. Emitting one would be fabricating structure from a
+                       name.
+  Linear             layer=0    blk.0.attn_k.weight
+      status          : ABSENT -- no tensor by this name in this architecture
+      evidence        : MEASURED -- the role is not in the inventory, so NO node is
+                       emitted. Emitting one would be fabricating structure from a
+                       name.
+  Linear             layer=0    blk.0.attn_v.weight
+      status          : ABSENT -- no tensor by this name in this architecture
+      evidence        : MEASURED -- the role is not in the inventory, so NO node is
+                       emitted. Emitting one would be fabricating structure from a
+                       name.
+  Linear             layer=0    blk.0.attn_output.weight
+      status          : ABSENT -- no tensor by this name in this architecture
+      evidence        : MEASURED -- the role is not in the inventory, so NO node is
+                       emitted. Emitting one would be fabricating structure from a
+                       name.
+  RoPE               layer=0    (none)
+      status          : ABSENT -- no Q or K projection exists to rotate, and no
+                       rope frequency table is shipped
+      evidence        : MEASURED -- RoPE is a property of an attention block, and there
+                       is none. Emitting a RoPE node would invent one.
+  GatedMLP           layer=0    (none)
+      status          : ABSENT -- feed_forward_length is 0 and no FFN tensor exists
+      evidence        : MEASURED -- this architecture has no position-wise feed-forward
+                       block at all, so no gated MLP is emitted
+  DepthwiseConv1D    layer=0    blk.0.ssm_conv1d.weight
+      type            : f32
+      in/out features : 4 / 1792
+      evidence        : MEASURED (read from artefact/reference graph)
+        - mamba2.ssm.conv_kernel = 4   [ARTEFACT MEASURED]
+        - ssm_conv1d.weight ne[0]=4, which agrees with conv_kernel: the weights ARE the kernel taps
+        - ne[1]=1792 channels with a matching ssm_conv1d.bias, one bias per channel: that is what makes it DEPTHWISE rather than a dense convolution
+        - convolved over SEQUENCE, not over an attention axis
+  RMSNorm            layer=0    blk.0.ssm_norm.weight
+      type            : f32
+      norm width      : 1536   bias=false
+      epsilon         : -1
+      evidence        : MEASURED (read from artefact/reference graph)
+        - ssm_norm.weight ne=[1536,1]   [ARTEFACT MEASURED]
+        - width 1536 == ssm.inner_size 1536, not embedding_length, so it gates the INNER space rather than the residual  [MEASURED comparison]
+        - SAME RMSNorm op as the residual norms; scope is the parameter that distinguishes it, not a different mathematics
+  SelectiveScan      layer=0    ssm_in -> ssm_out with ssm_a, ssm_d and an input-derived step size
+      evidence        : MEASURED (read from artefact/reference graph)
+        - mamba2.ssm.state_size = 128   [ARTEFACT MEASURED]: the recurrent state width
+        - mamba2.ssm.inner_size = 1536   [ARTEFACT MEASURED]
+        - mamba2.ssm.time_step_rank = 24   [ARTEFACT MEASURED]: the step size is COMPUTED FROM THE INPUT by projecting the sequence to this rank, which is what makes the block SELECTIVE rather than a fixed-step recurrence
+        - mamba2.ssm.group_count = 1   [ARTEFACT MEASURED]
+        - ssm_a ne=[1,24]   [ARTEFACT MEASURED]: per-head state transition, one row per state dimension
+        - ssm_d ne=[1,24]   [ARTEFACT MEASURED]: per-head skip coefficient, so the recurrence carries a direct term as well as the state
+        - ssm_in.weight ne=[768,3352]: projects the residual into the inner space, mixing the state and step-size paths
+        - ssm_out.weight ne=[1536,768]: projects back out
+        - NO attention mathematics anywhere in this block: no Q, no K, no softmax over keys, no KV cache. A recurrence over a carried state is DIFFERENT mathematics, so it gets its own composable op rather than being renamed Attention
+
+-- PER-LAYER ROLE COVERAGE (all layers identical?) --
+  layers seen=24  distinct roles=9  every layer has the same role set: YES

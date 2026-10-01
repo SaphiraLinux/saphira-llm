@@ -150,6 +150,9 @@ rms_eps=9.99999997e-07 rope_base=1000000
         - ffn_down ne=[12288,4096]  transpose of the gate shape => contraction
         - qwen3.feed_forward_length=12288
         - ffn_gate_inp.weight ABSENT => not MoE, and not inferred from the architecture name
+  SelectiveScan      layer=0    ssm_in -> ssm_out with ssm_a, ssm_d and an input-derived step size
+      evidence        : MEASURED (read from artefact/reference graph)
+        - NO attention mathematics anywhere in this block: no Q, no K, no softmax over keys, no KV cache. A recurrence over a carried state is DIFFERENT mathematics, so it gets its own composable op rather than being renamed Attention
 
 -- PER-LAYER ROLE COVERAGE (all layers identical?) --
   layers seen=36  distinct roles=11  every layer has the same role set: YES

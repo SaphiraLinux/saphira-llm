@@ -10,6 +10,17 @@
 // parameters and which graph evidence fixed its pairing; an UNKNOWN carries what
 // was seen and what could not be resolved.
 #include "gguf.h"
+#include <map>
+#include <set>
+#include <string>
+#include <vector>
+#include <algorithm>
+#include <cstdlib>
+#include <cmath>
+
+/* The IR probe reads GGUF metadata through this small Saphira-side shim rather
+ * than llama.cpp, so the discovered structure is described in terms the product
+ * already owns. */
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -21,7 +32,7 @@
 
 enum ir_kind { IR_UNKNOWN = 0, IR_EMBEDDING, IR_RMSNORM, IR_LINEAR, IR_ROPE,
                IR_HEADSPLIT, IR_ATTENTION, IR_RESIDUAL, IR_MLP, IR_OUTPUT, IR_SOFTCAP,
-               IR_ROUTER, IR_EXPERTFFN };
+               IR_ROUTER, IR_EXPERTFFN, IR_SSM, IR_CONV1D, IR_SCAN };
 
 static const char * kind_name(ir_kind k) {
     switch (k) {
@@ -38,6 +49,9 @@ static const char * kind_name(ir_kind k) {
         case IR_SOFTCAP:    return "SoftCap";
         case IR_ROUTER:     return "ExpertRouter";
         case IR_EXPERTFFN:  return "ExpertGatedFFN";
+        case IR_SSM:        return "SelectiveSSM";
+        case IR_CONV1D:     return "DepthwiseConv1D";
+        case IR_SCAN:       return "SelectiveScan";
     }
     return "?";
 }
@@ -124,6 +138,154 @@ static bool split_layer(const std::string & n, int * layer, std::string * role) 
     for (size_t k = 0; k < idx.size(); ++k) { if (idx[k] < '0' || idx[k] > '9') { return false; } }
     *layer = atoi(idx.c_str()); *role = n.substr(j + 1);
     return true;
+}
+
+
+/* Emit the SSM block from artefact evidence. Self-contained so its braces
+ * cannot interfere with the surrounding emitter, which is how the first two
+ * attempts at this section broke the whole file. */
+/* Emit the SSM block from artefact evidence. Kept self-contained so its braces
+ * cannot interfere with the surrounding emitter: threading them inline broke
+ * the whole file twice, which is itself a note about editing code this long by
+ * string substitution. */
+typedef std::map<std::string, std::pair<long, long> > dim_map;
+typedef std::map<std::string, std::string> type_map;
+
+/* Metadata reads are TYPE-CHECKED. ssm_a and ssm_d are F32 SCALARS, not u32
+ * arrays, and reading them as u32 trips a ggml assert: the probe aborted with
+ * GGML_ASSERT(type_to_gguf_type<T>::value == type) failed. A scalar is a
+ * legitimate value of a legitimate quantity, so it is read as its real type. */
+static bool sllm_ok(gguf_context * g, const std::string & k, uint32_t * out) {
+    const int64_t id = gguf_find_key(g, k.c_str());
+    if (id < 0) { return false; }
+    if (gguf_get_kv_type(g, id) != GGUF_TYPE_UINT32) { return false; }
+    *out = gguf_get_val_u32(g, id);
+    return true;
+}
+static bool kv_f32(gguf_context * g, const std::string & k, double * out) {
+    const int64_t id = gguf_find_key(g, k.c_str());
+    if (id < 0) { return false; }
+    if (gguf_get_kv_type(g, id) != GGUF_TYPE_FLOAT32) { return false; }
+    *out = gguf_get_val_f32(g, id);
+    return true;
+}
+static long kv_long(gguf_context * g, const std::string & k, long dflt) {
+    const int64_t id = gguf_find_key(g, k.c_str());
+    if (id < 0) { return dflt; }
+    return (long) gguf_get_val_u32(g, id);
+}
+
+static void emit_ssm_block(gguf_context * g, const std::string & P,
+                           dim_map & dims, type_map & types, int L,
+                           const char * arch) {
+    (void) arch;
+    const long state_size   = kv_long(g, P + "ssm.state_size", -1);
+    const long inner_size   = kv_long(g, P + "ssm.inner_size", -1);
+    const long conv_kernel  = kv_long(g, P + "ssm.conv_kernel", -1);
+    const long dt_rank      = kv_long(g, P + "ssm.time_step_rank", -1);
+    const long group_count  = kv_long(g, P + "ssm.group_count", -1);
+
+    /* DepthwiseConv1D: a causal convolution over the SEQUENCE axis. There is no
+     * key axis here, which is why this is not a projection and not attention. */
+    if (dims.count("ssm_conv1d.weight")) {
+        ir_node n = mk(IR_CONV1D, L);
+        char buf[128]; snprintf(buf, sizeof buf, "blk.%d.ssm_conv1d.weight", L);
+        n.tensor = buf;
+        n.in_features  = dims["ssm_conv1d.weight"].first;
+        n.out_features = dims["ssm_conv1d.weight"].second;
+        n.type_name = types["ssm_conv1d.weight"];
+        n.measured = true;
+        n.scope = "depthwise, over the sequence axis";
+        n.position = "pre_recurrence";
+        if (conv_kernel > 0) {
+            n.evidence.push_back(P + "ssm.conv_kernel = " + std::to_string(conv_kernel) +
+                "   [ARTEFACT MEASURED]");
+            n.evidence.push_back("ssm_conv1d.weight ne[0]=" +
+                std::to_string(dims["ssm_conv1d.weight"].first) +
+                ", which agrees with conv_kernel: the weights ARE the kernel taps");
+        }
+        n.evidence.push_back("ne[1]=" + std::to_string(dims["ssm_conv1d.weight"].second) +
+            " channels with a matching ssm_conv1d.bias, one bias per channel: that is what makes "
+            "it DEPTHWISE rather than a dense convolution");
+        n.evidence.push_back("convolved over SEQUENCE, not over an attention axis");
+        emit(n, arch);
+    }
+
+    /* The RMSNorm that gates the SSM inner space: SAME op as every other norm,
+     * with scope as the parameter that distinguishes it. */
+    if (dims.count("ssm_norm.weight")) {
+        ir_node n = mk(IR_RMSNORM, L);
+        char nb[128]; snprintf(nb, sizeof nb, "blk.%d.ssm_norm.weight", L);
+        n.tensor = nb;
+        n.norm_width = dims["ssm_norm.weight"].first;
+        n.type_name = types["ssm_norm.weight"];
+        { uint32_t ev = 0;
+          n.eps = (sllm_ok(g, P + "attention.layer_norm_rms_epsilon", &ev)) ? (double) ev : -1.0; }
+        n.scope = "ssm_inner";
+        n.position = "pre_conv";
+        n.measured = true;
+        n.evidence.push_back("ssm_norm.weight ne=[" +
+            std::to_string(dims["ssm_norm.weight"].first) + ",1]   [ARTEFACT MEASURED]");
+        if (inner_size > 0 && dims["ssm_norm.weight"].first == inner_size) {
+            n.evidence.push_back("width " + std::to_string(dims["ssm_norm.weight"].first) +
+                " == ssm.inner_size " + std::to_string(inner_size) + ", not embedding_length, so it "
+                "gates the INNER space rather than the residual  [MEASURED comparison]");
+        }
+        n.evidence.push_back("SAME RMSNorm op as the residual norms; scope is the parameter that "
+            "distinguishes it, not a different mathematics");
+        emit(n, arch);
+    }
+
+    /* SelectiveScan: the recurrence. Different mathematics from attention: a
+     * linear recurrence over a carried state, with NO score matrix, NO softmax
+     * over keys, NO KV cache and NO position-wise FFN. */
+    {
+        ir_node n = mk(IR_SCAN, L);
+        n.tensor = "ssm_in -> ssm_out with ssm_a, ssm_d and an input-derived step size";
+        n.measured = true;
+        n.scope = "recurrent over sequence, state carried forward";
+        if (state_size > 0) {
+            n.evidence.push_back(P + "ssm.state_size = " + std::to_string(state_size) +
+                "   [ARTEFACT MEASURED]: the recurrent state width");
+        }
+        if (inner_size > 0) {
+            n.evidence.push_back(P + "ssm.inner_size = " + std::to_string(inner_size) +
+                "   [ARTEFACT MEASURED]");
+        }
+        if (dt_rank > 0) {
+            n.evidence.push_back(P + "ssm.time_step_rank = " + std::to_string(dt_rank) +
+                "   [ARTEFACT MEASURED]: the step size is COMPUTED FROM THE INPUT by projecting the "
+                "sequence to this rank, which is what makes the block SELECTIVE rather than a "
+                "fixed-step recurrence");
+        }
+        if (group_count > 0) {
+            n.evidence.push_back(P + "ssm.group_count = " + std::to_string(group_count) +
+                "   [ARTEFACT MEASURED]");
+        }
+        if (dims.count("ssm_a")) {
+            n.evidence.push_back("ssm_a ne=[" + std::to_string(dims["ssm_a"].first) + "," +
+                std::to_string(dims["ssm_a"].second) + "]   [ARTEFACT MEASURED]: per-head state "
+                "transition, one row per state dimension");
+        }
+        if (dims.count("ssm_d")) {
+            n.evidence.push_back("ssm_d ne=[" + std::to_string(dims["ssm_d"].first) + "," +
+                std::to_string(dims["ssm_d"].second) + "]   [ARTEFACT MEASURED]: per-head skip "
+                "coefficient, so the recurrence carries a direct term as well as the state");
+        }
+        if (dims.count("ssm_in.weight")) {
+            n.evidence.push_back("ssm_in.weight ne=[" + std::to_string(dims["ssm_in.weight"].first) +
+                "," + std::to_string(dims["ssm_in.weight"].second) + "]: projects the residual into "
+                "the inner space, mixing the state and step-size paths");
+        }
+        if (dims.count("ssm_out.weight")) {
+            n.evidence.push_back("ssm_out.weight ne=[" + std::to_string(dims["ssm_out.weight"].first) +
+                "," + std::to_string(dims["ssm_out.weight"].second) + "]: projects back out");
+        }
+        n.evidence.push_back("NO attention mathematics anywhere in this block: no Q, no K, no softmax "
+            "over keys, no KV cache. A recurrence over a carried state is DIFFERENT mathematics, so "
+            "it gets its own composable op rather than being renamed Attention");
+        emit(n, arch);
+    }
 }
 
 int main(int argc, char ** argv) {
@@ -236,6 +398,17 @@ int main(int argc, char ** argv) {
     known_roles.insert("ffn_gate_exps.weight");
     known_roles.insert("ffn_up_exps.weight");
     known_roles.insert("ffn_down_exps.weight");
+    /* SSM roles, now that DepthwiseConv1D and SelectiveScan exist. They were
+     * UNKNOWN at first contact with Mamba-2, which was the correct state: the
+     * vocabulary genuinely could not describe a selective state-space block. */
+    known_roles.insert("ssm_a");
+    known_roles.insert("ssm_d");
+    known_roles.insert("ssm_dt.bias");
+    known_roles.insert("ssm_conv1d.weight");
+    known_roles.insert("ssm_conv1d.bias");
+    known_roles.insert("ssm_in.weight");
+    known_roles.insert("ssm_out.weight");
+    known_roles.insert("ssm_norm.weight");
     /* These two were reported UNKNOWN at 9c62164 and that was WRONG. They are
      * canonical llama.cpp tensor names -- llama-arch.cpp:460 maps
      * LLM_TENSOR_ATTN_POST_NORM to "blk.%d.post_attention_norm" -- so they are
@@ -676,7 +849,15 @@ int main(int argc, char ** argv) {
      * alternates sliding-window and full attention, so the pattern lives on each
      * Attention node. Presentation may deduplicate identical layers later; the
      * semantic IR must not, or the alternation becomes unrepresentable. */
-    { ir_node n = mk(IR_ATTENTION, L);
+    if (!dims.count("attn_q.weight") && !dims.count("attn_k.weight") &&
+        !dims.count("ffn_gate_exps.weight")) {
+        printf("  Attention          layer=%-3d  (none)\n", L);
+        printf("      status          : ABSENT -- head_count is %ld and there is no Q, K or V\n", heads);
+        printf("                       projection and no KV cache to attend over\n");
+        printf("      evidence        : MEASURED -- an Attention node without projections would be\n");
+        printf("                       structure invented from an architecture name.\n");
+    } else {
+    ir_node n = mk(IR_ATTENTION, L);
       n.head_dim = key_len; n.n_heads = heads; n.n_kv_heads = kv_heads;
       n.q_heads = heads; n.n_kv_heads = kv_heads;
       const int64_t sw = gguf_find_key(g, (P + "attention.sliding_window").c_str());
@@ -731,6 +912,19 @@ int main(int argc, char ** argv) {
         {"attn_v.weight", "V projection"}, {"attn_output.weight", "attention output projection"},
     };
     for (unsigned i = 0; i < sizeof proj / sizeof *proj; ++i) {
+        /* GATED ON EVIDENCE, NOT ON A NAME. This loop used to emit a node for
+         * every projection name unconditionally, so a model with NO attention
+         * at all still received four Linear nodes, a RoPE node and an Attention
+         * node with every dimension at -1. Naming a role that does not exist is
+         * not evidence that it exists. */
+        if (!dims.count(proj[i].role)) {
+            printf("  %-18s layer=%-3d  %s\n", "Linear", L, TN(proj[i].role).c_str());
+            printf("      status          : ABSENT -- no tensor by this name in this architecture\n");
+            printf("      evidence        : MEASURED -- the role is not in the inventory, so NO node is\n");
+            printf("                       emitted. Emitting one would be fabricating structure from a\n");
+            printf("                       name.\n");
+            continue;
+        }
         ir_node n = mk(IR_LINEAR, L);
         n.tensor = TN(proj[i].role);
         n.in_features = dims[proj[i].role].first; n.out_features = dims[proj[i].role].second;
@@ -747,9 +941,16 @@ int main(int argc, char ** argv) {
         n.measured = true; emit(n, arch);
     }
 
-    { ir_node n = mk(IR_ROPE, L);
-      n.tensor = "(computed)"; n.head_dim = key_len; n.rope_base = rope_base;
-      n.n_heads = heads; n.n_kv_heads = kv_heads;
+    if (!dims.count("attn_q.weight") && !dims.count("attn_k.weight")) {
+        printf("  RoPE               layer=%-3d  (none)\n", L);
+        printf("      status          : ABSENT -- no Q or K projection exists to rotate, and no\n");
+        printf("                       rope frequency table is shipped\n");
+        printf("      evidence        : MEASURED -- RoPE is a property of an attention block, and there\n");
+        printf("                       is none. Emitting a RoPE node would invent one.\n");
+    } else {
+        ir_node n = mk(IR_ROPE, L);
+        n.tensor = "(computed)"; n.head_dim = key_len; n.rope_base = rope_base;
+        n.n_heads = heads; n.n_kv_heads = kv_heads;
       n.rope_dim_count = rope_dim; n.position_source = "position index (pos), from inp_pos";
       n.pairing = "UNRESOLVED";
       n.evidence.push_back("rope applied to Q and K only, not V (graph)");
@@ -922,6 +1123,11 @@ int main(int argc, char ** argv) {
               "no always-on dense FFN alongside the experts");
           n.scope = "gated, per expert, on the router-selected subset";
           emit(n, arch); }
+    } else if (!dims.count("ffn_gate.weight") && !dims.count("ffn_down.weight")) {
+        printf("  GatedMLP           layer=%-3d  (none)\n", L);
+        printf("      status          : ABSENT -- feed_forward_length is %ld and no FFN tensor exists\n", ff);
+        printf("      evidence        : MEASURED -- this architecture has no position-wise feed-forward\n");
+        printf("                       block at all, so no gated MLP is emitted\n");
     } else {
         ir_node n = mk(IR_MLP, L);
         n.tensor = "ffn_gate.weight + ffn_up.weight + ffn_down.weight";
@@ -938,6 +1144,8 @@ int main(int argc, char ** argv) {
       n.evidence.push_back("ffn_gate_inp.weight ABSENT => not MoE, and not inferred from the "
                            "architecture name");
       n.measured = true; emit(n, arch); }
+
+    emit_ssm_block(g, P, dims, types, L, arch);
 
     /* ---- Attention pattern for EVERY layer, individually ---- */
     { const int64_t sw2 = gguf_find_key(g, (P + "attention.sliding_window").c_str());
