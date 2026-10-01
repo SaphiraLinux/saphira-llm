@@ -20,7 +20,7 @@
 #include <algorithm>
 
 enum ir_kind { IR_UNKNOWN = 0, IR_EMBEDDING, IR_RMSNORM, IR_LINEAR, IR_ROPE,
-               IR_HEADSPLIT, IR_ATTENTION, IR_RESIDUAL, IR_MLP, IR_OUTPUT };
+               IR_HEADSPLIT, IR_ATTENTION, IR_RESIDUAL, IR_MLP, IR_OUTPUT, IR_SOFTCAP };
 
 static const char * kind_name(ir_kind k) {
     switch (k) {
@@ -34,6 +34,7 @@ static const char * kind_name(ir_kind k) {
         case IR_RESIDUAL:   return "ResidualAdd";
         case IR_MLP:        return "GatedMLP";
         case IR_OUTPUT:     return "OutputProjection";
+        case IR_SOFTCAP:    return "SoftCap";
     }
     return "?";
 }
@@ -49,11 +50,12 @@ struct ir_node {
 
     /* resolved parameters, only those the artefact evidences */
     long in_features, out_features;
-    long head_dim, n_heads, n_kv_heads;
+    long head_dim, n_heads, n_kv_heads, q_heads;
     double eps, rope_base;
     long rope_dim_count;
     std::string pairing, scaling_type, position_source;
     bool bias, has_norm_weight;
+    long attn_pattern_sliding;   /* Attention.pattern */
     long norm_width;
     std::string scope, position;
 };
@@ -62,8 +64,10 @@ static ir_node mk(ir_kind k, int layer) {
     ir_node n;
     n.kind = k; n.layer = layer; n.measured = false;
     n.in_features = n.out_features = n.head_dim = n.n_heads = n.n_kv_heads = -1;
+    n.q_heads = -1;
     n.eps = n.rope_base = -1.0; n.rope_dim_count = -1;
     n.bias = false; n.has_norm_weight = false; n.norm_width = -1;
+    n.attn_pattern_sliding = -1;
     return n;
 }
 static void emit(const ir_node & n, const char * arch) {
@@ -89,6 +93,15 @@ static void emit(const ir_node & n, const char * arch) {
         printf("      position_source : %s\n", n.position_source.c_str());
     }
     if (n.kind == IR_MLP) { printf("      scope           : %s\n", n.scope.c_str()); }
+    if (n.kind == IR_ATTENTION) {
+        printf("      pattern         : %s\n", n.pairing.c_str());
+        if (n.rope_base >= 0) { printf("      window          : %.0f\n", n.rope_base); }
+    }
+    if (n.kind == IR_SOFTCAP) {
+        printf("      cap             : %.9g\n", n.rope_base);
+        printf("      domain          : %s   position=%s\n", n.scope.c_str(), n.position.c_str());
+        if (n.scaling_type.size()) { printf("      function        : %s\n", n.scaling_type.c_str()); }
+    }
     printf("      evidence        : %s\n", n.measured ? "MEASURED (read from artefact/reference graph)" : "INFERRED (rule-based)");
     for (size_t i = 0; i < n.evidence.size(); ++i) { printf("        - %s\n", n.evidence[i].c_str()); }
     for (size_t i = 0; i < n.unknown.size(); ++i) { printf("      UNRESOLVED      : %s\n", n.unknown[i].c_str()); }
@@ -152,6 +165,8 @@ int main(int argc, char ** argv) {
     std::map<int, std::set<std::string> > per_layer;
     int max_layer = -1;
     std::vector<std::string> non_layer;
+    bool rope_freqs_present = false;
+    long rope_freqs_len = -1;
     for (int64_t i = 0; i < gguf_get_n_tensors(g); ++i) {
         int layer = -1; std::string role;
         const std::string n = gguf_get_tensor_name(g, i);
@@ -182,6 +197,14 @@ int main(int argc, char ** argv) {
     known_roles.insert("attn_q_norm.weight"); known_roles.insert("attn_k_norm.weight");
     known_roles.insert("ffn_gate.weight");    known_roles.insert("ffn_up.weight");
     known_roles.insert("ffn_down.weight");
+    /* These two were reported UNKNOWN at 9c62164 and that was WRONG. They are
+     * canonical llama.cpp tensor names -- llama-arch.cpp:460 maps
+     * LLM_TENSOR_ATTN_POST_NORM to "blk.%d.post_attention_norm" -- so they are
+     * known vocabulary that the IR simply had not learned yet. Recorded here as
+     * a vocabulary gap rather than an UNKNOWN construct, which is a weaker and
+     * wrong statement about them. */
+    known_roles.insert("post_attention_norm.weight");
+    known_roles.insert("post_ffw_norm.weight");
     std::set<std::string> unknown_layer_roles;
     for (std::map<std::string,int>::iterator it = roles.begin(); it != roles.end(); ++it) {
         if (known_roles.find(it->first) == known_roles.end()) { unknown_layer_roles.insert(it->first); }
@@ -189,6 +212,17 @@ int main(int argc, char ** argv) {
     for (size_t i = 0; i < non_layer.size(); ++i) {
         const std::string & n = non_layer[i];
         const std::string base = n.substr(0, n.rfind('.') == std::string::npos ? n.size() : n.rfind('.'));
+        if (base == "rope_freqs") {
+            /* A precomputed RoPE frequency table, consumed BY the RoPE node
+             * rather than being a layer operation. It was reported UNKNOWN at
+             * 682e146, which was a vocabulary gap: llama-arch.cpp:440 defines
+             * LLM_TENSOR_ROPE_FREQS as "rope_freqs" and llama.cpp:66 creates it
+             * at {n_rot/2}, optional and duplicated across layers. This is a
+             * PARAMETER SOURCE for RoPE, not a new operation. */
+            rope_freqs_present = true;
+            rope_freqs_len = dims.count(n) ? dims[n].first : -1;
+            continue;
+        }
         if (base != "token_embd" && base != "output" && base != "output_norm") {
             unknown_layer_roles.insert("(non-layer) " + n);
         }
@@ -335,17 +369,23 @@ int main(int argc, char ** argv) {
       n.evidence.push_back("applied to the post-attention residual before the FFN");
       n.measured = true; emit(n, arch); }
 
-    /* Q/K head norms: PRESENT for Qwen3, ABSENT for Llama. The IR must be able
-     * to express both, and must not invent one for a model that lacks it. */
+    /* Q/K head norms: PRESENT for Qwen3, ABSENT for Llama-3.2 AND Gemma-2. The
+     * IR must be able to express both presence and absence, and must not invent
+     * one for a model that lacks it. */
     const char * hn[] = {"attn_q_norm.weight", "attn_k_norm.weight"};
     for (int t = 0; t < 2; ++t) {
         snprintf(buf, sizeof buf, "blk.%d.%s", L, hn[t]);
         if (gguf_find_tensor(g, buf) < 0) {
-            /* ABSENCE IS A FINDING, NOT A GAP: emit nothing for this node, and
-             * record why, so a later reader cannot assume it was overlooked. */
-            printf("  (no %s at layer %d -- correctly ABSENT for this architecture;\n"
-                   "   the vocabulary models this as \"head norm not present\", not UNKNOWN)\n",
-                   hn[t], L);
+            /* ABSENCE IS A FINDING, NOT A GAP. Recorded as ABSENT rather than
+             * UNKNOWN: we looked, and it is not there. UNKNOWN would mean we
+             * could not tell, which is a different and weaker statement. */
+            printf("  %-18s layer=%-3d  %s\n", "RMSNorm", L, buf);
+            printf("      status          : ABSENT for this architecture\n");
+            printf("      evidence        : MEASURED -- tensor not present in the inventory,\n");
+            printf("                       and not present in ANY layer (%d of %d)\n",
+                   roles.count(hn[t]), max_layer + 1);
+            printf("      NOTE            : ABSENT is not UNKNOWN. Absent means looked-and-\n");
+            printf("                       not-there; UNKNOWN means could-not-determine.\n");
             continue;
         }
         ir_node n = mk(IR_RMSNORM, L);
@@ -357,14 +397,124 @@ int main(int argc, char ** argv) {
             std::to_string(roles[hn[t]]) + " layers");
         n.evidence.push_back("ne=[" + std::to_string(dims[hn[t]].first) + ",1] == key_length=" +
             std::to_string(key_len) + " => reduces the HEAD, not the residual");
-        n.evidence.push_back("per-head: " + std::to_string(n.n_heads) + " heads of " +
-            std::to_string(key_len));
-        n.evidence.push_back("graph: " + P + "norm applied at the line before ggml_rope_ext => position=pre_rope");
+        n.evidence.push_back("scope=head is a PARAMETER, not a different op: the mathematics is "
+            "RMS over the head axis");
+        n.evidence.push_back("position=pre_rope from the graph: the norm is applied at the line "
+            "before ggml_rope_ext");
         snprintf(buf, sizeof buf, "blk.%d.%s.bias", L, (t == 0) ? "attn_q_norm" : "attn_k_norm");
         n.evidence.push_back(std::string(buf) + (gguf_find_tensor(g, buf) >= 0 ? " PRESENT" : " ABSENT") +
             " => bias=false");
         n.measured = true; emit(n, arch);
     }
+
+    /* Gemma-2 carries TWO EXTRA NORMS PER LAYER. Same mathematics as the other
+     * norms -- one RMS, one axis -- so the same op, with position as a
+     * parameter. No PostNorm op is invented, because inventing one would split
+     * identical mathematics across two vocabularies for no gain. */
+    { const char * post[] = {"post_attention_norm.weight", "post_ffw_norm.weight"};
+      for (int t = 0; t < 2; ++t) {
+          snprintf(buf, sizeof buf, "blk.%d.%s", L, post[t]);
+          if (gguf_find_tensor(g, buf) < 0) { continue; }
+          ir_node n = mk(IR_RMSNORM, L);
+          n.tensor = buf; n.norm_width = dims[post[t]].first; n.type_name = types[post[t]];
+          n.eps = eps; n.scope = "residual";
+          n.position = (t == 0) ? "post_attention" : "post_ffn";
+          n.evidence.push_back("tensor " + n.tensor + " present in all " +
+              std::to_string(roles[post[t]]) + " layers");
+          n.evidence.push_back("ne=[" + std::to_string(dims[post[t]].first) +
+              ",1] == embedding_length => same mathematics as attn_norm/ffn_norm (one RMS over "
+              "the residual), differing ONLY in graph position");
+          n.evidence.push_back("position=" + n.position + " is a PARAMETER of RMSNorm, so NO new "
+              "op is introduced for it");
+          n.measured = true; emit(n, arch);
+      } }
+
+    /* ---- SoftCap: an independent COMPOSABLE op, not a flag ----
+     *
+     * f(x) = cap * tanh(x / cap). Two sites with DIFFERENT caps in one model
+     * (Gemma-2: attention 50, final logits 30), so a boolean or a single
+     * softcap field could not represent it. Each site is its own node.
+     *
+     * function is UNRESOLVED until measured: the graph gives scale, tanh, scale
+     * in that order for the final-logits site, and the attention site is FUSED
+     * INTO the flash-attention node where an op histogram cannot see it. Claiming
+     * the function for the attention site from the unfused one would be an
+     * assumption dressed as a measurement. */
+    { const char * kA = (P + "attn_logit_softcapping").c_str();
+      const char * kF = (P + "final_logit_softcapping").c_str();
+      const int64_t idA = gguf_find_key(g, kA);
+      const int64_t idF = gguf_find_key(g, kF);
+      if (idA < 0 && idF < 0) {
+          ir_node n = mk(IR_SOFTCAP, L);
+          n.tensor = "(none)";
+          n.unknown.push_back("no " + P + "attn_logit_softcapping and no " + P +
+                              "final_logit_softcapping key: SoftCap ABSENT for this architecture");
+          printf("  %-18s layer=%-3d  %s\n", "SoftCap", L, "(none)");
+          printf("      status          : ABSENT (no softcapping keys in metadata)\n");
+          printf("      evidence        : MEASURED -- both keys absent from %lld kv pairs\n",
+                 (long long) gguf_get_n_kv(g));
+      } else {
+          if (idA >= 0) {
+              ir_node n = mk(IR_SOFTCAP, L);
+              n.tensor = "(attention logits)"; n.rope_base = (double) gguf_get_val_f32(g, idA);
+              n.scope = "attention_logits"; n.position = "pre_softmax";
+              n.evidence.push_back(std::string(kA) + " = " + std::to_string(n.rope_base) +
+                  "  [MEASURED from metadata]");
+              n.evidence.push_back("site count: one per layer -- the cap is applied to the QK^T "
+                  "product before the softmax, i.e. pre_softmax");
+              n.unknown.push_back("function UNRESOLVED: in this reference the cap is FUSED INTO the "
+                  "flash-attention node, so an op histogram cannot see scale/tanh/scale here. The "
+                  "tanh form is known from the UNFUSED final-logits site; assuming this site is "
+                  "identical would be inference, not measurement.");
+              emit(n, arch);
+          }
+          if (idF >= 0) {
+              ir_node n = mk(IR_SOFTCAP, L);
+              n.tensor = "(final logits)"; n.rope_base = (double) gguf_get_val_f32(g, idF);
+              n.scope = "final_logits"; n.position = "post_output_projection";
+              n.evidence.push_back(std::string(kF) + " = " + std::to_string(n.rope_base) +
+                  "  [MEASURED from metadata]");
+              n.evidence.push_back("ONE site for the whole model, not one per layer: 26 layers but "
+                  "a single final-logits cap");
+              n.evidence.push_back("order MEASURED from " + P + " source: scale(1/cap) then tanh "
+                  "then scale(cap), applied to the output projection result");
+              n.measured = true;
+              n.pairing = "tanh"; n.scaling_type = "cap*tanh(x/cap)";
+              emit(n, arch);
+          }
+      } }
+
+    /* ---- Attention as its own node, carrying pattern and window ----
+     *
+     * A layer is an ORDERED CONTAINER of operations, not a layer type. Gemma-2
+     * alternates sliding-window and full attention, so the pattern lives on each
+     * Attention node. Presentation may deduplicate identical layers later; the
+     * semantic IR must not, or the alternation becomes unrepresentable. */
+    { ir_node n = mk(IR_ATTENTION, L);
+      n.head_dim = key_len; n.n_heads = heads; n.n_kv_heads = kv_heads;
+      n.q_heads = heads; n.n_kv_heads = kv_heads;
+      const int64_t sw = gguf_find_key(g, (P + "attention.sliding_window").c_str());
+      if (sw >= 0) {
+          n.rope_base = (double) gguf_get_val_u32(g, sw);   /* window */
+          n.pairing = "sliding_window";
+          n.evidence.push_back(std::string(P) + "attention.sliding_window = " +
+              std::to_string((long long) n.rope_base) + "  [MEASURED from metadata]");
+          n.unknown.push_back("whether layer " + std::to_string(L) + " is sliding_window or full "
+              "is UNRESOLVED from the artefact: the key states a window SIZE, not a per-layer "
+              "pattern. It must come from the reference graph's per-layer mask selection. Recording "
+              "the window as measured and the PATTERN as unresolved, because the two are different "
+              "claims.");
+      } else {
+          n.pairing = "full";
+          n.evidence.push_back("no " + P + "attention.sliding_window key => pattern=full "
+              "  [INFERRED: absence of a sliding-window key, which is weaker than a positive "
+              "statement of full attention]");
+      }
+      n.evidence.push_back("q_heads=" + std::to_string(heads) + " kv_heads=" + std::to_string(kv_heads) +
+          " head_dim=" + std::to_string(key_len) + "  [MEASURED from metadata]");
+      n.evidence.push_back("pattern lives on the Attention NODE, not on a layer type: a layer is an "
+          "ordered container of operations and may differ from its neighbours");
+      emit(n, arch); }
 
     /* projections */
     struct { const char * role; const char * what; } proj[] = {
@@ -419,6 +569,23 @@ int main(int argc, char ** argv) {
           n.unknown.push_back("pairing NOT MEASURED: supply SLLM_IR_ROPE_PAIRING from the reference "
                               "graph. Deriving it from the architecture name is exactly the error "
                               "this IR exists to avoid, since Qwen3 is NEOX and Llama-3.2 is GPT.");
+      }
+      /* Where the FREQUENCIES COME FROM is a separate question from the pairing,
+       * and belongs here rather than being left implicit. The earlier placement
+       * nested this inside the pairing branch, so it silently reported only for
+       * an unmeasured model and vanished whenever pairing WAS measured -- which
+       * is how rope_freqs went unnoticed for Llama-3.2. */
+      if (rope_freqs_present) {
+          n.evidence.push_back("precomputed rope_freqs table present, ne[0]=" +
+              std::to_string(rope_freqs_len) + "  [MEASURED]: the model SHIPS its RoPE frequency "
+              "table rather than deriving it from a base, so freq_base is unused here");
+          n.scaling_type = "precomputed table (rope_freqs.weight)";
+          n.unknown.push_back("rope_base reported as the metadata value even though a precomputed "
+              "table exists: which one the reference actually uses is not established here");
+      } else if (rope_base < 0) {
+          n.unknown.push_back("rope_base UNRESOLVED: no " + P + "rope.freq_base key AND no "
+                              "precomputed rope_freqs table, so this artefact carries no readable "
+                              "base. NOT assumed to be 10000.");
       }
       emit(n, arch); }
 

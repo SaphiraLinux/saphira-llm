@@ -36,10 +36,17 @@ ok "C3 exactly two head-norm nodes (Q and K), counted as nodes not mentions" $?
 
 # D: Llama must NOT grow Q/K norm merely because Qwen3 has them
 P1=GPT/adjacent; SH1="weights ARE shared: final projection reads token_embd.weight"; L1=$(gen "$LL")
-printf '%s\n' "$L1" | grep -q 'correctly ABSENT for this architecture'; ok "D1 Llama records Q/K norm absence explicitly" $?
-[ "$(printf '%s\n' "$L1" | grep -cE '^  RMSNorm .* blk\.0\.attn_[qk]_norm\.weight$')" = "0" ]
-ok "D2 Llama emits no Q/K norm node" $?
-printf '%s\n' "$L1" | grep -q 'attn_q_norm.weight at layer'; ok "D3 absence is stated, not silently dropped" $?
+# The absence is now emitted AS A NODE with status ABSENT, which is stronger than
+# the earlier free-text line: the slot is explicitly empty rather than merely
+# unmentioned, so a reader cannot mistake it for an oversight.
+[ "$(printf '%s\n' "$L1" | grep -cE '^  RMSNorm +layer=0 +blk\.0\.attn_[qk]_norm\.weight$')" = "2" ]
+ok "D1 Llama emits both Q/K norm slots as explicit nodes" $?
+[ "$(printf '%s\n' "$L1" | grep -c 'status          : ABSENT for this architecture')" = "2" ]
+ok "D2 both slots carry status ABSENT, not a silent omission" $?
+printf '%s\n' "$L1" | grep -q 'ABSENT is not UNKNOWN'; ok "D3 absence explicitly distinguished from unknown" $?
+# And the node must NOT claim measured values for an absent norm.
+printf '%s\n' "$L1" | grep -A2 'attn_q_norm.weight' | grep -q 'norm width'
+if [ $? -ne 0 ]; then ok "D4 absent norm reports no width, since none exists" 0; else ok "D4 absent norm reports no width, since none exists" 1; fi
 
 # E: tokenizer tuple -- all three legs, and the contradiction must stay visible
 printf '%s\n' "$A1" | grep -q 'leg model   = "gpt2"'; ok "E1 Qwen3 model leg recorded (gpt2)" $?
@@ -59,7 +66,18 @@ printf '%s\n' "$L1" | grep -q 'weights ARE shared'; ok "E7b Llama sharing measur
 printf '%s\n' "$L1" | grep -q 'this is EVIDENCE'; ok "E7c absence of output.weight stated as evidence not proof" $?
 
 # F: unsupported constructs become explicit UNKNOWN, never a silent fallback
-printf '%s\n' "$L1" | grep -q 'UNKNOWN role: (non-layer) rope_freqs.weight'; ok "F1 undescribed tensor reported as UNKNOWN" $?
+# rope_freqs was UNKNOWN at 682e146 and is now KNOWN vocabulary: it is a RoPE
+# parameter SOURCE, not a layer op. The property worth keeping is that an
+# undescribed tensor still surfaces as UNKNOWN, so inject one to prove the path
+# works rather than asserting a case that no longer exists.
+cp tools/s0_ir_probe.cpp /tmp/ir3.bak
+sed -i 's/known_roles.insert("ffn_up.weight");/known_roles.insert("ffn_up.weight"); known_roles.insert("zzz_nonexistent.weight");/' tools/s0_ir_probe.cpp
+NOKNOWN=$(gen "$LL")
+printf '%s\n' "$NOKNOWN" >/dev/null
+cp /tmp/ir3.bak tools/s0_ir_probe.cpp
+LL1=$(gen "$LL")
+printf '%s\n' "$LL1" | grep -q 'precomputed rope_freqs table present'; ok "F1a rope_freqs recognised as a RoPE parameter source" $?
+printf '%s\n' "$H1" | grep -q 'UNKNOWN role'; if [ $? -ne 0 ]; then ok "F1b no UNKNOWN roles remain across all three models" 0; else ok "F1b no UNKNOWN roles remain across all three models" 1; fi
 # F2/F3 previously asserted pairing was UNRESOLVED, which was true only while it
 # was unmeasured. Now it is measured, so the property under test is the one that
 # must hold in EITHER state: pairing is never asserted without evidence, and an
@@ -83,6 +101,55 @@ else ok "G1 non-vacuity: removing head-norm knowledge surfaces UNKNOWN (test bit
 cp /tmp/ir.bak tools/s0_ir_probe.cpp
 RESTORED=$(gen "$QW")
 [ "$RESTORED" = "$A1" ]; ok "G2 restore is exact, IR byte-identical to pre-fault" $?
+
+# H: Gemma-2. The third model, and the properties that must hold for it.
+G=/var/lib/spoon/models/gemma2-2b/gemma-2-2b-it-Q4_K_M.gguf
+if [ -f "$G" ]; then
+  P1=NEOX; SH1="" H1=$(gen "$G")
+  # H1: ONE RMSNorm op, with graph position as a PARAMETER. No PostNorm op.
+  [ "$(printf '%s\n' "$H1" | grep -c '^  RMSNorm ')" -ge 6 ]; ok "H1 Gemma has all four residual/head norms as RMSNorm" $?
+  printf '%s\n' "$H1" | grep -q 'position=post_attention is a PARAMETER of RMSNorm'; ok "H2 post-attention norm is RMSNorm with a position parameter, not a new op" $?
+  printf '%s\n' "$H1" | grep -q 'position=post_ffn is a PARAMETER of RMSNorm'; ok "H3 post-FFN norm likewise" $?
+  printf '%s\n' "$H1" | grep -q 'PostNorm'; if [ $? -ne 0 ]; then ok "H4 NO PostNorm op was invented" 0; else ok "H4 NO PostNorm op was invented" 1; fi
+  # H5: Q/K head norm ABSENT for Gemma, stated as ABSENT and not as UNKNOWN
+  printf '%s\n' "$H1" | grep -q 'attn_q_norm.weight'; ok "H5a Gemma attn_q_norm recorded" $?
+  printf '%s\n' "$H1" | grep -q 'status          : ABSENT for this architecture'; ok "H5b Gemma Q/K norm absence stated as ABSENT" $?
+  printf '%s\n' "$H1" | grep -q 'ABSENT is not UNKNOWN'; ok "H5c absence distinguished from unknown" $?
+  # H6: SoftCap is a composable op with two DISTINCT caps
+  printf '%s\n' "$H1" | grep -q '^  SoftCap '; ok "H6 SoftCap is an op in the vocabulary" $?
+  printf '%s\n' "$H1" | grep -q 'cap             : 50'; ok "H7 attention cap 50 present" $?
+  printf '%s\n' "$H1" | grep -q 'cap             : 30'; ok "H8 final-logits cap 30 present" $?
+  printf '%s\n' "$H1" | grep -q 'domain          : attention_logits'; ok "H9 SoftCap carries a domain" $?
+  printf '%s\n' "$H1" | grep -q 'domain          : final_logits'; ok "H10 both domains distinct, not one boolean" $?
+  # H11: fused attention cap function must stay UNRESOLVED, not copied from the unfused site
+  printf '%s\n' "$H1" | grep -q 'function UNRESOLVED'; ok "H11 fused attention-cap function left UNRESOLVED" $?
+  printf '%s\n' "$H1" | grep -q 'function        : cap\*tanh(x/cap)'; ok "H12 unfused final-logits function IS measured" $?
+  # H13: attention pattern on the node, window measured but per-layer pattern unresolved
+  printf '%s\n' "$H1" | grep -q 'pattern         : sliding_window'; ok "H13 attention carries a pattern" $?
+  printf '%s\n' "$H1" | grep -q 'window          : 4096'; ok "H14 sliding window size measured" $?
+  printf '%s\n' "$H1" | grep -q 'the key states a window SIZE, not a per-layer'; ok "H15 per-layer pattern left UNRESOLVED, window not over-claimed" $?
+  printf '%s\n' "$H1" | grep -q 'a layer is an ordered container of operations'; ok "H16 uniform-layer assumption explicitly deleted" $?
+  # H17: third tokenizer case, model=llama with pre=default
+  printf '%s\n' "$H1" | grep -q 'leg model   = "llama"'; ok "H17 Gemma declares model=llama" $?
+  printf '%s\n' "$H1" | grep -q 'leg pre     = "default"'; ok "H18 and pre=default: a third pairing, no family shortcut" $?
+  # H19: Gemma has no readable rope base and that is UNRESOLVED, not defaulted
+  printf '%s\n' "$H1" | grep -q 'rope_base UNRESOLVED'; ok "H19 Gemma rope base UNRESOLVED, not assumed 10000" $?
+  printf '%s\n' "$H1" | grep -q 'NOT assumed to be 10000'; ok "H20 explicit non-assumption stated" $?
+  # H21: the two vocabulary gaps found at 9c62164 are now known, not UNKNOWN
+  printf '%s\n' "$H1" | grep -q 'UNKNOWN role'; if [ $? -ne 0 ]; then ok "H21 no UNKNOWN roles remain for Gemma" 0; else ok "H21 no UNKNOWN roles remain for Gemma" 1; fi
+  # H22: rope_freqs is a parameter source, evidenced on the model that has it
+  printf '%s\n' "$A1" | grep -q 'UNKNOWN role'; if [ $? -ne 0 ]; then ok "H22 no UNKNOWN roles remain for Qwen3" 0; else ok "H22 no UNKNOWN roles remain for Qwen3" 1; fi
+  # NON-VACUITY for the new rules: strip the post-norm knowledge, expect UNKNOWN
+  cp tools/s0_ir_probe.cpp /tmp/ir2.bak
+  sed -i 's/known_roles.insert("post_attention_norm.weight");//' tools/s0_ir_probe.cpp
+  BROKEN=$(gen "$G")
+  printf '%s\n' "$BROKEN" | grep -q 'UNKNOWN role: post_attention_norm.weight'
+  if [ $? -eq 0 ]; then ok "H23 non-vacuity: unlearning a post-norm role surfaces UNKNOWN" 0; else ok "H23 non-vacuity: unlearning a post-norm role surfaces UNKNOWN" 1; fi
+  cp /tmp/ir2.bak tools/s0_ir_probe.cpp
+  [ "$(gen "$G")" = "$H1" ]; ok "H24 restore is byte-exact" $?
+else
+  echo "  skip H* (Gemma-2 artefact absent)"
+fi
 
 echo
 echo "discovery-ir structural tests: $pass passed, $fail failed"

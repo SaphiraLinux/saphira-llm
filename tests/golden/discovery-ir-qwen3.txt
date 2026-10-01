@@ -54,8 +54,8 @@ rms_eps=9.99999997e-07 rope_base=1000000
       evidence        : MEASURED (read from artefact/reference graph)
         - tensor blk.0.attn_q_norm.weight present in all 36 layers
         - ne=[128,1] == key_length=128 => reduces the HEAD, not the residual
-        - per-head: 32 heads of 128
-        - graph: qwen3.norm applied at the line before ggml_rope_ext => position=pre_rope
+        - scope=head is a PARAMETER, not a different op: the mathematics is RMS over the head axis
+        - position=pre_rope from the graph: the norm is applied at the line before ggml_rope_ext
         - blk.0.attn_q_norm.bias ABSENT => bias=false
   RMSNorm            layer=0    blk.0.attn_k_norm.weight
       type            : f32
@@ -65,9 +65,19 @@ rms_eps=9.99999997e-07 rope_base=1000000
       evidence        : MEASURED (read from artefact/reference graph)
         - tensor blk.0.attn_k_norm.weight present in all 36 layers
         - ne=[128,1] == key_length=128 => reduces the HEAD, not the residual
-        - per-head: 8 heads of 128
-        - graph: qwen3.norm applied at the line before ggml_rope_ext => position=pre_rope
+        - scope=head is a PARAMETER, not a different op: the mathematics is RMS over the head axis
+        - position=pre_rope from the graph: the norm is applied at the line before ggml_rope_ext
         - blk.0.attn_k_norm.bias ABSENT => bias=false
+  SoftCap            layer=0    (none)
+      status          : ABSENT (no softcapping keys in metadata)
+      evidence        : MEASURED -- both keys absent from 28 kv pairs
+  Attention          layer=0    
+      head_dim=128  heads=32  kv_heads=8
+      pattern         : full
+      evidence        : INFERRED (rule-based)
+        - no qwen3.attention.sliding_window key => pattern=full   [INFERRED: absence of a sliding-window key, which is weaker than a positive statement of full attention]
+        - q_heads=32 kv_heads=8 head_dim=128  [MEASURED from metadata]
+        - pattern lives on the Attention NODE, not on a layer type: a layer is an ordered container of operations and may differ from its neighbours
   Linear             layer=0    blk.0.attn_q.weight
       type            : q4_K
       in/out features : 4096 / 4096

@@ -5,9 +5,6 @@ architecture (from general.architecture) = llama
 block_count=16 embedding_length=2048 ffn_length=8192 heads=32 kv_heads=8
 key_length=64 value_length=64 rope_dimension_count=64
 rms_eps=9.99999975e-06 rope_base=500000
-
--- TENSORS THE VOCABULARY CANNOT YET DESCRIBE --
-  UNKNOWN role: (non-layer) rope_freqs.weight
   TokenizerSelector (model)  tokenizer.ggml.{model,pre,tokens}
       evidence        : MEASURED
         - leg model   = "gpt2"
@@ -27,11 +24,11 @@ rms_eps=9.99999975e-06 rope_base=500000
   OutputProjection   (model)     token_embd.weight (no separate output tensor)
       type            : q6_K
       in/out features : 2048 / 128256
-      evidence        : MEASURED (read from artefact/reference graph)
+      evidence        : INFERRED (rule-based)
         - NO output.weight tensor exists in the inventory
         - token_embd.weight present with ne=[2048,128256]
         - NO output.weight tensor exists in the inventory -- this is EVIDENCE, not proof, and on its own it does not establish sharing
-        - sharing=weights ARE shared: final projection reads token_embd.weight MEASURED from the reference graph: the final MUL_MAT's src[0] weight tensor was read by name, and it is token_embd.weight. Weight sharing is a question about which tensor the projection READS, not about whether dimensions match.
+      UNRESOLVED      : sharing UNRESOLVED: absence of output.weight is evidence, not proof. Supply SLLM_IR_OUTPUT_SHARING from the reference graph.
 
 -- LAYER 0 (representative; verified present in every layer) --
   RMSNorm            layer=0    blk.0.attn_norm.weight
@@ -50,10 +47,28 @@ rms_eps=9.99999975e-06 rope_base=500000
       evidence        : MEASURED (read from artefact/reference graph)
         - ne=[4096,1] => width == embedding_length
         - applied to the post-attention residual before the FFN
-  (no attn_q_norm.weight at layer 0 -- correctly ABSENT for this architecture;
-   the vocabulary models this as "head norm not present", not UNKNOWN)
-  (no attn_k_norm.weight at layer 0 -- correctly ABSENT for this architecture;
-   the vocabulary models this as "head norm not present", not UNKNOWN)
+  RMSNorm            layer=0    blk.0.attn_q_norm.weight
+      status          : ABSENT for this architecture
+      evidence        : MEASURED -- tensor not present in the inventory,
+                       and not present in ANY layer (0 of 16)
+      NOTE            : ABSENT is not UNKNOWN. Absent means looked-and-
+                       not-there; UNKNOWN means could-not-determine.
+  RMSNorm            layer=0    blk.0.attn_k_norm.weight
+      status          : ABSENT for this architecture
+      evidence        : MEASURED -- tensor not present in the inventory,
+                       and not present in ANY layer (0 of 16)
+      NOTE            : ABSENT is not UNKNOWN. Absent means looked-and-
+                       not-there; UNKNOWN means could-not-determine.
+  SoftCap            layer=0    (none)
+      status          : ABSENT (no softcapping keys in metadata)
+      evidence        : MEASURED -- both keys absent from 35 kv pairs
+  Attention          layer=0    
+      head_dim=64  heads=32  kv_heads=8
+      pattern         : full
+      evidence        : INFERRED (rule-based)
+        - no llama.attention.sliding_window key => pattern=full   [INFERRED: absence of a sliding-window key, which is weaker than a positive statement of full attention]
+        - q_heads=32 kv_heads=8 head_dim=64  [MEASURED from metadata]
+        - pattern lives on the Attention NODE, not on a layer type: a layer is an ordered container of operations and may differ from its neighbours
   Linear             layer=0    blk.0.attn_q.weight
       type            : q4_K
       in/out features : 2048 / 2048
@@ -91,7 +106,7 @@ rms_eps=9.99999975e-06 rope_base=500000
       pairing         : GPT/adjacent   [MEASURED from reference graph]
       base            : 500000
       dim_count       : 64
-      scaling         : none
+      scaling         : precomputed table (rope_freqs.weight)
       position_source : position index (pos), from inp_pos
       evidence        : MEASURED (read from artefact/reference graph)
         - rope applied to Q and K only, not V (graph)
@@ -100,6 +115,8 @@ rms_eps=9.99999975e-06 rope_base=500000
         - llama.rope.scaling.type=none
         - pairing=GPT/adjacent MEASURED from the reference graph: the ROPE node located by ggml op, its immediate producer snapshotted, both pairing hypotheses tested numerically
         - not derived from general.architecture; the two models differ here despite both being decoder-only transformers
+        - precomputed rope_freqs table present, ne[0]=32  [MEASURED]: the model SHIPS its RoPE frequency table rather than deriving it from a base, so freq_base is unused here
+      UNRESOLVED      : rope_base reported as the metadata value even though a precomputed table exists: which one the reference actually uses is not established here
   GatedMLP           layer=0    ffn_gate.weight + ffn_up.weight + ffn_down.weight
       in/out features : 2048 / 8192
       scope           : gated (SwiGLU-family): gate and up share out_features, down returns to in_features

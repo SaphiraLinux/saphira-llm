@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <map>
 
 struct Ev { int seq; std::string op; const void * ptr; const void * src0;
             int64_t ne[4]; std::vector<float> bytes;
@@ -40,7 +41,8 @@ static const char * opname(int op) {
         case GGML_OP_SQRT: return "SQRT"; case GGML_OP_SILU_BACK: return "SILU_BACK";
         case GGML_OP_GET_ROWS: return "GET_ROWS"; case GGML_OP_NORM: return "NORM";
         case GGML_OP_SOFT_MAX: return "SOFT_MAX"; case GGML_OP_DUP: return "DUP";
-        case GGML_OP_UNARY: return "UNARY"; case GGML_OP_GLU: return "GLU";
+        case GGML_OP_UNARY: return "UNARY";
+        case GGML_OP_FLASH_ATTN_EXT: return "FLASH_ATTN_EXT"; case GGML_OP_GLU: return "GLU";
         default: return "OTHER";
     }
 }
@@ -81,6 +83,36 @@ int main(int argc, char ** argv) {
     g_rec = true; const int rc = llama_decode(ctx, b); g_rec = false;
     if (rc != 0) { printf("FATAL decode\n"); return 1; }
     printf("events=%d\n", (int) g.size());
+    /* OP HISTOGRAM: the graph's actual operation mix, counted not assumed. This
+     * is what decides whether a construct is per-layer or global: if SoftCap ops
+     * appear once, the construct is global; if they appear once per layer, it is
+     * per-layer. Counting is evidence, reading a paper is not. */
+    { std::map<std::string,int> h; for (size_t i = 0; i < g.size(); ++i) { h[g[i].op]++; }
+      printf("-- OP HISTOGRAM --\n");
+      for (std::map<std::string,int>::iterator it = h.begin(); it != h.end(); ++it) {
+          printf("   %-14s %d\n", it->first.c_str(), it->second); } }
+    /* SoftCap SITE CENSUS, by OP COMPOSITION rather than by name.
+     *
+     * A cap is f(x) = c * tanh(x/c), so it must appear as a SCALE, a UNARY
+     * (tanh), and another SCALE in that order. Counting the named nodes fails
+     * because cb() labels are not always propagated to src pointers, so the
+     * composition is what is counted: 2 SCALE + 1 UNARY per cap site.
+     * 26 layers with attention softcap would give 26 attention sites; a single
+     * final-logits site gives exactly one extra pair. */
+    { int n_scale = 0, n_unary = 0;
+      for (size_t i = 0; i < g.size(); ++i) {
+          if (g[i].op == "SCALE") { ++n_scale; }
+          if (g[i].op == "UNARY") { ++n_unary; } }
+      printf("   SCALE ops=%d  UNARY(tanh) ops=%d\n", n_scale, n_unary);
+      printf("   an UNFUSED SoftCap site is 2 SCALE + 1 UNARY, so unfused tanh sites = %d\n", n_unary);
+      int n_fa = 0;
+      for (size_t i = 0; i < g.size(); ++i) { if (g[i].op == "FLASH_ATTN_EXT") { ++n_fa; } }
+      printf("   FLASH_ATTN_EXT ops=%d\n", n_fa);
+      printf("   MEASUREMENT LIMIT: attention softcapping FUSED INTO FLASH_ATTN_EXT is\n");
+      printf("   invisible to an op histogram. The cap is a PARAMETER of that node, not a\n");
+      printf("   separate node, so counting SCALE/UNARY finds only UNFUSED cap sites. That\n");
+      printf("   is a limit of this probe, NOT evidence that the attention cap is absent.\n");
+    }
 
     /* ---- 1 and 2: ROPE, located by OP not by name ---- */
     printf("\n== ROPE, LOCATED BY OP ==\n");
