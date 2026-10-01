@@ -320,6 +320,482 @@ rms_eps=9.99999975e-06 rope_base=-1
   These are HETEROGENEITY IN THE METADATA. Reading one as a scalar
   aborts ggml; averaging it would invent a single layer body.
 
+-- CLAIM LEDGER (what was measured, from where, and what is NOT claimed) --
+  THE READING RULE. Four confidence classes, never to be conflated:
+    measured     : looked in the place that must speak, and it did
+    inferred     : derived from a reference RULE, weaker than direct observation
+    unresolved   : the evidence is insufficient to decide -- NOT the same as absent
+    unobservable : this instrument cannot see it, so nothing may be concluded
+  'not observed' is NEVER 'does not exist'. Absence is a claim ABOUT A SCOPE,
+  and the scope is printed on every row.
+
+  totals: 48 measured/present, 0 inferred, 7 unresolved, 3 unobservable
+
+  Field          : Embedding
+    Value        : PRESENT
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : model
+    Confidence   : measured
+    Claim allowed: a Embedding op exists at model scope, with the parameters listed above resolved from the artefact
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : OutputProjection
+    Value        : PRESENT
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : model
+    Confidence   : measured
+    Claim allowed: a OutputProjection op exists at model scope, with the parameters listed above resolved from the artefact
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : RMSNorm
+    Value        : PRESENT
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : 7
+    Confidence   : measured
+    Claim allowed: a RMSNorm op exists at layer 7, with the parameters listed above resolved from the artefact
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : rmsnorm.ffn
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 7
+    Confidence   : measured
+    Claim allowed: no FFN norm tensor exists at layer 7, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks FFN norm tensor entirely
+
+  Field          : rmsnorm.attn_q
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 7
+    Confidence   : measured
+    Claim allowed: no per-head Q norm exists at layer 7, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks per-head Q norm entirely
+
+  Field          : rmsnorm.attn_k
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 7
+    Confidence   : measured
+    Claim allowed: no per-head K norm exists at layer 7, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks per-head K norm entirely
+
+  Field          : softcap
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 7
+    Confidence   : measured
+    Claim allowed: no logit softcapping key exists at layer 7, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks logit softcapping key entirely
+
+  Field          : Attention
+    Value        : PRESENT
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : 7
+    Confidence   : measured
+    Claim allowed: a Attention op exists at layer 7, but not every parameter is measured
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : Linear
+    Value        : PRESENT
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : 7
+    Confidence   : measured
+    Claim allowed: a Linear op exists at layer 7, with the parameters listed above resolved from the artefact
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : Linear
+    Value        : PRESENT
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : 7
+    Confidence   : measured
+    Claim allowed: a Linear op exists at layer 7, with the parameters listed above resolved from the artefact
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : Linear
+    Value        : PRESENT
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : 7
+    Confidence   : measured
+    Claim allowed: a Linear op exists at layer 7, with the parameters listed above resolved from the artefact
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : Linear
+    Value        : PRESENT
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : 7
+    Confidence   : measured
+    Claim allowed: a Linear op exists at layer 7, with the parameters listed above resolved from the artefact
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : RoPE
+    Value        : PRESENT but PARTLY UNRESOLVED
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : 7
+    Confidence   : partly measured, partly unresolved
+    Claim allowed: a RoPE op exists at layer 7, but not every parameter is measured
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : ffn.gated_mlp
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 7
+    Confidence   : measured
+    Claim allowed: no FFN tensor (ffn_gate / ffn_up / ffn_down) exists at layer 7, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks FFN tensor (ffn_gate / ffn_up / ffn_down) entirely
+
+  Field          : ssm.selective_scan
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 7
+    Confidence   : measured
+    Claim allowed: no SelectiveScan recurrence (ssm_a / ssm_in / ssm_conv1d) exists at layer 7, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks SelectiveScan recurrence (ssm_a / ssm_in / ssm_conv1d) entirely
+
+  Field          : rope.pairing
+    Value        : UNRESOLVED
+    Evidence src : reference graph (not reached)
+    Layer        : 7
+    Confidence   : unresolved
+    Claim allowed: cannot determine rope.pairing at layer 7
+    NOT claimed  : NOT claimed: a pairing. The architecture name is not evidence; Qwen3 is NEOX and Llama-3.2 is GPT, so guessing from the name is the exact error this IR exists to avoid
+
+  Field          : rope.base
+    Value        : UNRESOLVED
+    Evidence src : artefact metadata (absent) + tensor inventory (absent)
+    Layer        : 7
+    Confidence   : unresolved
+    Claim allowed: cannot determine rope.base at layer 7
+    NOT claimed  : NOT claimed: a base value. The artefact declares no freq_base key and ships no precomputed rope_freqs table, so there is nothing in THIS file to read
+
+  Field          : metadata.per_layer_array
+    Value        : ARRAY (value VARIES BY LAYER)
+    Evidence src : artefact metadata (direct)
+    Layer        : 7
+    Confidence   : measured
+    Claim allowed: this quantity is per-layer, not a single model-wide value
+    NOT claimed  : NOT claimed: any single value for it, and not claimed that element 0 represents the model. Reading it as a scalar aborts ggml.
+
+  Field          : metadata.per_layer_array
+    Value        : ARRAY (value VARIES BY LAYER)
+    Evidence src : artefact metadata (direct)
+    Layer        : 7
+    Confidence   : measured
+    Claim allowed: this quantity is per-layer, not a single model-wide value
+    NOT claimed  : NOT claimed: any single value for it, and not claimed that element 0 represents the model. Reading it as a scalar aborts ggml.
+
+  Field          : fused-op internals (e.g. a SoftCap fused inside flash-attention)
+    Value        : UNOBSERVABLE
+    Evidence src : instrument capability
+    Layer        : model
+    Confidence   : unobservable
+    Claim allowed: this probe cannot observe fused-op internals (e.g. a SoftCap fused inside flash-attention), so nothing may be concluded about it
+    NOT claimed  : an op histogram counts node types and cannot see inside a node. Where a value is only reachable through op_params it must be read there or left unresolved.
+
+  Field          : RMSNorm
+    Value        : PRESENT
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : 1
+    Confidence   : measured
+    Claim allowed: a RMSNorm op exists at layer 1, with the parameters listed above resolved from the artefact
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : rmsnorm.ffn
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 1
+    Confidence   : measured
+    Claim allowed: no FFN norm tensor exists at layer 1, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks FFN norm tensor entirely
+
+  Field          : rmsnorm.attn_q
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 1
+    Confidence   : measured
+    Claim allowed: no per-head Q norm exists at layer 1, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks per-head Q norm entirely
+
+  Field          : rmsnorm.attn_k
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 1
+    Confidence   : measured
+    Claim allowed: no per-head K norm exists at layer 1, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks per-head K norm entirely
+
+  Field          : softcap
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 1
+    Confidence   : measured
+    Claim allowed: no logit softcapping key exists at layer 1, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks logit softcapping key entirely
+
+  Field          : attention
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 1
+    Confidence   : measured
+    Claim allowed: no Attention block (Q/K/V projections) exists at layer 1, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks Attention block (Q/K/V projections) entirely
+
+  Field          : linear.attn_q.weight
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 1
+    Confidence   : measured
+    Claim allowed: no attn_q.weight exists at layer 1, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks attn_q.weight entirely
+
+  Field          : linear.attn_k.weight
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 1
+    Confidence   : measured
+    Claim allowed: no attn_k.weight exists at layer 1, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks attn_k.weight entirely
+
+  Field          : linear.attn_v.weight
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 1
+    Confidence   : measured
+    Claim allowed: no attn_v.weight exists at layer 1, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks attn_v.weight entirely
+
+  Field          : linear.attn_output.weight
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 1
+    Confidence   : measured
+    Claim allowed: no attn_output.weight exists at layer 1, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks attn_output.weight entirely
+
+  Field          : rope
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 1
+    Confidence   : measured
+    Claim allowed: no Q or K projection to rotate exists at layer 1, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks Q or K projection to rotate entirely
+
+  Field          : GatedMLP
+    Value        : PRESENT
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : 1
+    Confidence   : measured
+    Claim allowed: a GatedMLP op exists at layer 1, with the parameters listed above resolved from the artefact
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : ssm.selective_scan
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 1
+    Confidence   : measured
+    Claim allowed: no SelectiveScan recurrence (ssm_a / ssm_in / ssm_conv1d) exists at layer 1, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks SelectiveScan recurrence (ssm_a / ssm_in / ssm_conv1d) entirely
+
+  Field          : rope.pairing
+    Value        : UNRESOLVED
+    Evidence src : reference graph (not reached)
+    Layer        : 1
+    Confidence   : unresolved
+    Claim allowed: cannot determine rope.pairing at layer 1
+    NOT claimed  : NOT claimed: a pairing. The architecture name is not evidence; Qwen3 is NEOX and Llama-3.2 is GPT, so guessing from the name is the exact error this IR exists to avoid
+
+  Field          : rope.base
+    Value        : UNRESOLVED
+    Evidence src : artefact metadata (absent) + tensor inventory (absent)
+    Layer        : 1
+    Confidence   : unresolved
+    Claim allowed: cannot determine rope.base at layer 1
+    NOT claimed  : NOT claimed: a base value. The artefact declares no freq_base key and ships no precomputed rope_freqs table, so there is nothing in THIS file to read
+
+  Field          : metadata.per_layer_array
+    Value        : ARRAY (value VARIES BY LAYER)
+    Evidence src : artefact metadata (direct)
+    Layer        : 1
+    Confidence   : measured
+    Claim allowed: this quantity is per-layer, not a single model-wide value
+    NOT claimed  : NOT claimed: any single value for it, and not claimed that element 0 represents the model. Reading it as a scalar aborts ggml.
+
+  Field          : metadata.per_layer_array
+    Value        : ARRAY (value VARIES BY LAYER)
+    Evidence src : artefact metadata (direct)
+    Layer        : 1
+    Confidence   : measured
+    Claim allowed: this quantity is per-layer, not a single model-wide value
+    NOT claimed  : NOT claimed: any single value for it, and not claimed that element 0 represents the model. Reading it as a scalar aborts ggml.
+
+  Field          : fused-op internals (e.g. a SoftCap fused inside flash-attention)
+    Value        : UNOBSERVABLE
+    Evidence src : instrument capability
+    Layer        : model
+    Confidence   : unobservable
+    Claim allowed: this probe cannot observe fused-op internals (e.g. a SoftCap fused inside flash-attention), so nothing may be concluded about it
+    NOT claimed  : an op histogram counts node types and cannot see inside a node. Where a value is only reachable through op_params it must be read there or left unresolved.
+
+  Field          : RMSNorm
+    Value        : PRESENT
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: a RMSNorm op exists at layer 0, with the parameters listed above resolved from the artefact
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : rmsnorm.ffn
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: no FFN norm tensor exists at layer 0, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks FFN norm tensor entirely
+
+  Field          : rmsnorm.attn_q
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: no per-head Q norm exists at layer 0, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks per-head Q norm entirely
+
+  Field          : rmsnorm.attn_k
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: no per-head K norm exists at layer 0, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks per-head K norm entirely
+
+  Field          : softcap
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: no logit softcapping key exists at layer 0, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks logit softcapping key entirely
+
+  Field          : attention
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: no Attention block (Q/K/V projections) exists at layer 0, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks Attention block (Q/K/V projections) entirely
+
+  Field          : linear.attn_q.weight
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: no attn_q.weight exists at layer 0, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks attn_q.weight entirely
+
+  Field          : linear.attn_k.weight
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: no attn_k.weight exists at layer 0, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks attn_k.weight entirely
+
+  Field          : linear.attn_v.weight
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: no attn_v.weight exists at layer 0, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks attn_v.weight entirely
+
+  Field          : linear.attn_output.weight
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: no attn_output.weight exists at layer 0, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks attn_output.weight entirely
+
+  Field          : rope
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: no Q or K projection to rotate exists at layer 0, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks Q or K projection to rotate entirely
+
+  Field          : ffn.gated_mlp
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: no FFN tensor (ffn_gate / ffn_up / ffn_down) exists at layer 0, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks FFN tensor (ffn_gate / ffn_up / ffn_down) entirely
+
+  Field          : DepthwiseConv1D
+    Value        : PRESENT
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: a DepthwiseConv1D op exists at layer 0, with the parameters listed above resolved from the artefact
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : RMSNorm
+    Value        : PRESENT
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: a RMSNorm op exists at layer 0, with the parameters listed above resolved from the artefact
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : SelectiveScan
+    Value        : PRESENT
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: a SelectiveScan op exists at layer 0, with the parameters listed above resolved from the artefact
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : rope.pairing
+    Value        : UNRESOLVED
+    Evidence src : reference graph (not reached)
+    Layer        : 0
+    Confidence   : unresolved
+    Claim allowed: cannot determine rope.pairing at layer 0
+    NOT claimed  : NOT claimed: a pairing. The architecture name is not evidence; Qwen3 is NEOX and Llama-3.2 is GPT, so guessing from the name is the exact error this IR exists to avoid
+
+  Field          : rope.base
+    Value        : UNRESOLVED
+    Evidence src : artefact metadata (absent) + tensor inventory (absent)
+    Layer        : 0
+    Confidence   : unresolved
+    Claim allowed: cannot determine rope.base at layer 0
+    NOT claimed  : NOT claimed: a base value. The artefact declares no freq_base key and ships no precomputed rope_freqs table, so there is nothing in THIS file to read
+
+  Field          : metadata.per_layer_array
+    Value        : ARRAY (value VARIES BY LAYER)
+    Evidence src : artefact metadata (direct)
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: this quantity is per-layer, not a single model-wide value
+    NOT claimed  : NOT claimed: any single value for it, and not claimed that element 0 represents the model. Reading it as a scalar aborts ggml.
+
+  Field          : metadata.per_layer_array
+    Value        : ARRAY (value VARIES BY LAYER)
+    Evidence src : artefact metadata (direct)
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: this quantity is per-layer, not a single model-wide value
+    NOT claimed  : NOT claimed: any single value for it, and not claimed that element 0 represents the model. Reading it as a scalar aborts ggml.
+
+  Field          : fused-op internals (e.g. a SoftCap fused inside flash-attention)
+    Value        : UNOBSERVABLE
+    Evidence src : instrument capability
+    Layer        : model
+    Confidence   : unobservable
+    Claim allowed: this probe cannot observe fused-op internals (e.g. a SoftCap fused inside flash-attention), so nothing may be concluded about it
+    NOT claimed  : an op histogram counts node types and cannot see inside a node. Where a value is only reachable through op_params it must be read there or left unresolved.
+
+
 -- PER-LAYER ROLE COVERAGE (all layers identical?) --
   layers seen=52  distinct roles=15  every layer has the same role set: NO (see below)
     layer 0 has 9 roles

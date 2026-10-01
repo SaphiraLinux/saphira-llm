@@ -78,6 +78,68 @@ struct ir_node {
     long n_experts, n_used, expert_ff;
 };
 
+
+/* ---- CLAIM LEDGER -------------------------------------------------------
+ *
+ * The whole project exists to make one distinction impossible to blur:
+ *
+ *     we MEASURED that it is not there   !=   we FAILED to observe it
+ *
+ * Every node printed above, and every absence printed above, is recorded here
+ * with the four things a reader needs before believing it:
+ *
+ *     field        what the claim is about
+ *     value        the value, or ABSENT / UNRESOLVED / UNOBSERVABLE
+ *     source       where the evidence came from
+ *     confidence   measured | inferred | unresolved | unobservable
+ *     claim allowed    the strongest statement this evidence PERMITS
+ *     NOT claimed      the statement a careless reader would make anyway
+ *
+ * The last field is the important one. "ABSENT, measured" still does not license
+ * "this model has no attention"; it licenses "no Q projection exists at layer 7".
+ * Anyone can turn a correct ledger into a wrong story by dropping the scope, so
+ * the scope is printed next to every claim rather than left to be inferred. */
+struct claim_rec {
+    std::string field, value, source, confidence, layer, allowed, notclaimed;
+};
+static std::vector<claim_rec> g_claims;
+static void claim(const std::string & field, const std::string & value,
+                  const std::string & source, const std::string & confidence,
+                  const std::string & layer, const std::string & allowed,
+                  const std::string & notclaimed) {
+    claim_rec c; c.field = field; c.value = value; c.source = source;
+    c.confidence = confidence; c.layer = layer; c.allowed = allowed;
+    c.notclaimed = notclaimed; g_claims.push_back(c);
+}
+
+/* An absence backed by the tensor inventory is the STRONGEST negative claim
+ * available: we looked in the one place the artefact must speak if it were going
+ * to, and it did not speak. */
+static void claim_absent(const std::string & field, int layer, const std::string & what) {
+    char lb[16]; if (layer < 0) snprintf(lb, sizeof lb, "model");
+    else snprintf(lb, sizeof lb, "%d", layer);
+    claim(field, "ABSENT", "tensor inventory (direct lookup)", "measured", lb,
+          "no " + what + " exists at " + (layer < 0 ? std::string("model scope") : ("layer " + std::string(lb))) +
+              ", measured by direct lookup in the tensor inventory",
+          layer < 0 ? ("no claim about any layer in particular")
+                    : ("no claim about OTHER layers, and no claim that the model lacks " + what + " entirely"));
+}
+/* Failing to observe is a DIFFERENT statement and must never be recorded as an
+ * absence. This is the distinction the project exists to protect. */
+static void claim_unresolved(const std::string & field, int layer, const std::string & why,
+                             const std::string & source) {
+    char lb[16]; if (layer < 0) snprintf(lb, sizeof lb, "model");
+    else snprintf(lb, sizeof lb, "%d", layer);
+    claim(field, "UNRESOLVED", source, "unresolved", lb,
+          "cannot determine " + field + " at " + (layer < 0 ? std::string("model scope") : ("layer " + std::string(lb))),
+          why);
+}
+static void claim_unobservable(const std::string & family, const std::string & why) {
+    claim(family, "UNOBSERVABLE", "instrument capability", "unobservable", "model",
+          "this probe cannot observe " + family + ", so nothing may be concluded about it",
+          why);
+}
+
 static ir_node mk(ir_kind k, int layer) {
     ir_node n;
     n.kind = k; n.layer = layer; n.measured = false;
@@ -90,6 +152,19 @@ static ir_node mk(ir_kind k, int layer) {
     return n;
 }
 static void emit(const ir_node & n, const char * arch) {
+    { char lb[16]; if (n.layer < 0) snprintf(lb, sizeof lb, "model");
+      else snprintf(lb, sizeof lb, "%d", n.layer);
+      const std::string k = kind_name(n.kind);
+      const bool unresolved = (n.pairing == "UNRESOLVED") || !n.unknown.empty();
+      claim(k, unresolved ? "PRESENT but PARTLY UNRESOLVED" : "PRESENT",
+            "tensor inventory (direct) + resolved parameters",
+            unresolved ? "partly measured, partly unresolved" : "measured", lb,
+            "a " + k + " op exists at " +
+                (n.layer < 0 ? std::string("model scope") : ("layer " + std::string(lb))) +
+                (n.measured ? ", with the parameters listed above resolved from the artefact"
+                            : ", but not every parameter is measured"),
+            "no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers");
+    }
     printf("  %-18s", kind_name(n.kind));
     if (n.layer >= 0) { printf(" layer=%-3d", n.layer); } else { printf(" %-10s", "(model)"); }
     printf("  %s\n", n.tensor.c_str());
@@ -282,6 +357,7 @@ static void emit_ssm_block(gguf_context * g, const std::string & P,
         printf("                       there is no recurrence to describe\n");
         printf("      evidence        : MEASURED -- emitting it would invent a state-space model from an\n");
         printf("                       architecture name.\n");
+        claim_absent("ssm.selective_scan", L, "SelectiveScan recurrence (ssm_a / ssm_in / ssm_conv1d)");
     } else {
         ir_node n = mk(IR_SCAN, L);
         n.tensor = "ssm_in -> ssm_out with ssm_a, ssm_d and an input-derived step size";
@@ -833,6 +909,7 @@ int main(int argc, char ** argv) {
         printf("      status          : ABSENT -- no ffn norm tensor exists AT THIS LAYER\n");
         printf("      evidence        : MEASURED -- a post-attention norm in another layer does not\n");
         printf("                       license one here\n");
+        claim_absent("rmsnorm.ffn", L, "FFN norm tensor");
       } else {
       n.norm_width = dims[ffn_key].first;
       n.type_name = types[ffn_key]; n.eps = eps; n.scope = "residual";
@@ -861,6 +938,8 @@ int main(int argc, char ** argv) {
                    roles.count(hn[t]), max_layer + 1);
             printf("      NOTE            : ABSENT is not UNKNOWN. Absent means looked-and-\n");
             printf("                       not-there; UNKNOWN means could-not-determine.\n");
+            claim_absent(std::string("rmsnorm.") + (t == 0 ? "attn_q" : "attn_k"), L,
+                         t == 0 ? "per-head Q norm" : "per-head K norm");
             continue;
         }
         ir_node n = mk(IR_RMSNORM, L);
@@ -978,6 +1057,7 @@ int main(int argc, char ** argv) {
           printf("      status          : ABSENT (no softcapping keys in metadata)\n");
           printf("      evidence        : MEASURED -- both keys absent from %lld kv pairs\n",
                  (long long) gguf_get_n_kv(g));
+          claim_absent("softcap", L, "logit softcapping key");
       } else {
           if (idA >= 0) {
               ir_node n = mk(IR_SOFTCAP, L);
@@ -1046,6 +1126,7 @@ int main(int argc, char ** argv) {
                heads);
         printf("                       Attention node here: an op present in SOME layers must not be\n");
         printf("                       emitted for every layer.\n");
+        claim_absent("attention", L, "Attention block (Q/K/V projections)");
     } else {
     ir_node n = mk(IR_ATTENTION, L);
       n.head_dim = key_len; n.n_heads = heads; n.n_kv_heads = kv_heads;
@@ -1113,6 +1194,7 @@ int main(int argc, char ** argv) {
             printf("      evidence        : MEASURED -- no tensor with this name exists AT THIS LAYER, so\n");
             printf("                       NO node is emitted. The role may exist at another layer; that is\n");
             printf("                       not evidence here. Emitting one would be fabricating structure.\n");
+            claim_absent(std::string("linear.") + proj[i].role, L, proj[i].role);
             continue;
         }
         ir_node n = mk(IR_LINEAR, L);
@@ -1134,6 +1216,7 @@ int main(int argc, char ** argv) {
     if (!AT("attn_q.weight", L) && !AT("attn_k.weight", L)) {
         printf("  RoPE               layer=%-3d  (none)\n", L);
         printf("      status          : ABSENT -- no Q or K projection exists AT THIS LAYER to rotate\n");
+        claim_absent("rope", L, "Q or K projection to rotate");
         printf("      evidence        : MEASURED -- RoPE is a property of an attention block, and there\n");
         printf("                       is none. Emitting a RoPE node would invent one.\n");
     } else {
@@ -1317,6 +1400,7 @@ int main(int argc, char ** argv) {
         printf("      status          : ABSENT -- feed_forward_length is %ld and no FFN tensor exists\n", ff);
         printf("      evidence        : MEASURED -- NO FFN TENSOR EXISTS AT THIS LAYER, so no gated MLP is\n");
         printf("                       emitted. Presence elsewhere in the model does not license it\n");
+        claim_absent("ffn.gated_mlp", L, "FFN tensor (ffn_gate / ffn_up / ffn_down)");
         printf("                       here: an op present in SOME layers must not be emitted for every\n");
         printf("                       layer, and that rule is enforced layer-locally.\n");
     } else {
@@ -1361,6 +1445,37 @@ int main(int argc, char ** argv) {
           }
       } }
 
+    /* ---- UNRESOLVED and UNOBSERVABLE, recorded as first-class claims ---- */
+    { char lb[16]; snprintf(lb, sizeof lb, "%d", L);
+      if (!kv_arrays_seen.empty()) { /* metadata arrays already reported */ }
+      claim_unresolved("rope.pairing", L,
+          "NOT claimed: a pairing. The architecture name is not evidence; Qwen3 is NEOX and "
+          "Llama-3.2 is GPT, so guessing from the name is the exact error this IR exists to avoid",
+          "reference graph (not reached)");
+      if (rope_base < 0) {
+          claim_unresolved("rope.base", L,
+              "NOT claimed: a base value. The artefact declares no freq_base key and ships no "
+              "precomputed rope_freqs table, so there is nothing in THIS file to read",
+              "artefact metadata (absent) + tensor inventory (absent)");
+      }
+    }
+    if (!kv_arrays_seen.empty()) {
+        for (size_t i = 0; i < kv_arrays_seen.size(); ++i) {
+            char lb[16]; snprintf(lb, sizeof lb, "%d", L);
+            claim("metadata.per_layer_array", "ARRAY (value VARIES BY LAYER)",
+                  "artefact metadata (direct)", "measured", lb,
+                  "this quantity is per-layer, not a single model-wide value",
+                  "NOT claimed: any single value for it, and not claimed that element 0 "
+                  "represents the model. Reading it as a scalar aborts ggml.");
+        }
+    }
+    /* An instrument cannot conclude anything about a family it cannot see. The
+     * fused SoftCap was invisible to an op histogram and visible only in
+     * op_params; that lesson is why this exists. */
+    claim_unobservable("fused-op internals (e.g. a SoftCap fused inside flash-attention)",
+        "an op histogram counts node types and cannot see inside a node. Where a value is "
+        "only reachable through op_params it must be read there or left unresolved.");
+
     } /* end per-distinct-body emission */
 
     if (!kv_arrays_seen.empty()) {
@@ -1369,6 +1484,35 @@ int main(int argc, char ** argv) {
             printf("  %s\n", kv_arrays_seen[i].c_str());
         printf("  These are HETEROGENEITY IN THE METADATA. Reading one as a scalar\n");
         printf("  aborts ggml; averaging it would invent a single layer body.\n");
+    }
+
+    printf("\n-- CLAIM LEDGER (what was measured, from where, and what is NOT claimed) --\n");
+    printf("  THE READING RULE. Four confidence classes, never to be conflated:\n");
+    printf("    measured     : looked in the place that must speak, and it did\n");
+    printf("    inferred     : derived from a reference RULE, weaker than direct observation\n");
+    printf("    unresolved   : the evidence is insufficient to decide -- NOT the same as absent\n");
+    printf("    unobservable : this instrument cannot see it, so nothing may be concluded\n");
+    printf("  'not observed' is NEVER 'does not exist'. Absence is a claim ABOUT A SCOPE,\n");
+    printf("  and the scope is printed on every row.\n\n");
+    { size_t nm[4] = {0,0,0,0};
+      for (size_t i = 0; i < g_claims.size(); ++i) {
+          const std::string & c = g_claims[i].confidence;
+          if (c.find("unresolved") != std::string::npos) nm[0]++;
+          else if (c.find("unobservable") != std::string::npos) nm[1]++;
+          else if (c.find("inferred") != std::string::npos) nm[2]++;
+          else nm[3]++;
+      }
+      printf("  totals: %zu measured/present, %zu inferred, %zu unresolved, %zu unobservable\n\n",
+             nm[3], nm[2], nm[0], nm[1]); }
+    for (size_t i = 0; i < g_claims.size(); ++i) {
+        const claim_rec & c = g_claims[i];
+        printf("  Field          : %s\n", c.field.c_str());
+        printf("    Value        : %s\n", c.value.c_str());
+        printf("    Evidence src : %s\n", c.source.c_str());
+        printf("    Layer        : %s\n", c.layer.c_str());
+        printf("    Confidence   : %s\n", c.confidence.c_str());
+        printf("    Claim allowed: %s\n", c.allowed.c_str());
+        printf("    NOT claimed  : %s\n\n", c.notclaimed.c_str());
     }
 
     printf("\n-- PER-LAYER ROLE COVERAGE (all layers identical?) --\n");
