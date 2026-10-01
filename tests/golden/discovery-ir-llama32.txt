@@ -125,7 +125,7 @@ rms_eps=9.99999975e-06 rope_base=500000
         - ffn_up   ne=[2048,8192]  same shape as gate => parallel projections
         - ffn_down ne=[8192,2048]  transpose of the gate shape => contraction
         - llama.feed_forward_length=8192
-        - ffn_gate_inp.weight ABSENT => not MoE
+        - ffn_gate_inp.weight ABSENT => not MoE, and not inferred from the architecture name
 
 -- PER-LAYER ROLE COVERAGE (all layers identical?) --
   layers seen=16  distinct roles=9  every layer has the same role set: YES

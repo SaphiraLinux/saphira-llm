@@ -20,7 +20,8 @@
 #include <algorithm>
 
 enum ir_kind { IR_UNKNOWN = 0, IR_EMBEDDING, IR_RMSNORM, IR_LINEAR, IR_ROPE,
-               IR_HEADSPLIT, IR_ATTENTION, IR_RESIDUAL, IR_MLP, IR_OUTPUT, IR_SOFTCAP };
+               IR_HEADSPLIT, IR_ATTENTION, IR_RESIDUAL, IR_MLP, IR_OUTPUT, IR_SOFTCAP,
+               IR_ROUTER, IR_EXPERTFFN };
 
 static const char * kind_name(ir_kind k) {
     switch (k) {
@@ -35,6 +36,8 @@ static const char * kind_name(ir_kind k) {
         case IR_MLP:        return "GatedMLP";
         case IR_OUTPUT:     return "OutputProjection";
         case IR_SOFTCAP:    return "SoftCap";
+        case IR_ROUTER:     return "ExpertRouter";
+        case IR_EXPERTFFN:  return "ExpertGatedFFN";
     }
     return "?";
 }
@@ -58,6 +61,7 @@ struct ir_node {
     long attn_pattern_sliding;   /* Attention.pattern */
     long norm_width;
     std::string scope, position;
+    long n_experts, n_used, expert_ff;
 };
 
 static ir_node mk(ir_kind k, int layer) {
@@ -68,6 +72,7 @@ static ir_node mk(ir_kind k, int layer) {
     n.eps = n.rope_base = -1.0; n.rope_dim_count = -1;
     n.bias = false; n.has_norm_weight = false; n.norm_width = -1;
     n.attn_pattern_sliding = -1;
+    n.n_experts = n.n_used = n.expert_ff = -1;
     return n;
 }
 static void emit(const ir_node & n, const char * arch) {
@@ -189,6 +194,14 @@ int main(int argc, char ** argv) {
         per_layer[layer].insert(role);
     }
 
+    /* ---- MoE metadata, read not assumed ---- */
+    long n_experts = -1, n_used = -1;
+    { const int64_t e = gguf_find_key(g, (P + "expert_count").c_str());
+      if (e >= 0) { n_experts = (long) gguf_get_val_u32(g, e); }
+      const int64_t u = gguf_find_key(g, (P + "expert_used_count").c_str());
+      if (u >= 0) { n_used = (long) gguf_get_val_u32(g, u); } }
+    const bool is_moe = (dims.count("ffn_gate_inp.weight") > 0);
+
     /* ---- tokens we did NOT learn to describe ---- */
     std::set<std::string> known_roles;
     known_roles.insert("attn_norm.weight");   known_roles.insert("ffn_norm.weight");
@@ -197,6 +210,13 @@ int main(int argc, char ** argv) {
     known_roles.insert("attn_q_norm.weight"); known_roles.insert("attn_k_norm.weight");
     known_roles.insert("ffn_gate.weight");    known_roles.insert("ffn_up.weight");
     known_roles.insert("ffn_down.weight");
+    /* MoE roles are known vocabulary now, with their own ops. They were UNKNOWN
+     * before ExpertRouter / ExpertGatedFFN existed, which was the correct state
+     * at the time: the vocabulary could not describe them. */
+    known_roles.insert("ffn_gate_inp.weight");
+    known_roles.insert("ffn_gate_exps.weight");
+    known_roles.insert("ffn_up_exps.weight");
+    known_roles.insert("ffn_down_exps.weight");
     /* These two were reported UNKNOWN at 9c62164 and that was WRONG. They are
      * canonical llama.cpp tensor names -- llama-arch.cpp:460 maps
      * LLM_TENSOR_ATTN_POST_NORM to "blk.%d.post_attention_norm" -- so they are
@@ -396,15 +416,38 @@ int main(int argc, char ** argv) {
         }
         ir_node n = mk(IR_RMSNORM, L);
         n.tensor = buf; n.norm_width = dims[hn[t]].first; n.type_name = types[hn[t]];
-        n.eps = eps; n.scope = "head"; n.position = "pre_rope";
-        n.head_dim = key_len; n.n_heads = (t == 0) ? heads : kv_heads;
-        n.n_kv_heads = kv_heads;
+        n.eps = eps; n.position = "pre_rope";
+        n.head_dim = key_len; n.n_heads = heads; n.n_kv_heads = kv_heads;
         n.evidence.push_back("tensor " + n.tensor + " present in all " +
             std::to_string(roles[hn[t]]) + " layers");
-        n.evidence.push_back("ne=[" + std::to_string(dims[hn[t]].first) + ",1] == key_length=" +
-            std::to_string(key_len) + " => reduces the HEAD, not the residual");
-        n.evidence.push_back("scope=head is a PARAMETER, not a different op: the mathematics is "
-            "RMS over the head axis");
+        n.evidence.push_back("ne=[" + std::to_string(dims[hn[t]].first) + ",1] width MEASURED");
+        /* SCOPE must be resolved from the width against dimensions we actually
+         * have. The first version wrote "ne=[W,1] == key_length" and concluded
+         * "reduces the HEAD" while key_length was -1, i.e. ABSENT. Comparing a
+         * measured width against an absent key and then asserting a scope is a
+         * vacuous gate, and it reported a full-width norm as per-head. */
+        const long w = dims[hn[t]].first;
+        if (key_len > 0 && w == key_len) {
+            n.scope = "head";
+            n.evidence.push_back("width " + std::to_string(w) + " == key_length " +
+                std::to_string(key_len) + " => reduces ONE HEAD  [MEASURED comparison]");
+        } else if (embd > 0 && w == embd) {
+            n.scope = "full_vector";
+            n.evidence.push_back("width " + std::to_string(w) + " == embedding_length " +
+                std::to_string(embd) + ", and differs from any head width => reduces the WHOLE "
+                "Q or K vector BEFORE it is split into heads  [MEASURED comparison]");
+        } else {
+            n.scope = "UNRESOLVED";
+            n.unknown.push_back("scope UNRESOLVED: width " + std::to_string(w) +
+                " matches neither key_length (" + std::to_string(key_len) +
+                ") nor embedding_length (" + std::to_string(embd) + ")");
+        }
+        if (key_len < 0) {
+            n.unknown.push_back("key_length ABSENT for this architecture, so head_dim could not be "
+                                "read from metadata and no head-scope comparison was possible");
+        }
+        n.evidence.push_back("scope is a PARAMETER of RMSNorm; per-head and full-vector norms are "
+            "the same operation over a different axis length");
         n.evidence.push_back("position=pre_rope from the graph: the norm is applied at the line "
             "before ggml_rope_ext");
         snprintf(buf, sizeof buf, "blk.%d.%s.bias", L, (t == 0) ? "attn_q_norm" : "attn_k_norm");
@@ -638,8 +681,70 @@ int main(int argc, char ** argv) {
       }
       emit(n, arch); }
 
-    { ir_node n = mk(IR_MLP, L);
-      n.tensor = "ffn_gate.weight + ffn_up.weight + ffn_down.weight";
+    /* MoE is NOT squeezed into GatedMLP. The router and the expert bank are
+     * different mathematics from a dense gated MLP: a router produces a top-k
+     * selection over experts, and the FFN runs only on the chosen subset. */
+    if (is_moe) {
+        { ir_node r = mk(IR_ROUTER, L);
+          r.tensor = "ffn_gate_inp.weight";
+          r.in_features = dims["ffn_gate_inp.weight"].first;
+          r.out_features = dims["ffn_gate_inp.weight"].second;
+          r.type_name = types["ffn_gate_inp.weight"];
+          r.n_experts = n_experts; r.n_used = n_used;
+          r.measured = true;
+          r.evidence.push_back("tensor ffn_gate_inp.weight ne=[" + std::to_string(r.in_features) +
+              "," + std::to_string(r.out_features) + "]  [MEASURED]");
+          r.evidence.push_back("output width " + std::to_string(r.out_features) +
+              " is the EXPERT COUNT: one score per expert, so this is a router");
+          if (n_experts > 0) {
+              r.evidence.push_back(std::string(P) + "expert_count = " + std::to_string(n_experts) +
+                  "  [MEASURED], agrees with the router output width");
+          }
+          if (n_used > 0) {
+              r.evidence.push_back(std::string(P) + "expert_used_count = " + std::to_string(n_used) +
+                  "  [MEASURED]: top-" + std::to_string(n_used) + " of " + std::to_string(n_experts) +
+                  " experts are active per token");
+              r.scope = "top_k";
+          } else {
+              r.unknown.push_back("n_used (top-k) UNRESOLVED: no expert_used_count key");
+          }
+          r.unknown.push_back("ROUTING FUNCTION UNRESOLVED: the artefact states how MANY experts "
+              "are used, not HOW they are chosen or combined. Top-k by weight, softmax gating and "
+              "normalised weighted sums are all consistent with the metadata, so the function is not "
+              "asserted from it. It must come from the reference graph.");
+          emit(r, arch); }
+        { ir_node n = mk(IR_EXPERTFFN, L);
+          n.tensor = "ffn_gate_exps + ffn_up_exps + ffn_down_exps";
+          n.in_features = dims["ffn_gate_exps.weight"].first;
+          n.out_features = dims["ffn_gate_exps.weight"].second;
+          n.expert_ff = dims["ffn_gate_exps.weight"].second;
+          n.n_experts = n_experts;
+          n.measured = true;
+          n.evidence.push_back("ffn_gate_exps ne=[" + std::to_string(dims["ffn_gate_exps.weight"].first) +
+              "," + std::to_string(dims["ffn_gate_exps.weight"].second) + "]  [MEASURED]");
+          n.evidence.push_back("ffn_up_exps   ne=[" + std::to_string(dims["ffn_up_exps.weight"].first) +
+              "," + std::to_string(dims["ffn_up_exps.weight"].second) + "]  same shape as gate => "
+              "parallel gate/up per expert, the SAME gated mathematics as a dense MLP");
+          n.evidence.push_back("ffn_down_exps ne=[" + std::to_string(dims["ffn_down_exps.weight"].first) +
+              "," + std::to_string(dims["ffn_down_exps.weight"].second) + "]  transposed => contraction");
+          /* expert_ff is read from the EXPERT TENSOR SHAPE, not from
+           * feed_forward_length. Here the two happen to be equal (1024), so
+           * saying they are "distinct" would have been false; the claim that
+           * matters is where the number comes from. */
+          n.evidence.push_back("expert_ff = " + std::to_string(dims["ffn_gate_exps.weight"].second) +
+              " per expert, read from the EXPERT TENSOR SHAPE");
+          n.evidence.push_back(std::string(P) + "feed_forward_length=" + std::to_string(ff) +
+              (ff == dims["ffn_gate_exps.weight"].second
+                 ? " happens to EQUAL expert_ff here; expert_ff is still taken from the tensor "
+                   "shape, not from this key"
+                 : " differs from expert_ff, confirming expert_ff cannot be read from this key"));
+          n.evidence.push_back("shared expert ABSENT: no ffn_gate_exps_shear weight, so there is "
+              "no always-on dense FFN alongside the experts");
+          n.scope = "gated, per expert, on the router-selected subset";
+          emit(n, arch); }
+    } else {
+        ir_node n = mk(IR_MLP, L);
+        n.tensor = "ffn_gate.weight + ffn_up.weight + ffn_down.weight";
       n.in_features = dims["ffn_gate.weight"].first;
       n.out_features = dims["ffn_gate.weight"].second;
       n.scope = "gated (SwiGLU-family): gate and up share out_features, down returns to in_features";
@@ -650,7 +755,8 @@ int main(int argc, char ** argv) {
       n.evidence.push_back("ffn_down ne=[" + std::to_string(dims["ffn_down.weight"].first) + "," +
           std::to_string(dims["ffn_down.weight"].second) + "]  transpose of the gate shape => contraction");
       n.evidence.push_back(std::string(P) + "feed_forward_length=" + std::to_string(ff));
-      n.evidence.push_back("ffn_gate_inp.weight ABSENT => not MoE");
+      n.evidence.push_back("ffn_gate_inp.weight ABSENT => not MoE, and not inferred from the "
+                           "architecture name");
       n.measured = true; emit(n, arch); }
 
     /* ---- Attention pattern for EVERY layer, individually ---- */

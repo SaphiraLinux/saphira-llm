@@ -53,19 +53,21 @@ rms_eps=9.99999997e-07 rope_base=1000000
       head_dim=128  heads=32  kv_heads=8
       evidence        : MEASURED (read from artefact/reference graph)
         - tensor blk.0.attn_q_norm.weight present in all 36 layers
-        - ne=[128,1] == key_length=128 => reduces the HEAD, not the residual
-        - scope=head is a PARAMETER, not a different op: the mathematics is RMS over the head axis
+        - ne=[128,1] width MEASURED
+        - width 128 == key_length 128 => reduces ONE HEAD  [MEASURED comparison]
+        - scope is a PARAMETER of RMSNorm; per-head and full-vector norms are the same operation over a different axis length
         - position=pre_rope from the graph: the norm is applied at the line before ggml_rope_ext
         - blk.0.attn_q_norm.bias ABSENT => bias=false
   RMSNorm            layer=0    blk.0.attn_k_norm.weight
       type            : f32
       norm width      : 128   bias=false
       epsilon         : 9.99999997e-07
-      head_dim=128  heads=8  kv_heads=8
+      head_dim=128  heads=32  kv_heads=8
       evidence        : MEASURED (read from artefact/reference graph)
         - tensor blk.0.attn_k_norm.weight present in all 36 layers
-        - ne=[128,1] == key_length=128 => reduces the HEAD, not the residual
-        - scope=head is a PARAMETER, not a different op: the mathematics is RMS over the head axis
+        - ne=[128,1] width MEASURED
+        - width 128 == key_length 128 => reduces ONE HEAD  [MEASURED comparison]
+        - scope is a PARAMETER of RMSNorm; per-head and full-vector norms are the same operation over a different axis length
         - position=pre_rope from the graph: the norm is applied at the line before ggml_rope_ext
         - blk.0.attn_k_norm.bias ABSENT => bias=false
   SoftCap            layer=0    (none)
@@ -132,7 +134,7 @@ rms_eps=9.99999997e-07 rope_base=1000000
         - ffn_up   ne=[4096,12288]  same shape as gate => parallel projections
         - ffn_down ne=[12288,4096]  transpose of the gate shape => contraction
         - qwen3.feed_forward_length=12288
-        - ffn_gate_inp.weight ABSENT => not MoE
+        - ffn_gate_inp.weight ABSENT => not MoE, and not inferred from the architecture name
 
 -- PER-LAYER ROLE COVERAGE (all layers identical?) --
   layers seen=36  distinct roles=11  every layer has the same role set: YES

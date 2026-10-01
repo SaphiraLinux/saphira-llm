@@ -165,6 +165,37 @@ else
   echo "  skip H* (Gemma-2 artefact absent)"
 fi
 
+# I: OLMoE, the MoE model, which attacked the vocabulary in a new way.
+O=/var/lib/spoon/models/olmoe-1b7b/olmoe-q4_k_m.gguf
+if [ -f "$O" ]; then
+  P1=NEOX; SH1="" SW="" FC="" O1=$(gen "$O")
+  printf '%s\n' "$O1" | grep -q '^  ExpertRouter '; ok "I1 MoE gets its own ExpertRouter op, not squeezed into GatedMLP" $?
+  printf '%s\n' "$O1" | grep -q '^  ExpertGatedFFN '; ok "I2 expert bank has its own op" $?
+  printf '%s\n' "$O1" | grep -q '^  GatedMLP '; if [ $? -ne 0 ]; then ok "I3 dense GatedMLP is NOT emitted for a MoE model" 0; else ok "I3 dense GatedMLP is NOT emitted for a MoE model" 1; fi
+  printf '%s\n' "$O1" | grep -qE 'in/out features +: 2048 / 64'; ok "I4 router shape measured (experts = output width)" $?
+  printf '%s\n' "$O1" | grep -q 'expert_used_count = 8'; ok "I5 top-8 of 64 measured" $?
+  printf '%s\n' "$O1" | grep -q 'ROUTING FUNCTION UNRESOLVED'; ok "I6 routing FUNCTION left unresolved, not guessed from count" $?
+  printf '%s\n' "$O1" | grep -q 'shared expert ABSENT'; ok "I7 shared-expert absence evidenced, not assumed" $?
+  # OLMoE's Q/K norm is FULL WIDTH while Qwen3s is PER HEAD: same op, different parameter
+  printf '%s\n' "$O1" | grep -q 'reduces the WHOLE Q or K vector'; ok "I8 OLMoE full-vector Q/K norm, not misreported as per-head" $?
+  printf '%s\n' "$O1" | grep -q 'scope is a PARAMETER of RMSNorm'; ok "I9 scope is a parameter, same op as Qwen3s per-head norm" $?
+  printf '%s\n' "$O1" | grep -q 'key_length ABSENT'; ok "I10 absent key_length recorded rather than compared against" $?
+  # Qwen3 must NOT have become full-vector, and OLMoE must not have gained per-head
+  A_NOW=$(P1=NEOX gen "$QW")
+  printf '%s\n' "$A_NOW" | grep -q 'reduces ONE HEAD'; ok "I11 Qwen3 still per-head after learning OLMoE" $?
+  printf '%s\n' "$O1" | grep -q 'UNKNOWN role'; if [ $? -ne 0 ]; then ok "I12 no UNKNOWN roles remain for OLMoE" 0; else ok "I12 no UNKNOWN roles remain for OLMoE" 1; fi
+  # NON-VACUITY: unlearn the router and it must resurface as UNKNOWN
+  cp tools/s0_ir_probe.cpp /tmp/ir4.bak
+  sed -i 's/known_roles.insert("ffn_gate_inp.weight");//' tools/s0_ir_probe.cpp
+  BROKEN2=$(gen "$O")
+  printf '%s\n' "$BROKEN2" | grep -q 'UNKNOWN role: ffn_gate_inp.weight'
+  if [ $? -eq 0 ]; then ok "I13 non-vacuity: unlearning the router surfaces UNKNOWN" 0; else ok "I13 non-vacuity: unlearning the router surfaces UNKNOWN" 1; fi
+  cp /tmp/ir4.bak tools/s0_ir_probe.cpp
+  [ "$(gen "$O")" = "$O1" ]; ok "I14 restore byte-exact" $?
+else
+  echo "  skip I* (OLMoE artefact absent)"
+fi
+
 echo
 echo "discovery-ir structural tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -159,7 +159,7 @@ rms_eps=9.99999997e-07 rope_base=-1
         - ffn_up   ne=[2304,9216]  same shape as gate => parallel projections
         - ffn_down ne=[9216,2304]  transpose of the gate shape => contraction
         - gemma2.feed_forward_length=9216
-        - ffn_gate_inp.weight ABSENT => not MoE
+        - ffn_gate_inp.weight ABSENT => not MoE, and not inferred from the architecture name
 
 -- ATTENTION PATTERN PER LAYER (each layer its own node) --
   Attention         layer=0    pattern=full           window=4096  q_heads=8 kv_heads=4 head_dim=256

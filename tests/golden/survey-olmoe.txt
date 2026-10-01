@@ -1,0 +1,88 @@
+compiling (quiet)
+running fresh binary
+########## OLMOE ##########
+file = /var/lib/spoon/models/olmoe-1b7b/olmoe-q4_k_m.gguf
+kv_pairs = 38   tensors = 195
+
+-- ARCHITECTURE-RELEVANT METADATA (tokenizer.* excluded) --
+  general.architecture                                 = "olmoe"
+  general.type                                         = "model"
+  general.name                                         = "Olmoe Instruct Hf"
+  general.finetune                                     = "instruct-hf"
+  general.basename                                     = "olmoe"
+  general.size_label                                   = "64x577M"
+  general.license                                      = "apache-2.0"
+  general.base_model.count                             = 1
+  general.base_model.0.name                            = "OLMoE 1B 7B 0924 SFT"
+  general.base_model.0.version                         = "0924"
+  general.base_model.0.organization                    = "Allenai"
+  general.base_model.0.repo_url                        = "https://huggingface.co/allenai/OLMoE-1B-7B-0924-SFT"
+  general.tags                                         = <arr>
+  general.languages                                    = <arr>
+  general.datasets                                     = <arr>
+  olmoe.block_count                                    = 16
+  olmoe.context_length                                 = 4096
+  olmoe.embedding_length                               = 2048
+  olmoe.feed_forward_length                            = 1024
+  olmoe.attention.head_count                           = 16
+  olmoe.attention.head_count_kv                        = 16
+  olmoe.rope.freq_base                                 = 10000
+  olmoe.expert_used_count                              = 8
+  general.file_type                                    = 15
+  olmoe.attention.layer_norm_rms_epsilon               = 9.99999975e-06
+  olmoe.expert_count                                   = 64
+  general.quantization_version                         = 2
+
+-- TOKENIZER TUPLE (the selector, all three legs) --
+  tokenizer.ggml.model                   = "gpt2"
+  tokenizer.ggml.pre                     = "olmo"
+  tokenizer.ggml.bos_token_id            = 50279
+  tokenizer.ggml.eos_token_id            = 50279
+  tokenizer.ggml.padding_token_id        = 50280
+  tokenizer.ggml.unknown_token_id        ABSENT
+  tokenizer.ggml.add_bos_token           = false
+  tokenizer.ggml.add_eos_token           = false
+  tokenizer.ggml.add_space_prefix        ABSENT
+  tokenizer.ggml.ignore_merges           ABSENT
+  tokenizer.ggml.tokens n                = 50304
+  tokenizer.ggml.merges                  = present
+
+-- TENSOR TYPE HISTOGRAM --
+  f32          81
+  q4_K         97
+  q6_K         17
+
+-- TENSOR INVENTORY, layer indices resolved --
+  max layer index = 15  => layer count = 16
+  attn_k.weight            layers=16   ne=[2048,2048]
+  attn_k_norm.weight       layers=16   ne=[2048,1]
+  attn_norm.weight         layers=16   ne=[2048,1]
+  attn_output.weight       layers=16   ne=[2048,2048]
+  attn_q.weight            layers=16   ne=[2048,2048]
+  attn_q_norm.weight       layers=16   ne=[2048,1]
+  attn_v.weight            layers=16   ne=[2048,2048]
+  ffn_down_exps.weight     layers=16   ne=[1024,2048]
+  ffn_gate_exps.weight     layers=16   ne=[2048,1024]
+  ffn_gate_inp.weight      layers=16   ne=[2048,64]
+  ffn_norm.weight          layers=16   ne=[2048,1]
+  ffn_up_exps.weight       layers=16   ne=[2048,1024]
+
+-- NON-LAYER TENSORS --
+  output.weight
+  output_norm.weight
+  token_embd.weight
+
+-- OPTIONAL PER-LAYER TENSORS: PRESENT OR ABSENT --
+  attn_q_norm.weight         PRESENT
+  attn_k_norm.weight         PRESENT
+  attn_q_norm.bias           ABSENT
+  attn_k_norm.bias           ABSENT
+  attn_q.bias                ABSENT
+  attn_k.bias                ABSENT
+  attn_v.bias                ABSENT
+  attn_output.bias           ABSENT
+  ffn_gate_inp.weight        PRESENT
+  ffn_norm.bias              ABSENT
+  attn_norm.bias             ABSENT
+  (a genuine per-layer tensor is verified at layer 0 AND its count
+   matches the layer count above, so it is not a single stray tensor)
