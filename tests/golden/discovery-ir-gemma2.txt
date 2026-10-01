@@ -24,11 +24,11 @@ rms_eps=9.99999997e-07 rope_base=-1
   OutputProjection   (model)     token_embd.weight (no separate output tensor)
       type            : q6_K
       in/out features : 2304 / 256000
-      evidence        : INFERRED (rule-based)
+      evidence        : MEASURED (read from artefact/reference graph)
         - NO output.weight tensor exists in the inventory
         - token_embd.weight present with ne=[2304,256000]
         - NO output.weight tensor exists in the inventory -- this is EVIDENCE, not proof, and on its own it does not establish sharing
-      UNRESOLVED      : sharing UNRESOLVED: absence of output.weight is evidence, not proof. Supply SLLM_IR_OUTPUT_SHARING from the reference graph.
+        - sharing=weights ARE shared: final projection reads token_embd.weight MEASURED from the reference graph: the final MUL_MAT's src[0] weight tensor was read by name, and it is token_embd.weight. Weight sharing is a question about which tensor the projection READS, not about whether dimensions match.
 
 -- LAYER 0 (representative body) --
   RMSNorm            layer=0    blk.0.attn_norm.weight
@@ -84,7 +84,6 @@ rms_eps=9.99999997e-07 rope_base=-1
         - site count: one per layer -- the cap is applied to the QK^T product before the softmax, i.e. pre_softmax
         - cap value MEASURED from op_params[2] of the 26x FLASH_ATTN_EXT node
         - function MEASURED from ggml-cpu/ops.cpp: scale divided by the cap (line 8679), then s = cap*tanhf(s) per score (line 8752), then the mask is added (line 8755)
-        - a histogram cannot see inside a fused node, which is why this was UNRESOLVED before; reading op_params is the direct route, so this is no longer inferred from the unfused final-logits site
   SoftCap            layer=0    (final logits)
       cap             : 30
       domain          : final_logits   position=post_output_projection

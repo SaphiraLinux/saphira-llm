@@ -134,7 +134,8 @@ rms_eps=9.99999975e-06 rope_base=10000
         - output width 64 is the EXPERT COUNT: one score per expert, so this is a router
         - olmoe.expert_count = 64  [MEASURED], agrees with the router output width
         - olmoe.expert_used_count = 8  [MEASURED]: top-8 of 64 experts are active per token
-        - ROUTING [MEASURED from the reference op sequence]: argsort_top_k then softmax over the SELECTED weights, no renormalisation (SOFTMAX_WEIGHT convention)
+        - note: softmax over the selected top-k already normalises those scores among themselves. The absent SUM_ROWS/CLAMP/DIV trio shows there is no SEPARATE EXPLICIT post-selection renormalisation, NOT that the weights are unnormalised
+        - ROUTING [MEASURED from the reference op sequence]: argsort_top_k, then softmax over the SELECTED weights
         - three conventions exist in build_moe_ffn and only the op order distinguishes them, so this is read from the graph and NOT from the architecture name
   ExpertGatedFFN     layer=0    ffn_gate_exps + ffn_up_exps + ffn_down_exps
       in/out features : 2048 / 1024

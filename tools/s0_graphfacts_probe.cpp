@@ -36,7 +36,13 @@ struct Ev { int seq; std::string op; const void * ptr; const void * src0;
              * This is the evidence that settles weight sharing: not whether an
              * output.weight tensor exists, but which tensor the final projection
              * actually reads. */
-            std::string n0, n1; };
+            /* ALL sources, not just the first two. Capturing only n0/n1 is an
+             * instrument limitation: ggml_rope_ext takes q, pos AND optionally a
+             * freq_factors tensor, so a two-name view cannot see whether a
+             * precomputed frequency table was passed. A probe that cannot look
+             * must say so rather than implying the thing was absent. */
+            std::string n0, n1, n2, n3;
+            int n_srcs; };
 static std::vector<Ev> g; static bool g_rec = false;
 static const char * opname(int op) {
     switch (op) {
@@ -69,8 +75,16 @@ static bool ev(ggml_tensor * t, bool ask, void *) {
         for (int i = 0; i < 4; ++i) { e.op_params[i] = ((const float *) t->op_params)[i]; }
         e.has_op_params = true;
     }
-    if (t->src[0] != NULL && t->src[0]->name) { e.n0 = t->src[0]->name; }
-    if (t->src[1] != NULL && t->src[1]->name) { e.n1 = t->src[1]->name; }
+    e.n_srcs = 0;
+    for (int i = 0; i < 6; ++i) {
+        if (t->src[i] == NULL) { continue; }
+        if (t->src[i]->name == NULL) { continue; }
+        ++e.n_srcs;
+        if (i == 0) { e.n0 = t->src[i]->name; }
+        else if (i == 1) { e.n1 = t->src[i]->name; }
+        else if (i == 2) { e.n2 = t->src[i]->name; }
+        else if (i == 3) { e.n3 = t->src[i]->name; }
+    }
     e.bytes.resize((size_t) n);
     memcpy(e.bytes.data(), t->data, (size_t) n * sizeof(float));
     g.push_back(e);
@@ -304,6 +318,36 @@ int main(int argc, char ** argv) {
                                : "UNRESOLVED (neither hypothesis fits)";
           printf("  VERDICT pairing = %s   [MEASURED from the reference graph at pos=%d]\n", verdict, pos);
         } } }
+
+    /* DOES THE ROPE NODE CONSUME A PRECOMPUTED FREQUENCY TENSOR?
+     *
+     * llama.cpp builds rope via get_rope_factors, which returns
+     * layers[il].rope_freqs when that tensor exists and only otherwise falls
+     * back to freq_base. So the artefact can carry BOTH and the reference uses
+     * only one. Which one is decided by the rope node's own sources, so that is
+     * what is read -- not the presence of a metadata key. */
+    printf("\n== ROPE FREQUENCY SOURCE (which of the two does the graph USE?) ==\n");
+    { const Ev * rp = NULL;
+      for (size_t i = 0; i < g.size() && rp == NULL; ++i) { if (g[i].op == "ROPE") { rp = &g[i]; } }
+      if (rp == NULL) { printf("  no ROPE node\n"); }
+      else {
+          printf("  first ROPE node has %d sources:\n", rp->n_srcs);
+          printf("    src[0]=%s\n    src[1]=%s\n    src[2]=%s\n    src[3]=%s\n",
+                 rp->n0.c_str(), rp->n1.c_str(), rp->n2.c_str(), rp->n3.c_str());
+          bool uses_table = (rp->n2.find("rope_freqs") != std::string::npos) ||
+                            (rp->n3.find("rope_freqs") != std::string::npos) ||
+                            (rp->n0.find("rope_freqs") != std::string::npos) ||
+                            (rp->n1.find("rope_freqs") != std::string::npos);
+          printf("  a rope_freqs tensor is CONSUMED by a graph node: %s\n",
+                 uses_table ? "YES" : "NO");
+          if (uses_table) {
+              printf("  => the reference uses the PRECOMPUTED TABLE; any freq_base metadata value\n");
+              printf("     is present in the file but NOT used by this reference path.\n");
+              printf("     Reporting both as if they were live would be wrong.\n");
+          } else {
+              printf("  => the reference derives frequencies from a BASE, not from a table.\n");
+          }
+      } }
 
     /* HEAD DIM, derivable when the artefact omits key_length. */
     { long hd2 = -1; long n_embd2 = -1;

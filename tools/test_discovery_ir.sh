@@ -11,7 +11,7 @@ export SLLM_IR_ROPE_PAIRING_NEED=1
 pass=0; fail=0
 ok(){ if [ "$2" = "0" ]; then echo "  ok   $1"; pass=$((pass+1)); else echo "  FAIL $1"; fail=$((fail+1)); fi; }
 
-gen(){ unset SLLM_IR; SLLM_IR_ROPE_PAIRING=${P1:-} SLLM_IR_OUTPUT_SHARING=${SH1:-} SLLM_IR_SWA_PATTERN=${SW:-} SLLM_IR_FUSED_CAP=${FC:-} SLLM_IR_ROUTING=${ROUT:-} SLLM_IR_HEAD_DIM=${HD:-} ./tools/run_s0_probe.sh tools/s0_ir_probe.cpp "$1" 2>/dev/null; }
+gen(){ unset SLLM_IR; SLLM_IR_ROPE_PAIRING=${P1:-} SLLM_IR_OUTPUT_SHARING=${SH1:-} SLLM_IR_SWA_PATTERN=${SW:-} SLLM_IR_FUSED_CAP=${FC:-} SLLM_IR_ROUTING=${ROUT:-} SLLM_IR_HEAD_DIM=${HD:-} SLLM_IR_ROPE_SRC=${RS:-} SLLM_IR_PROBE_CAPABILITY=${CAP:-} ./tools/run_s0_probe.sh tools/s0_ir_probe.cpp "$1" 2>/dev/null; }
 
 # A: same artefact -> deterministic IR
 P1=NEOX; SH1="weights NOT shared: final projection reads output.weight"; A1=$(gen "$QW"); A2=$(gen "$QW")
@@ -213,6 +213,34 @@ if [ -f "$O" ]; then
   # OLMoE has MHA (q_heads == kv_heads) where every other model had GQA
   printf '%s\n' "$O2" | grep -q 'q_heads=16 kv_heads=16'; ok "J7 OLMoE MHA recorded as such, not assumed to be GQA" $?
 fi
+
+# K: the two classes of unresolved, and the wording and observability rules.
+KEEP_SH="$SH1"; SH1="weights ARE shared: final projection reads token_embd.weight"
+# Set as plain assignments, NOT as command prefixes: a prefix on a shell
+# function inside $( ) does not reliably reach it, and the symptom is a test
+# that looks like the probe lost its evidence. That is the same shape as every
+# other scoping bug in this suite, so the rule here is explicit assignments.
+P1=GPT/adjacent; ROUT=""; HD=""; RS="rope_freqs.weight is consumed as src[2] of the ROPE node, so freq_base is present but unused"
+LL2=$(gen "$LL")
+P1=NEOX; SW=2; FC=26x; RS=""; G2=$(gen "$G")
+printf '%s\n' "$LL2" | grep -q 'WHICH SOURCE THE REFERENCE USES \[MEASURED\]'; ok "K1 Llama rope source resolved: the TABLE is live" $?
+printf '%s\n' "$LL2" | grep -q 'present but NOT live for this path'; ok "K2 and the metadata freq_base is explicitly NOT live" $?
+printf '%s\n' "$LL2" | grep -q 'sharing=weights ARE shared'; ok "K3 Llama sharing resolved, so neither field is left unresolved" $?
+printf '%s\n' "$G2" | grep -q 'sharing=weights ARE shared'; ok "K4 Gemma output sharing resolved from graph tensor identity" $?
+printf '%s\n' "$G2" | grep -q 'rope_base UNRESOLVED'; ok "K5 Gemma rope base stays UNRESOLVED: an ARTEFACT-INFORMATION-LIMIT" $?
+printf '%s\n' "$G2" | grep -q 'NOT assumed to be 10000'; ok "K6 and is explicitly not defaulted" $?
+
+# routing wording: softmax over the selected top-k ALREADY normalises those scores
+P1=NEOX; SW=""; FC=""; ROUT="argsort_top_k, then softmax over the SELECTED weights"; HD=128; O3=$(gen "$O")
+printf '%s\n' "$O3" | grep -q 'already normalises'; ok "K7 routing wording says softmax already normalises the selection" $?
+printf '%s\n' "$O3" | grep -q 'NOT that the weights are unnormalised'; ok "K8 absent renormalisation path is not conflated with unnormalised weights" $?
+
+# observability declaration
+CAPV="op histogram, ggml op ids, op_params, and all six graph sources are observable"
+P1=NEOX; CAP="$CAPV"; CAPX=$(gen "$O")
+SH1="$KEEP_SH"
+printf '%s\n' "$CAPX" | grep -q 'capability declaration'; ok "K9 probe declares what it can observe" $?
+printf '%s\n' "$CAPX" | grep -q 'never as a zero count'; ok "K10 and states the rule that unobservable is never zero" $?
 
 echo
 echo "discovery-ir structural tests: $pass passed, $fail failed"

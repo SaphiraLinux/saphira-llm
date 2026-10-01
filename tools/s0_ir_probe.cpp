@@ -203,6 +203,24 @@ int main(int argc, char ** argv) {
       if (u >= 0) { n_used = (long) gguf_get_val_u32(g, u); } }
     const bool is_moe = (dims.count("ffn_gate_inp.weight") > 0);
 
+    /* ---- OBSERVABILITY: what this instrument can and cannot see ----
+     *
+     * A zero observation is evidence of absence ONLY after the probe has
+     * demonstrated it can observe that thing. This has been learned three times
+     * the hard way: the fused softcap (invisible to an op histogram, visible in
+     * op_params), rope_freqs (hidden because the evidence was nested inside the
+     * pairing-unmeasured branch), and the rope node's third source (invisible to
+     * a two-name capture, which reported "no frequency table" while src[2] held
+     * exactly that). So capability is DECLARED, not assumed. */
+    { const char * cap = getenv("SLLM_IR_PROBE_CAPABILITY");
+      if (cap != NULL && cap[0] != '\0') {
+          printf("\n-- PROBE OBSERVABILITY --\n");
+          printf("  capability declaration: %s\n", cap);
+          printf("  rule: a family this probe cannot observe is reported UNOBSERVABLE,\n");
+          printf("        never as a zero count. A zero is evidence of absence only\n");
+          printf("        after the probe has shown it can observe that thing.\n");
+      } }
+
     /* ---- tokens we did NOT learn to describe ---- */
     std::set<std::string> known_roles;
     known_roles.insert("attn_norm.weight");   known_roles.insert("ffn_norm.weight");
@@ -543,9 +561,7 @@ int main(int argc, char ** argv) {
                   n.evidence.push_back("function MEASURED from ggml-cpu/ops.cpp: scale divided by the "
                       "cap (line 8679), then s = cap*tanhf(s) per score (line 8752), then the mask "
                       "is added (line 8755)");
-                  n.evidence.push_back("a histogram cannot see inside a fused node, which is why this "
-                      "was UNRESOLVED before; reading op_params is the direct route, so this is no "
-                      "longer inferred from the unfused final-logits site");
+    
                   n.measured = true;
               } else {
                   n.unknown.push_back("function UNRESOLVED: the cap is FUSED into the flash-attention "
@@ -688,9 +704,22 @@ int main(int argc, char ** argv) {
           n.evidence.push_back("precomputed rope_freqs table present, ne[0]=" +
               std::to_string(rope_freqs_len) + "  [MEASURED]: the model SHIPS its RoPE frequency "
               "table rather than deriving it from a base, so freq_base is unused here");
-          n.scaling_type = "precomputed table (rope_freqs.weight)";
-          n.unknown.push_back("rope_base reported as the metadata value even though a precomputed "
-              "table exists: which one the reference actually uses is not established here");
+          const char * rfs = getenv("SLLM_IR_ROPE_SRC");
+          if (rfs != NULL && rfs[0] != '\0') {
+              n.scaling_type = std::string("precomputed table (rope_freqs.weight): ") + rfs;
+              n.evidence.push_back(std::string("WHICH SOURCE THE REFERENCE USES [MEASURED]: ") + rfs);
+              n.evidence.push_back("the artefact carries BOTH a precomputed table and a freq_base "
+                                   "key, and the reference uses the table, so the metadata base is "
+                                   "present but NOT live for this path");
+              n.evidence.push_back("this was only visible after the probe was taught to read ALL "
+                                   "rope sources: a two-name capture reported no table at all while "
+                                   "src[2] held rope_freqs.weight exactly");
+              n.measured = true;
+          } else {
+              n.unknown.push_back("WHICH SOURCE IS LIVE UNRESOLVED: the artefact carries both a "
+                  "precomputed rope_freqs table and a freq_base key, and the metadata alone cannot "
+                  "say which the reference uses. Supply SLLM_IR_ROPE_SRC from the rope node sources.");
+          }
       } else if (rope_base < 0) {
           n.unknown.push_back("rope_base UNRESOLVED: no " + P + "rope.freq_base key AND no "
                               "precomputed rope_freqs table, so this artefact carries no readable "
@@ -735,6 +764,16 @@ int main(int argc, char ** argv) {
               r.scope = std::string("top_") + std::to_string(n_used) + "_of_" +
                         std::to_string(n_experts);
               r.position = rf;
+              /* WORDING, and it matters: softmax over the SELECTED top-k ALREADY
+               * normalises those selected scores among themselves. The absent
+               * SUM_ROWS/CLAMP/DIV trio means there is NO SEPARATE EXPLICIT
+               * POST-SELECTION RENORMALISATION path -- not that the final routing
+               * weights are unnormalised. Those are different claims and the
+               * earlier wording conflated them. */
+              r.evidence.push_back("note: softmax over the selected top-k already normalises "
+                                   "those scores among themselves. The absent SUM_ROWS/CLAMP/DIV "
+                                   "trio shows there is no SEPARATE EXPLICIT post-selection "
+                                   "renormalisation, NOT that the weights are unnormalised");
               r.measured = true;
               r.evidence.push_back(std::string("ROUTING [MEASURED from the reference op sequence]: ") + rf);
               r.evidence.push_back("three conventions exist in build_moe_ffn and only the op order "
