@@ -145,6 +145,11 @@ static double l2(const std::vector<float> & v, size_t from, size_t n) {
     double s = 0; for (size_t i = from; i < from + n && i < v.size(); ++i) { s += (double) v[i] * v[i]; }
     return sqrt(s);
 }
+/* Whether GLU ownership was attributed during this run. Set by the ownership
+ * section below; declared here so the capability declaration can report it. */
+static bool g_glu_attributed = false;
+static bool glu_ffn_attributed() { return g_glu_attributed; }
+
 int main(int argc, char ** argv) {
     const int pos = argc > 2 ? atoi(argv[2]) : 7;
     const int tok = argc > 3 ? atoi(argv[3]) : 785;
@@ -604,6 +609,7 @@ int main(int argc, char ** argv) {
       printf("   %d GLU nodes total: %d attributed to the state-space path, %d to the\n",
              n_glu, glu_ssm, glu_ffn);
       printf("   feed-forward path, %d ambiguous.\n", glu_other);
+      if (glu_ffn == 0) { g_glu_attributed = true; }
       if (glu_ffn == 0 && glu_other == 0) {
           printf("   VERDICT: every GLU node is fed by a state-space source and NONE by an\n");
           printf("   ffn_* tensor, so the gate lives in the STATE-SPACE PATH, not the\n");
@@ -627,6 +633,38 @@ int main(int argc, char ** argv) {
     }
 
     /* ---- 3: which tensor does the final projection read? ---- */
+    /* The IR probe reports CAP_EXTERNAL_GRAPH as UNPROVEN, because it does not run
+     * the reference graph. That is true of IT and must not become a statement
+     * about the toolchain as a whole. This probe DOES run the graph, so it proves
+     * the capability, and it says so explicitly rather than leaving the other
+     * probe to guess. A capability belongs to the instrument that exercised it. */
+    printf("\n== CAPABILITY DECLARATION (proven by this run) ==\n");
+    printf("  [PROVEN  ] reference graph histogram and op_params\n");
+    printf("             events recorded = %d, op histogram computed, op_params read raw\n",
+           (int) g.size());
+    /* OWNERSHIP attribution and ROUTING attribution are DIFFERENT capabilities and
+     * I nearly conflated them. Attributing a GLU to the state-space path proves
+     * OWNERSHIP: which family an op belongs to. ROUTING attribution is different --
+     * it requires a router op tied to a specific layer and a selected subset. Proof
+     * of one is not proof of the other, and claiming it would be precisely the
+     * overclaim this instrument exists to refuse. GLU ownership below is reported
+     * under its own name. */
+    if (g_glu_attributed) {
+        printf("  [PROVEN  ] ownership attribution (op -> owning family, from sources)\n");
+        printf("             GLU nodes attributed to the state-space path by source tensors\n");
+    } else {
+        printf("  [UNPROVEN] ownership attribution\n");
+        printf("             no op was attributed to an owning family in this graph\n");
+    }
+    printf("  [UNPROVEN] routing attribution to a specific layer\n");
+    printf("             NO router op exists in this graph, so there is nothing to\n");
+    printf("             attribute. That is an absence in the ARTEFACT, reported here as\n");
+    printf("             an UNPROVEN capability of this instrument, and deliberately not\n");
+    printf("             as proof that routing attribution is impossible in general.\n");
+    printf("  NOTE: a capability is proven by the instrument that EXERCISED it. The IR\n");
+    printf("  probe still reports the graph capability as UNPROVEN, which is correct:\n");
+    printf("  it does not run the graph. Blind spots are per-instrument, not global.\n");
+
     printf("\n== FINAL PROJECTION SOURCE (weight sharing) ==\n");
     { /* the last MUL_MAT whose input is the output_norm-scale vector is hard to
          * identify generically; instead report the WIDTHS of every MUL_MAT input

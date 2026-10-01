@@ -1,0 +1,141 @@
+compiling (quiet)
+running fresh binary
+events=1463
+-- OP HISTOGRAM --
+   ADD            124
+   CONCAT         24
+   CONT           48
+   CPY            96
+   FLASH_ATTN_EXT 4
+   GET_ROWS       74
+   GLU            24
+   MUL            101
+   MUL_MAT        113
+   PERMUTE        12
+   RESHAPE        184
+   RMS_NORM       77
+   SCALE          48
+   SET_ROWS       8
+   SQR            24
+   SSM_CONV       24
+   SSM_SCAN       24
+   TRANSPOSE      24
+   UNARY          48
+   VIEW           382
+
+== FUSED SOFTCAP, FROM op_params ==
+  FLASH_ATTN_EXT nodes with op_params = 4
+  op_params[2] (logit_softcap) = 0   [MEASURED from the graph]
+  op_params[0] (scale)          = 0.0883883461
+  every node carries the same cap: yes
+  logit_softcap is 0 => NO fused cap at this node. This is a POSITIVE
+  measurement from op_params, unlike the histogram which could only fail
+  to see something.
+
+== PER-LAYER ATTENTION PATTERN (from the reference mask path) ==
+  architecture [nemotron_h]
+  nemotron_h.attention.sliding_window_pattern is ABSENT, so the reference DEFAULT pattern applies
+  reference rule (llama-hparams.cpp set_swa_pattern, dense_first=false):
+      is_swa[il] = (il mod n_pattern != 0)
+  gemma2.cpp:6 calls load_swa_pattern(ml, 2)  => n_pattern = 2
+  therefore EVEN layers are dense and ODD layers are sliding:
+    layer 0   pattern = full
+    layer 1   pattern = sliding_window
+    layer 2   pattern = full
+    layer 3   pattern = sliding_window
+    layer 4   pattern = full
+    layer 5   pattern = sliding_window
+  evidence class: INFERRED from the reference RULE, not MEASURED per-layer.
+  The rule is read from llama-hparams.cpp, which is weaker than observing each
+  layer's chosen mask tensor, and is labelled accordingly.
+
+== ROUTING FUNCTION, FROM THE REFERENCE OP SEQUENCE ==
+   ARGSORT ops=0  SOFT_MAX ops=0  SUM_ROWS ops=0  DIV=0  CLAMP=0  GET_ROWS=74
+   ROUTING: ABSENT -- no top-k selection op appears in the graph, so this is
+   not a mixture-of-experts graph. That is a POSITIVE absence, measured.
+   SCALE ops=48  UNARY(tanh) ops=48
+   an UNFUSED SoftCap site is 2 SCALE + 1 UNARY, so unfused tanh sites = 48
+   FLASH_ATTN_EXT ops=4
+   MEASUREMENT LIMIT: attention softcapping FUSED INTO FLASH_ATTN_EXT is
+   invisible to an op histogram. The cap is a PARAMETER of that node, not a
+   separate node, so counting SCALE/UNARY finds only UNFUSED cap sites. That
+   is a limit of this probe, NOT evidence that the attention cap is absent.
+
+== ROPE, LOCATED BY OP ==
+  ROPE ops in graph (any, data-bearing or not): 0
+  NO USABLE ROPE NODE in this build.
+  This is an observation ABOUT THE GRAPH BUILT HERE, not a claim about the
+  model. A graph built for one token at one position is NARROW: a node may
+  be absent because the build elides it, because the position makes it
+  degenerate, or because the reference folds the rotation into another op.
+  ROPE pairing is therefore UNRESOLVED -- not NEOX, not GPT, and not absent.
+
+== ROPE FREQUENCY SOURCE (which of the two does the graph USE?) ==
+  no ROPE node
+
+== RoPE BASE (artefact has no base key) ==
+  nemotron_h.rope.freq_base is ABSENT from the artefact
+  reference default: llama-model.cpp sets rope_freq_base_train = 10000.0f and
+  overrides it ONLY if the key is present, so with the key absent the default
+  STANDS. base = 10000  [MEASURED from the reference path, not from a paper]
+  NOTE this is the reference' default, so a different implementation could
+  differ. The claim under test was about THIS artefact under THIS reference.
+
+== EXTERNAL CORROBORATION (NOT artefact evidence) ==
+  Reported upstream: Gemma-2 rope_theta = 10000.00, and OLMoE is constructed with
+  vocab_size = tokenizer.padded_vocab_size(), making padded vocabularies deliberate.
+  Effect on this probe: NONE. Both are recorded as claims about upstream
+  configurations, not about these artefacts. An artefact-ABSENT field stays
+  UNRESOLVED regardless of what any external source asserts, and external
+  corroboration may never upgrade an ABSENT field to MEASURED.
+
+== METADATA TYPE INTEGRITY ==
+   KV pairs: 27 type-checkable scalars, 21 non-scalar (array/string), 0 mismatched
+   rule: never reinterpret a scalar to suit a caller. ssm_a and ssm_d are F32 and
+         reading them as u32 aborted this probe before the rule existed.
+
+== HEAD DIM ==
+  head_dim = 128
+
+== GLU OWNERSHIP (attributed by SOURCE TENSOR, not by count) ==
+   GLU node sources: [0]= (reshaped) (view) (cont) [1]=mamba2_y_add_d-0
+       -> owner: STATE-SPACE path
+   GLU node sources: [0]= (reshaped) (view) (cont) [1]=mamba2_y_add_d-2
+       -> owner: STATE-SPACE path
+   GLU node sources: [0]= (reshaped) (view) (cont) [1]=mamba2_y_add_d-4
+       -> owner: STATE-SPACE path
+   GLU node sources: [0]= (reshaped) (view) (cont) [1]=mamba2_y_add_d-6
+       -> owner: STATE-SPACE path
+   24 GLU nodes total: 24 attributed to the state-space path, 0 to the
+   feed-forward path, 0 ambiguous.
+   VERDICT: every GLU node is fed by a state-space source and NONE by an
+   ffn_* tensor, so the gate lives in the STATE-SPACE PATH, not the
+   feed-forward. The FFN is ungated on the GRAPH evidence as well as on
+   the tensor evidence, and DenseMLP now rests on TWO INDEPENDENT
+   WITNESSES instead of one. That is the resolution: not one measurement
+   overruling another, but two agreeing.
+
+== CAPABILITY DECLARATION (proven by this run) ==
+  [PROVEN  ] reference graph histogram and op_params
+             events recorded = 1463, op histogram computed, op_params read raw
+  [PROVEN  ] ownership attribution (op -> owning family, from sources)
+             GLU nodes attributed to the state-space path by source tensors
+  [UNPROVEN] routing attribution to a specific layer
+             NO router op exists in this graph, so there is nothing to
+             attribute. That is an absence in the ARTEFACT, reported here as
+             an UNPROVEN capability of this instrument, and deliberately not
+             as proof that routing attribution is impossible in general.
+  NOTE: a capability is proven by the instrument that EXERCISED it. The IR
+  probe still reports the graph capability as UNPROVEN, which is correct:
+  it does not run the graph. Blind spots are per-instrument, not global.
+
+== FINAL PROJECTION SOURCE (weight sharing) ==
+  final MUL_MAT seq=1462  ne=[131072,1]
+  src[0] WEIGHT     : "output.weight"
+  src[1] activation : "result_norm"
+  SHARING: final projection reads output.weight -- weights are NOT shared.
+           MEASURED.
+  output.weight present = YES
+  token_embd.weight present = YES
+  => weight sharing is decided by tensor IDENTITY in the graph, not by whether
+     output.weight exists; a model may reuse token_embd with no separate tensor.

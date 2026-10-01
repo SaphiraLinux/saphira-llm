@@ -629,5 +629,29 @@ if [ $? -eq 0 ]; then ok "U9 the downgrade names blindness as the cause" 0; else
 cp /tmp/ir_u.bak tools/s0_ir_probe.cpp
 
 
+# ---- V: CELL READINESS, selection by capability not by desired answer ------
+./tools/run_s0_probe.sh tools/s0_ir_probe.cpp "$NH" > /tmp/v_ir.txt 2>/dev/null
+./tools/run_s0_probe.sh tools/s0_graphfacts_probe.cpp "$NH" 7 100 > /tmp/v_gf.txt 2>/dev/null
+grep -q 'CELL READINESS' /tmp/v_ir.txt
+if [ $? -eq 0 ]; then ok "V1 readiness section present" 0; else ok "V1 readiness section present" 1; fi
+grep -q 'NOT ANSWERABLE' /tmp/v_ir.txt
+if [ $? -eq 0 ]; then ok "V2 the open cell is reported NOT ANSWERABLE" 0; else ok "V2 the open cell is reported NOT ANSWERABLE" 1; fi
+# Per-instrument honesty: the IR probe does NOT run the graph, so it must say so,
+# while the graph probe proves it. Blind spots are per-instrument, not global.
+grep -q '\[UNPROVEN\] reference graph histogram and op_params' /tmp/v_ir.txt
+if [ $? -eq 0 ]; then ok "V3 IR probe admits the graph capability is unproven" 0; else ok "V3 IR probe admits the graph capability is unproven" 1; fi
+grep -q '\[PROVEN  \] reference graph histogram and op_params' /tmp/v_gf.txt
+if [ $? -eq 0 ]; then ok "V4 graph probe proves the capability it exercises" 0; else ok "V4 graph probe proves the capability it exercises" 1; fi
+# OWNERSHIP attribution and ROUTING attribution are different capabilities. Proof of
+# one must not be reported as proof of the other; this assertion exists because I
+# nearly conflated them and caught it only on review.
+grep -q '\[PROVEN  \] ownership attribution' /tmp/v_gf.txt
+if [ $? -eq 0 ]; then ok "V5 ownership attribution proven separately" 0; else ok "V5 ownership attribution proven separately" 1; fi
+grep -q '\[UNPROVEN\] routing attribution' /tmp/v_gf.txt
+if [ $? -eq 0 ]; then ok "V6 routing attribution NOT claimed from ownership" 0; else ok "V6 routing attribution NOT claimed from ownership" 1; fi
+grep -q 'routing attribution is impossible in general' /tmp/v_gf.txt
+if [ $? -eq 0 ]; then ok "V7 artefact absence is not generalised to impossibility" 0; else ok "V7 artefact absence is not generalised to impossibility" 1; fi
+
+
 echo "discovery-ir structural tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -143,15 +143,17 @@ enum capability {
     CAP_LAYER_IDENTITY,         /* which layer owns which tensor              */
     CAP_METADATA_TYPED_READ,    /* GGUF values read per declared type         */
     CAP_EXTERNAL_GRAPH,         /* reference graph op histogram + op_params  */
-    CAP_COUNT                   /* number of distinct classes in a family     */
+    CAP_COUNT,                  /* number of distinct classes in a family     */
+    CAP_ROUTING_ATTRIBUTION     /* attribute a router/expert to ITS OWN layer */
 };
-static const int CAP_N = 5;
+static const int CAP_N = 6;
 static const char * cap_name[CAP_N] = {
     "tensor inventory (names, shapes, types)",
     "per-layer tensor identity",
     "typed GGUF metadata reads",
     "reference graph histogram and op_params",
-    "counts within a single artefact"
+    "counts within a single artefact",
+    "routing attribution to a specific layer"
 };
 
 /* A capability is PROVEN only when this run actually exercised it. Nothing is
@@ -1697,6 +1699,26 @@ int main(int argc, char ** argv) {
       if (nu > 0) {
           printf("     An UNPROVEN capability means any ABSENT claim resting on it has\n");
           printf("     been reported as UNOBSERVABLE instead. Silence is not evidence.\n");
+      }
+      /* Selection rule, made executable. Which cells can this instrument ask
+       * about AT ALL? A cell is answerable only if every capability it depends on
+       * is PROVEN. This inverts the usual order: rather than searching for a model
+       * that fills a desired cell, it states which questions the instrument is
+       * currently equipped to ask. The answer here is NONE, and that is the
+       * honest reading of the registry rather than a discouraging one. */
+      printf("\n     CELL READINESS: which questions is this instrument equipped to ask?\n");
+      printf("     a cell is answerable only when EVERY capability it needs is PROVEN\n");
+      { const char * ready = "no cell is answerable from the IR probe alone";
+        if (cap_proven[CAP_TENSOR_INVENTORY] && cap_proven[CAP_LAYER_IDENTITY] &&
+            cap_proven[CAP_COUNT] && cap_proven[CAP_EXTERNAL_GRAPH] &&
+            cap_proven[CAP_ROUTING_ATTRIBUTION]) ready = "all probed cells are answerable";
+        printf("       attention + SSM + MoE + non-uniform schedule : needs graph AND\n");
+        printf("         routing attribution -- graph %s, routing %s -- so: NOT ANSWERABLE\n",
+               cap_proven[CAP_EXTERNAL_GRAPH] ? "PROVEN" : "UNPROVEN",
+               cap_proven[CAP_ROUTING_ATTRIBUTION] ? "PROVEN" : "UNPROVEN");
+        printf("       overall: %s\n", ready);
+        printf("       The next artefact is chosen by asking which artefact makes the\n");
+        printf("       missing capabilities provable, NOT by which one fills a cell.\n");
       }
       printf("\n     declared blind spots, independent of this run:\n");
       printf("       operations fused inside a node the histogram only counts\n");

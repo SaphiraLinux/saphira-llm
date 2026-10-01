@@ -344,10 +344,19 @@ rms_eps=9.99999975e-06 rope_base=9.9999998e+10
      [PROVEN  ] typed GGUF metadata reads
      [UNPROVEN] reference graph histogram and op_params
      [PROVEN  ] counts within a single artefact
+     [UNPROVEN] routing attribution to a specific layer
 
-     4 proven this run, 1 unproven.
+     4 proven this run, 2 unproven.
      An UNPROVEN capability means any ABSENT claim resting on it has
      been reported as UNOBSERVABLE instead. Silence is not evidence.
+
+     CELL READINESS: which questions is this instrument equipped to ask?
+     a cell is answerable only when EVERY capability it needs is PROVEN
+       attention + SSM + MoE + non-uniform schedule : needs graph AND
+         routing attribution -- graph UNPROVEN, routing UNPROVEN -- so: NOT ANSWERABLE
+       overall: no cell is answerable from the IR probe alone
+       The next artefact is chosen by asking which artefact makes the
+       missing capabilities provable, NOT by which one fills a cell.
 
      declared blind spots, independent of this run:
        operations fused inside a node the histogram only counts
