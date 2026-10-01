@@ -553,6 +553,45 @@ if [ -f "$OL" ]; then
   cp /tmp/ir8.bak tools/s0_ir_probe.cpp
 fi
 
+# ---- T: GRANITE-4.0-H, a THIRD topology, and a NAME THAT LIES ----------------
+GR=/var/lib/spoon/models/granite4h-1b/granite4h-1b-mxfp4.gguf
+if [ -f "$GR" ]; then
+  ./tools/run_s0_probe.sh tools/s0_topo_probe.cpp "$GR" > /tmp/t_topo.txt 2>/dev/null
+  ./tools/run_s0_probe.sh tools/s0_ir_probe.cpp "$GR" > /tmp/t_ir.txt 2>/dev/null
+  # A third distinct topology: attention in ONLY 4 of 40 layers, SSM in 36, a
+  # gated FFN in all 40. Neither family is present in every layer, and each layer
+  # carries exactly ONE of them.
+  grep -q 'HETEROGENEOUS -- the layer graph CHANGES across depth' /tmp/t_topo.txt
+  if [ $? -eq 0 ]; then ok "T1 granite-4.0-h is heterogeneous across depth" 0; else ok "T1 granite-4.0-h is heterogeneous across depth" 1; fi
+  grep -qE '^  ATTN +4 ' /tmp/t_topo.txt
+  if [ $? -eq 0 ]; then ok "T2 attention in only 4 of 40 layers" 0; else ok "T2 attention in only 4 of 40 layers" 1; fi
+  grep -qE '^  SSM +36 ' /tmp/t_topo.txt
+  if [ $? -eq 0 ]; then ok "T3 SSM in 36 of 40 layers" 0; else ok "T3 SSM in 36 of 40 layers" 1; fi
+  # THE SIGNATURE UNION BUG: the body label used to stop at the first family
+  # matched, so it depended on TENSOR FILE ORDER. Granite has ffn_down before
+  # ssm_a, which made its 36 state-space layers read as FFN+ instead of SSM+FFN+.
+  grep -q 'body SSM+FFN+' /tmp/t_ir.txt
+  if [ $? -eq 0 ]; then ok "T4 layer body is the UNION, not the first match" 0; else ok "T4 layer body is the UNION, not the first match" 1; fi
+  grep -q 'body FFN+' /tmp/t_ir.txt
+  if [ $? -ne 0 ]; then ok "T5 no body label is a first-match artefact" 0; else ok "T5 no body label is a first-match artefact" 1; fi
+  grep -q 'body ATTN+FFN+' /tmp/t_ir.txt
+  if [ $? -eq 0 ]; then ok "T6 attention body keeps its FFN" 0; else ok "T6 attention body keeps its FFN" 1; fi
+  # MXFP4 IS READABLE, verified rather than assumed.
+  ./tools/run_s0_probe.sh tools/s0_survey_probe.cpp "$GR" G4H > /tmp/t_surv.txt 2>/dev/null
+  grep -q 'granite4h-1b-mxfp4.gguf' /tmp/t_surv.txt
+  if [ $? -eq 0 ]; then ok "T7 MXFP4 artefact opens and reports" 0; else ok "T7 MXFP4 artefact opens and reports" 1; fi
+  grep -qiE 'mxfp4' /tmp/t_surv.txt
+  if [ $? -eq 0 ]; then ok "T7b MXFP4 tensor type named by the probe" 0; else ok "T7b MXFP4 tensor type named by the probe" 1; fi
+  # THE FILENAME SAYS MOE. THE ARTEFACT SAYS NO EXPERTS.
+  grep -q 'MOE+' /tmp/t_topo.txt
+  if [ $? -ne 0 ]; then ok "T8 filename claims MOE, artefact has NO expert tensors" 0; else ok "T8 filename claims MOE, artefact has NO expert tensors" 1; fi
+  grep -q 'expert_count *= 0' /tmp/t_surv.txt
+  if [ $? -eq 0 ]; then ok "T9 expert_count measured as 0, not assumed" 0; else ok "T9 expert_count measured as 0, not assumed" 1; fi
+  grep -q 'UNKNOWN role' /tmp/t_ir.txt
+  if [ $? -ne 0 ]; then ok "T10 zero UNKNOWN roles on the MXFP4 hybrid" 0; else ok "T10 zero UNKNOWN roles on the MXFP4 hybrid" 1; fi
+fi
+
+
 echo
 echo "discovery-ir structural tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

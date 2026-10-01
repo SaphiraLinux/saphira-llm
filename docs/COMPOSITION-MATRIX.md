@@ -15,7 +15,36 @@ is impossible; it is a claim that nothing has been measured for it yet.
 | Heterogeneous bodies across depth    | Nemotron-H    | 6c64778   | 52 layers, 3 distinct bodies (4 ATTN / 24 SSM / 24 FFN) |
 | Attention + MoE                      | **EMPTY**     | --        | MoE proved only with uniform layers |
 | SSM + MoE                            | **EMPTY**     | --        | not attempted |
-| Attention + SSM + MoE                | **EMPTY**     | --        | the target for architecture eight |
+| Attention + SSM + MoE                | **EMPTY**     | --        | still the open corner |
+| Non-uniform + attention + SSM + gated FFN | Granite-4.0-H-1B | see below | 4 ATTN / 36 SSM / 40 FFN over 40 layers |
+
+## Granite-4.0-H-1B: a third topology, and a filename that lies
+
+`magiccodingman/Granite-4.0-H-1B-Unsloth-MXFP4-Hybrid-GGUF`, 1.55 GB.
+MXFP4 was VERIFIED loadable before use, not assumed (`GGML_TYPE_MXFP4 = 39`
+present in the vendored tree, CPU compute path present, and the survey probe
+names the type) — the format was not allowed to become an invisible assumption.
+
+| Witness | Says |
+|---------|------|
+| tensor inventory | attention in **4** of 40 layers (5, 15, 25, 35); SSM in **36**; gated FFN in all **40** |
+| topology probe | 2 distinct bodies: `ATTN+FFN+` and `SSM+FFN+` |
+| artefact metadata | `expert_count = 0`, `expert_used_count = 0`, **no expert tensors** |
+| filename | says `MXFP4_MOE` |
+
+**The filename claims MoE. The artefact has none.** The MoE claim is refused,
+because a filename is a name and not evidence — the same rule that keeps
+architecture labels from becoming structure.
+
+This is a THIRD topology pattern, distinct from both earlier hybrids:
+
+- Falcon-H1: attention AND SSM together in every layer
+- Nemotron-H: three bodies, some layers with neither family
+- Granite-4.0-H: each layer carries exactly ONE of attention/SSM, plus an FFN
+
+So the `Attention + SSM + MoE` cell remains **EMPTY**, and it remains empty
+because nothing has been measured for it — not because it is believed impossible.
+The honest next step is an artefact that actually ships expert tensors.
 
 ## Why the empty cells matter
 

@@ -1,0 +1,659 @@
+compiling (quiet)
+running fresh binary
+=== DISCOVERY IR for /var/lib/spoon/models/granite4h-1b/granite4h-1b-mxfp4.gguf ===
+architecture (from general.architecture) = granitehybrid
+block_count=40 embedding_length=1536 ffn_length=4096 heads=12 kv_heads=-1
+key_length=-1 value_length=-1 rope_dimension_count=128
+rms_eps=9.99999975e-06 rope_base=10000
+  TokenizerSelector (model)  tokenizer.ggml.{model,pre,tokens}
+      evidence        : MEASURED
+        - leg model   = "gpt2"
+        - leg pre     = "dbrx"
+        - leg tokens  = 100352
+        - granitehybrid.vocab_size = 100352   [ARTEFACT MEASURED, the declared route]
+        - tokenizer_token_count = 100352   [ARTEFACT MEASURED]
+        - embedding_row_count   = 100352   [ARTEFACT MEASURED]: the physical capacity ids index
+        - output_projection_rows= 100352   [ARTEFACT MEASURED] (TIED: no output.weight, so it inherits the embedding rows)
+        - RELATION: declared vocab_size == tokenizer_token_count, EXACT MATCH, no padding  [MEASURED outcome]
+      NOTE            : model alone is NOT a sufficient selector; Qwen3 declares
+                        model=gpt2 while requiring pre=qwen2.
+      VOCAB DIMENSIONS ARE DISTINCT QUANTITIES, not one scalar: token count is
+                        how many tokens the tokenizer lists, embedding rows are the
+                        physical capacity ids index, and output rows are the head
+                        capacity. Equality between them is a MEASURED OUTCOME, not an
+                        invariant of this vocabulary, and a padded vocabulary is a
+                        DESIGN rather than a defect.
+      EXTERNAL UPSTREAM INFORMATION MAY NOT UPGRADE AN ABSENT FIELD TO MEASURED.
+                        A web search reports Gemma-2 rope_theta 10000 and OLMoE built
+                        with vocab_size = tokenizer.padded_vocab_size(); both may be
+                        true of those upstream configs, and neither is a reading of
+                        THESE files.
+
+-- MODEL SCOPE --
+  Embedding          (model)     token_embd.weight
+      type            : q8_0
+      in/out features : 1536 / 100352
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor token_embd.weight present, ne=[1536,100352]
+        - tokenizer.ggml.tokens n=100352
+  OutputProjection   (model)     token_embd.weight (no separate output tensor)
+      type            : q8_0
+      in/out features : 1536 / 100352
+      evidence        : INFERRED (rule-based)
+        - NO output.weight tensor exists in the inventory
+        - token_embd.weight present with ne=[1536,100352]
+        - NO output.weight tensor exists in the inventory -- this is EVIDENCE, not proof, and on its own it does not establish sharing
+      UNRESOLVED      : sharing UNRESOLVED: absence of output.weight is evidence, not proof. Supply SLLM_IR_OUTPUT_SHARING from the reference graph.
+
+-- LAYER TOPOLOGY (measured from tensor names) --
+  layer count = 40   distinct bodies = 2
+  ATTN+FFN+                  layers  4  indices: 5 15 25 35
+  SSM+FFN+                   layers 36  indices: 0 1 2 3 4 6 7 8 9 10 11 12 13 14 16 17 18 19 20 21 22 23 24 26 27 28 29 30 31 32 33 34 36 37 38 39
+    verdict: HETEROGENEOUS -- the layer graph CHANGES across depth.
+  an op present in SOME layers must NOT be emitted for every layer.
+
+-- LAYER 5 (body ATTN+FFN+, first of 2 distinct) --
+  RMSNorm            layer=5    blk.5.attn_norm.weight
+      type            : f32
+      norm width      : 1536   bias=false
+      epsilon         : 9.99999975e-06
+      evidence        : MEASURED (read from artefact/reference graph)
+        - granitehybrid.attention.layer_norm_rms_epsilon=0.000010
+        - ne=[4096,1] i.e. width == embedding_length => reduces the residual
+        - blk.5.attn_norm.bias ABSENT => bias=false
+        - qwen3/Llama graph applies it to the residual before the QKV projection
+  RMSNorm            layer=5    blk.5.ffn_norm.weight
+      type            : f32
+      norm width      : 1536   bias=false
+      epsilon         : 9.99999975e-06
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor name as written: "ffn_norm.weight" -- norms appear with and without the .weight suffix across models, which is a naming variant and not a different construct
+        - ne=[4096,1] => width == embedding_length
+        - applied to the post-attention residual before the FFN
+  RMSNorm            layer=5    blk.5.attn_q_norm.weight
+      status          : ABSENT for this architecture
+      evidence        : MEASURED -- tensor not present in the inventory,
+                       and not present in ANY layer (0 of 40)
+      NOTE            : ABSENT is not UNKNOWN. Absent means looked-and-
+                       not-there; UNKNOWN means could-not-determine.
+  RMSNorm            layer=5    blk.5.attn_k_norm.weight
+      status          : ABSENT for this architecture
+      evidence        : MEASURED -- tensor not present in the inventory,
+                       and not present in ANY layer (0 of 40)
+      NOTE            : ABSENT is not UNKNOWN. Absent means looked-and-
+                       not-there; UNKNOWN means could-not-determine.
+  SoftCap            layer=5    (none)
+      status          : ABSENT (no softcapping keys in metadata)
+      evidence        : MEASURED -- both keys absent from 48 kv pairs
+  Attention          layer=5    
+      pattern         : full
+      evidence        : INFERRED (rule-based)
+        - no granitehybrid.attention.sliding_window key => pattern=full   [INFERRED: absence of a sliding-window key, which is weaker than a positive statement of full attention]
+        - q_heads=12 kv_heads=-1 head_dim=-1  [MEASURED from metadata]
+        - pattern lives on the Attention NODE, not on a layer type: a layer is an ordered container of operations and may differ from its neighbours
+  Linear             layer=5    blk.5.attn_q.weight
+      type            : q8_0
+      in/out features : 1536 / 1536
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor blk.5.attn_q.weight ne=[1536,1536]
+        - out_features 1536 = 12x-1 (Q) or -1x-1 (K/V) => GQA or MHA, measured
+        - blk.5.attn_q.weight.bias ABSENT => bias=false
+  Linear             layer=5    blk.5.attn_k.weight
+      type            : q8_0
+      in/out features : 1536 / 512
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor blk.5.attn_k.weight ne=[1536,512]
+        - out_features 512 = 12x-1 (Q) or -1x-1 (K/V) => GQA or MHA, measured
+        - blk.5.attn_k.weight.bias ABSENT => bias=false
+  Linear             layer=5    blk.5.attn_v.weight
+      type            : q8_0
+      in/out features : 1536 / 512
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor blk.5.attn_v.weight ne=[1536,512]
+        - out_features 512 = 12x-1 (Q) or -1x-1 (K/V) => GQA or MHA, measured
+        - blk.5.attn_v.weight.bias ABSENT => bias=false
+  Linear             layer=5    blk.5.attn_output.weight
+      type            : mxfp4
+      in/out features : 1536 / 1536
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor blk.5.attn_output.weight ne=[1536,1536]
+        - out_features 1536 = 12x-1 (Q) or -1x-1 (K/V) => GQA or MHA, measured
+        - blk.5.attn_output.weight.bias ABSENT => bias=false
+  RoPE               layer=5    (computed)
+      pairing         : UNRESOLVED  (requires measurement from the reference graph)
+      base            : 10000
+      dim_count       : 128
+      scaling         : none
+      position_source : position index (pos), from inp_pos
+      evidence        : INFERRED (rule-based)
+        - rope applied to Q and K only, not V (graph)
+        - granitehybrid.rope.freq_base=10000.000000
+        - granitehybrid.rope.dimension_count=128
+        - granitehybrid.rope.scaling.type=none
+      UNRESOLVED      : pairing NOT MEASURED: supply SLLM_IR_ROPE_PAIRING from the reference graph. Deriving it from the architecture name is exactly the error this IR exists to avoid, since Qwen3 is NEOX and Llama-3.2 is GPT.
+  GatedMLP           layer=5    ffn_gate.weight + ffn_up.weight + ffn_down.weight
+      in/out features : 1536 / 4096
+      scope           : gated (SwiGLU-family): gate and up share out_features, down returns to in_features
+      evidence        : MEASURED (read from artefact/reference graph)
+        - ffn_gate ne=[1536,4096]  GATE TENSOR EXISTS AT THIS LAYER, measured by direct lookup, so the gated claim is earned
+        - ffn_up   ne=[1536,4096]  same shape as gate => parallel projections
+        - ffn_down ne=[4096,1536]  transpose of the gate shape => contraction
+        - granitehybrid.feed_forward_length=4096
+        - ffn_gate_inp.weight ABSENT => not MoE, and not inferred from the architecture name
+        - NOT claimed: which activation the gate uses. SwiGLU and GeGLU are the SAME op with a different activation, and nothing in this artefact identifies it.
+  SelectiveScan      layer=5    (none)
+      status          : ABSENT -- no ssm_a, ssm_in or ssm_conv1d tensor exists, so
+                       there is no recurrence to describe
+      evidence        : MEASURED -- emitting it would invent a state-space model from an
+                       architecture name.
+
+-- LAYER 0 (body SSM+FFN+, first of 2 distinct) --
+  RMSNorm            layer=0    blk.0.attn_norm.weight
+      type            : f32
+      norm width      : 1536   bias=false
+      epsilon         : 9.99999975e-06
+      evidence        : MEASURED (read from artefact/reference graph)
+        - granitehybrid.attention.layer_norm_rms_epsilon=0.000010
+        - ne=[4096,1] i.e. width == embedding_length => reduces the residual
+        - blk.0.attn_norm.bias ABSENT => bias=false
+        - qwen3/Llama graph applies it to the residual before the QKV projection
+  RMSNorm            layer=0    blk.0.ffn_norm.weight
+      type            : f32
+      norm width      : 1536   bias=false
+      epsilon         : 9.99999975e-06
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor name as written: "ffn_norm.weight" -- norms appear with and without the .weight suffix across models, which is a naming variant and not a different construct
+        - ne=[4096,1] => width == embedding_length
+        - applied to the post-attention residual before the FFN
+  RMSNorm            layer=0    blk.0.attn_q_norm.weight
+      status          : ABSENT for this architecture
+      evidence        : MEASURED -- tensor not present in the inventory,
+                       and not present in ANY layer (0 of 40)
+      NOTE            : ABSENT is not UNKNOWN. Absent means looked-and-
+                       not-there; UNKNOWN means could-not-determine.
+  RMSNorm            layer=0    blk.0.attn_k_norm.weight
+      status          : ABSENT for this architecture
+      evidence        : MEASURED -- tensor not present in the inventory,
+                       and not present in ANY layer (0 of 40)
+      NOTE            : ABSENT is not UNKNOWN. Absent means looked-and-
+                       not-there; UNKNOWN means could-not-determine.
+  SoftCap            layer=0    (none)
+      status          : ABSENT (no softcapping keys in metadata)
+      evidence        : MEASURED -- both keys absent from 48 kv pairs
+  Attention          layer=0    (none)
+      status          : ABSENT -- head_count is 12 and there is no Q, K or V
+                       projection and no KV cache to attend over
+      evidence        : MEASURED -- no Q, K or V projection exists AT THIS LAYER.
+                       head_count=12 is model-global metadata and does NOT license an
+                       Attention node here: an op present in SOME layers must not be
+                       emitted for every layer.
+  Linear             layer=0    blk.0.attn_q.weight
+      status          : ABSENT -- no tensor by this name in this architecture
+      evidence        : MEASURED -- no tensor with this name exists AT THIS LAYER, so
+                       NO node is emitted. The role may exist at another layer; that is
+                       not evidence here. Emitting one would be fabricating structure.
+  Linear             layer=0    blk.0.attn_k.weight
+      status          : ABSENT -- no tensor by this name in this architecture
+      evidence        : MEASURED -- no tensor with this name exists AT THIS LAYER, so
+                       NO node is emitted. The role may exist at another layer; that is
+                       not evidence here. Emitting one would be fabricating structure.
+  Linear             layer=0    blk.0.attn_v.weight
+      status          : ABSENT -- no tensor by this name in this architecture
+      evidence        : MEASURED -- no tensor with this name exists AT THIS LAYER, so
+                       NO node is emitted. The role may exist at another layer; that is
+                       not evidence here. Emitting one would be fabricating structure.
+  Linear             layer=0    blk.0.attn_output.weight
+      status          : ABSENT -- no tensor by this name in this architecture
+      evidence        : MEASURED -- no tensor with this name exists AT THIS LAYER, so
+                       NO node is emitted. The role may exist at another layer; that is
+                       not evidence here. Emitting one would be fabricating structure.
+  RoPE               layer=0    (none)
+      status          : ABSENT -- no Q or K projection exists AT THIS LAYER to rotate
+      evidence        : MEASURED -- RoPE is a property of an attention block, and there
+                       is none. Emitting a RoPE node would invent one.
+  GatedMLP           layer=0    ffn_gate.weight + ffn_up.weight + ffn_down.weight
+      in/out features : 1536 / 4096
+      scope           : gated (SwiGLU-family): gate and up share out_features, down returns to in_features
+      evidence        : MEASURED (read from artefact/reference graph)
+        - ffn_gate ne=[1536,4096]  GATE TENSOR EXISTS AT THIS LAYER, measured by direct lookup, so the gated claim is earned
+        - ffn_up   ne=[1536,4096]  same shape as gate => parallel projections
+        - ffn_down ne=[4096,1536]  transpose of the gate shape => contraction
+        - granitehybrid.feed_forward_length=4096
+        - ffn_gate_inp.weight ABSENT => not MoE, and not inferred from the architecture name
+        - NOT claimed: which activation the gate uses. SwiGLU and GeGLU are the SAME op with a different activation, and nothing in this artefact identifies it.
+  DepthwiseConv1D    layer=0    blk.0.ssm_conv1d.weight
+      type            : f32
+      in/out features : 4 / 3328
+      evidence        : MEASURED (read from artefact/reference graph)
+        - granitehybrid.ssm.conv_kernel = 4   [ARTEFACT MEASURED]
+        - ssm_conv1d.weight ne[0]=4, which agrees with conv_kernel: the weights ARE the kernel taps
+        - ne[1]=3328 channels with a matching ssm_conv1d.bias, one bias per channel: that is what makes it DEPTHWISE rather than a dense convolution
+        - convolved over SEQUENCE, not over an attention axis
+  RMSNorm            layer=0    blk.0.ssm_norm.weight
+      type            : f32
+      norm width      : 3072   bias=false
+      epsilon         : -1
+      evidence        : MEASURED (read from artefact/reference graph)
+        - ssm_norm.weight ne=[3072,1]   [ARTEFACT MEASURED]
+        - width 3072 == ssm.inner_size 3072, not embedding_length, so it gates the INNER space rather than the residual  [MEASURED comparison]
+        - SAME RMSNorm op as the residual norms; scope is the parameter that distinguishes it, not a different mathematics
+  SelectiveScan      layer=0    ssm_in -> ssm_out with ssm_a, ssm_d and an input-derived step size
+      evidence        : MEASURED (read from artefact/reference graph)
+        - granitehybrid.ssm.state_size = 128   [ARTEFACT MEASURED]: the recurrent state width
+        - granitehybrid.ssm.inner_size = 3072   [ARTEFACT MEASURED]
+        - granitehybrid.ssm.time_step_rank = 48   [ARTEFACT MEASURED]: the step size is COMPUTED FROM THE INPUT by projecting the sequence to this rank, which is what makes the block SELECTIVE rather than a fixed-step recurrence
+        - granitehybrid.ssm.group_count = 1   [ARTEFACT MEASURED]
+        - ssm_a ne=[1,48]   [ARTEFACT MEASURED]: per-head state transition, one row per state dimension
+        - ssm_d ne=[1,48]   [ARTEFACT MEASURED]: per-head skip coefficient, so the recurrence carries a direct term as well as the state
+        - ssm_in.weight ne=[1536,6448]: projects the residual into the inner space, mixing the state and step-size paths
+        - ssm_out.weight ne=[3072,1536]: projects back out
+        - NO attention mathematics anywhere in this block: no Q, no K, no softmax over keys, no KV cache. A recurrence over a carried state is DIFFERENT mathematics, so it gets its own composable op rather than being renamed Attention
+
+-- METADATA THAT VARIES BY LAYER (arrays, not scalars) --
+  granitehybrid.attention.head_count_kv (array of 40 -- quantity VARIES BY LAYER; the scalar field is left unset rather than guessed from element 0)
+  These are HETEROGENEITY IN THE METADATA. Reading one as a scalar
+  aborts ggml; averaging it would invent a single layer body.
+
+-- CLAIM LEDGER (what was measured, from where, and what is NOT claimed) --
+  THE READING RULE. Four confidence classes, never to be conflated:
+    measured     : looked in the place that must speak, and it did
+    inferred     : derived from a reference RULE, weaker than direct observation
+    unresolved   : the evidence is insufficient to decide -- NOT the same as absent
+    unobservable : this instrument cannot see it, so nothing may be concluded
+  'not observed' is NEVER 'does not exist'. Absence is a claim ABOUT A SCOPE,
+  and the scope is printed on every row.
+
+  totals: 32 measured/present, 0 inferred, 4 unresolved, 2 unobservable
+
+  Field          : Embedding
+    Value        : PRESENT
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : model
+    Confidence   : measured
+    Claim allowed: a Embedding op exists at model scope, with the parameters listed above resolved from the artefact
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : OutputProjection
+    Value        : PRESENT but PARTLY UNRESOLVED
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : model
+    Confidence   : partly measured, partly unresolved
+    Claim allowed: a OutputProjection op exists at model scope, but not every parameter is measured
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : RMSNorm
+    Value        : PRESENT
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : 5
+    Confidence   : measured
+    Claim allowed: a RMSNorm op exists at layer 5, with the parameters listed above resolved from the artefact
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : RMSNorm
+    Value        : PRESENT
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : 5
+    Confidence   : measured
+    Claim allowed: a RMSNorm op exists at layer 5, with the parameters listed above resolved from the artefact
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : rmsnorm.attn_q
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 5
+    Confidence   : measured
+    Claim allowed: no per-head Q norm exists at layer 5, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks per-head Q norm entirely
+
+  Field          : rmsnorm.attn_k
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 5
+    Confidence   : measured
+    Claim allowed: no per-head K norm exists at layer 5, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks per-head K norm entirely
+
+  Field          : softcap
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 5
+    Confidence   : measured
+    Claim allowed: no logit softcapping key exists at layer 5, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks logit softcapping key entirely
+
+  Field          : Attention
+    Value        : PRESENT
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : 5
+    Confidence   : measured
+    Claim allowed: a Attention op exists at layer 5, but not every parameter is measured
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : Linear
+    Value        : PRESENT
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : 5
+    Confidence   : measured
+    Claim allowed: a Linear op exists at layer 5, with the parameters listed above resolved from the artefact
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : Linear
+    Value        : PRESENT
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : 5
+    Confidence   : measured
+    Claim allowed: a Linear op exists at layer 5, with the parameters listed above resolved from the artefact
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : Linear
+    Value        : PRESENT
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : 5
+    Confidence   : measured
+    Claim allowed: a Linear op exists at layer 5, with the parameters listed above resolved from the artefact
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : Linear
+    Value        : PRESENT
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : 5
+    Confidence   : measured
+    Claim allowed: a Linear op exists at layer 5, with the parameters listed above resolved from the artefact
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : RoPE
+    Value        : PRESENT but PARTLY UNRESOLVED
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : 5
+    Confidence   : partly measured, partly unresolved
+    Claim allowed: a RoPE op exists at layer 5, but not every parameter is measured
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : GatedMLP
+    Value        : PRESENT
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : 5
+    Confidence   : measured
+    Claim allowed: a GatedMLP op exists at layer 5, with the parameters listed above resolved from the artefact
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : ffn.gated_mlp
+    Value        : PRESENT (gate tensor measured at this layer)
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 5
+    Confidence   : measured
+    Claim allowed: a GATED MLP exists at layer 5
+    NOT claimed  : NOT claimed: a specific activation function, and NOT claimed any gate elsewhere in the model
+
+  Field          : ssm.selective_scan
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 5
+    Confidence   : measured
+    Claim allowed: no SelectiveScan recurrence (ssm_a / ssm_in / ssm_conv1d) exists at layer 5, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks SelectiveScan recurrence (ssm_a / ssm_in / ssm_conv1d) entirely
+
+  Field          : rope.pairing
+    Value        : UNRESOLVED
+    Evidence src : reference graph (not reached)
+    Layer        : 5
+    Confidence   : unresolved
+    Claim allowed: cannot determine rope.pairing at layer 5
+    NOT claimed  : NOT claimed: a pairing. The architecture name is not evidence; Qwen3 is NEOX and Llama-3.2 is GPT, so guessing from the name is the exact error this IR exists to avoid
+
+  Field          : metadata.per_layer_array
+    Value        : ARRAY (value VARIES BY LAYER)
+    Evidence src : artefact metadata (direct)
+    Layer        : 5
+    Confidence   : measured
+    Claim allowed: this quantity is per-layer, not a single model-wide value
+    NOT claimed  : NOT claimed: any single value for it, and not claimed that element 0 represents the model. Reading it as a scalar aborts ggml.
+
+  Field          : fused-op internals (e.g. a SoftCap fused inside flash-attention)
+    Value        : UNOBSERVABLE
+    Evidence src : instrument capability
+    Layer        : model
+    Confidence   : unobservable
+    Claim allowed: this probe cannot observe fused-op internals (e.g. a SoftCap fused inside flash-attention), so nothing may be concluded about it
+    NOT claimed  : an op histogram counts node types and cannot see inside a node. Where a value is only reachable through op_params it must be read there or left unresolved.
+
+  Field          : RMSNorm
+    Value        : PRESENT
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: a RMSNorm op exists at layer 0, with the parameters listed above resolved from the artefact
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : RMSNorm
+    Value        : PRESENT
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: a RMSNorm op exists at layer 0, with the parameters listed above resolved from the artefact
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : rmsnorm.attn_q
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: no per-head Q norm exists at layer 0, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks per-head Q norm entirely
+
+  Field          : rmsnorm.attn_k
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: no per-head K norm exists at layer 0, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks per-head K norm entirely
+
+  Field          : softcap
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: no logit softcapping key exists at layer 0, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks logit softcapping key entirely
+
+  Field          : attention
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: no Attention block (Q/K/V projections) exists at layer 0, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks Attention block (Q/K/V projections) entirely
+
+  Field          : linear.attn_q.weight
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: no attn_q.weight exists at layer 0, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks attn_q.weight entirely
+
+  Field          : linear.attn_k.weight
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: no attn_k.weight exists at layer 0, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks attn_k.weight entirely
+
+  Field          : linear.attn_v.weight
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: no attn_v.weight exists at layer 0, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks attn_v.weight entirely
+
+  Field          : linear.attn_output.weight
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: no attn_output.weight exists at layer 0, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks attn_output.weight entirely
+
+  Field          : rope
+    Value        : ABSENT
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: no Q or K projection to rotate exists at layer 0, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks Q or K projection to rotate entirely
+
+  Field          : GatedMLP
+    Value        : PRESENT
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: a GatedMLP op exists at layer 0, with the parameters listed above resolved from the artefact
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : ffn.gated_mlp
+    Value        : PRESENT (gate tensor measured at this layer)
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: a GATED MLP exists at layer 0
+    NOT claimed  : NOT claimed: a specific activation function, and NOT claimed any gate elsewhere in the model
+
+  Field          : DepthwiseConv1D
+    Value        : PRESENT
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: a DepthwiseConv1D op exists at layer 0, with the parameters listed above resolved from the artefact
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : RMSNorm
+    Value        : PRESENT
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: a RMSNorm op exists at layer 0, with the parameters listed above resolved from the artefact
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : SelectiveScan
+    Value        : PRESENT
+    Evidence src : tensor inventory (direct) + resolved parameters
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: a SelectiveScan op exists at layer 0, with the parameters listed above resolved from the artefact
+    NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : rope.pairing
+    Value        : UNRESOLVED
+    Evidence src : reference graph (not reached)
+    Layer        : 0
+    Confidence   : unresolved
+    Claim allowed: cannot determine rope.pairing at layer 0
+    NOT claimed  : NOT claimed: a pairing. The architecture name is not evidence; Qwen3 is NEOX and Llama-3.2 is GPT, so guessing from the name is the exact error this IR exists to avoid
+
+  Field          : metadata.per_layer_array
+    Value        : ARRAY (value VARIES BY LAYER)
+    Evidence src : artefact metadata (direct)
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: this quantity is per-layer, not a single model-wide value
+    NOT claimed  : NOT claimed: any single value for it, and not claimed that element 0 represents the model. Reading it as a scalar aborts ggml.
+
+  Field          : fused-op internals (e.g. a SoftCap fused inside flash-attention)
+    Value        : UNOBSERVABLE
+    Evidence src : instrument capability
+    Layer        : model
+    Confidence   : unobservable
+    Claim allowed: this probe cannot observe fused-op internals (e.g. a SoftCap fused inside flash-attention), so nothing may be concluded about it
+    NOT claimed  : an op histogram counts node types and cannot see inside a node. Where a value is only reachable through op_params it must be read there or left unresolved.
+
+
+-- FINAL AUDIT REPORT --
+
+  A. WHAT THIS INSTRUMENT CAN SEE
+     direct   : tensor inventory, per-layer tensor identity, tensor shapes
+                and types, GGUF metadata with declared types read per type.
+     derived  : nothing that changes a value. Shape arithmetic is used only
+                to CROSS-CHECK a declared count, never to supply one.
+     external : reference graph op histogram, op_params, and the six graph
+                sources -- a SEPARATE provenance class, supplied explicitly and
+                never merged into artefact evidence.
+     cannot see: an architecture whose operations are fused inside a node the
+                histogram only counts; anything a single-token, single-position
+                graph build elides; the activation function of a dense FFN.
+
+  B. DIRECT VERSUS DERIVED, COUNTED OVER 38 CLAIMS
+     32   measured DIRECTLY from the artefact
+     0    INFERRED from a reference rule (weaker; labelled per claim)
+     4    UNRESOLVED -- insufficient evidence, NOT absence
+     2    UNOBSERVABLE -- this instrument cannot see it at all
+
+
+  C. WHAT WAS DELIBERATELY NOT CLAIMED
+     Each item below was available to assert and was refused, because the
+     evidence does not support it. Refusal is the finding.
+     - no RoPE base and no pairing, though both are tempting to fill in
+       from an architecture name or an upstream config: those describe
+       different artefacts. Unresolved is the honest answer.
+     - no ExpertRouter or ExpertGatedFFN: no router tensor exists here,
+       so MoE is NOT claimed even for a model family known to use experts.
+     - absence of Attention is claimed PER LAYER only. Never
+       'this model has no attention': other layers may have it.
+     - absence of a state-space recurrence is claimed PER LAYER only.
+     - no activation function for any FFN, gated or dense.
+     - no claim that the vocabulary is COMPLETE. A tensor this probe cannot
+       classify surfaces as UNKNOWN, which means not-yet-described, not
+       absent and not absent-by-design.
+
+  D. THE ONE-LINE SUMMARY OF THIS ARTEFACT
+     40 layer(s) measured, 2 distinct layer bodies, 38 claims recorded,
+     19 of those claims are absences or unknowns. Those are RESULTS.
+
+     NO EVIDENCE -> NO OPERATION. A claim appears here only where a
+     tensor, a metadata key, or a reference graph node earned it, at the
+     exact layer where it was found.
+
+-- PER-LAYER ROLE COVERAGE (all layers identical?) --
+  layers seen=40  distinct roles=17  every layer has the same role set: NO (see below)
+    layer 0 has 13 roles
+    layer 1 has 13 roles
+    layer 2 has 13 roles
+    layer 3 has 13 roles
+    layer 4 has 13 roles
+    layer 5 has 9 roles
+    layer 6 has 13 roles
+    layer 7 has 13 roles
+    layer 8 has 13 roles
+    layer 9 has 13 roles
+    layer 10 has 13 roles
+    layer 11 has 13 roles
+    layer 12 has 13 roles
+    layer 13 has 13 roles
+    layer 14 has 13 roles
+    layer 15 has 9 roles
+    layer 16 has 13 roles
+    layer 17 has 13 roles
+    layer 18 has 13 roles
+    layer 19 has 13 roles
+    layer 20 has 13 roles
+    layer 21 has 13 roles
+    layer 22 has 13 roles
+    layer 23 has 13 roles
+    layer 24 has 13 roles
+    layer 25 has 9 roles
+    layer 26 has 13 roles
+    layer 27 has 13 roles
+    layer 28 has 13 roles
+    layer 29 has 13 roles
+    layer 30 has 13 roles
+    layer 31 has 13 roles
+    layer 32 has 13 roles
+    layer 33 has 13 roles
+    layer 34 has 13 roles
+    layer 35 has 9 roles
+    layer 36 has 13 roles
+    layer 37 has 13 roles
+    layer 38 has 13 roles
+    layer 39 has 13 roles

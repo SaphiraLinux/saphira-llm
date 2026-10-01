@@ -833,7 +833,38 @@ int main(int argc, char ** argv) {
         if (tn_.find("ffn_up") != std::string::npos || tn_.find("ffn_down") != std::string::npos ||
             tn_.find("ffn_gate.") != std::string::npos) sig += "FFN+";
         if (tn_.find("experts") != std::string::npos || tn_.find("ffn_gate_inp") != std::string::npos) sig += "MOE+";
-        if (!sig.empty() && layer_body[l].empty()) layer_body[l] = sig;
+        /* UNION, not first match. The signature is accumulated across every
+         * tensor of the layer. It previously stopped at the first family matched,
+         * which makes the reported body depend on TENSOR FILE ORDER rather than on
+         * the structure: Granite-4.0-H has ffn_down before ssm_a in the file, so
+         * its 36 state-space layers were labelled FFN+ when they are SSM+FFN+.
+         * A topology report that varies with file order is not a topology
+         * report. */
+        if (!sig.empty()) {
+            std::string & acc = layer_body[l];
+            /* sig is a sorted-ish "+"-joined set; merge token by token. */
+            std::vector<std::string> have, incoming;
+            for (size_t i = 0; i < acc.size(); ) {
+                size_t j = acc.find('+', i); if (j == std::string::npos) j = acc.size();
+                have.push_back(acc.substr(i, j - i)); i = j + 1;
+            }
+            for (size_t i = 0; i < sig.size(); ) {
+                size_t j = sig.find('+', i); if (j == std::string::npos) j = sig.size();
+                incoming.push_back(sig.substr(i, j - i)); i = j + 1;
+            }
+            for (size_t a = 0; a < incoming.size(); ++a) {
+                bool seen = false;
+                for (size_t b = 0; b < have.size(); ++b) if (have[b] == incoming[a]) seen = true;
+                if (!seen) have.push_back(incoming[a]);
+            }
+            /* Stable, readable order: SSM, ATTN, MOE, FFN -- fixed, not sorted. */
+            const char * order[] = {"SSM", "ATTN", "MOE", "FFN"};
+            std::string merged;
+            for (int o = 0; o < 4; ++o)
+                for (size_t b = 0; b < have.size(); ++b)
+                    if (have[b] == order[o]) { merged += have[b]; merged += "+"; }
+            layer_body[l] = merged;
+        }
     }
     printf("  layer count = %d   distinct bodies = ", n_layers);
     for (int l = 0; l < n_layers; ++l)

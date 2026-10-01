@@ -1,0 +1,102 @@
+compiling (quiet)
+running fresh binary
+########## G4H ##########
+file = /var/lib/spoon/models/granite4h-1b/granite4h-1b-mxfp4.gguf
+kv_pairs = 48   tensors = 506
+
+-- ARCHITECTURE-RELEVANT METADATA (tokenizer.* excluded) --
+  general.architecture                                 = "granitehybrid"
+  general.type                                         = "model"
+  general.name                                         = "Granite 4.0 H 1b Unsloth"
+  general.finetune                                     = "unsloth"
+  general.basename                                     = "granite-4.0-h"
+  general.size_label                                   = "1B"
+  general.license                                      = "apache-2.0"
+  general.base_model.count                             = 1
+  general.base_model.0.name                            = "Granite 4.0 H 1b"
+  general.base_model.0.organization                    = "Ibm Granite"
+  general.base_model.0.repo_url                        = "https://huggingface.co/ibm-granite/granite-4.0-h-1b"
+  general.tags                                         = <arr>
+  granitehybrid.block_count                            = 40
+  granitehybrid.context_length                         = 1048576
+  granitehybrid.embedding_length                       = 1536
+  granitehybrid.feed_forward_length                    = 4096
+  granitehybrid.attention.head_count                   = 12
+  granitehybrid.attention.head_count_kv                = <arr>
+  granitehybrid.rope.freq_base                         = 10000
+  granitehybrid.attention.layer_norm_rms_epsilon       = 9.99999975e-06
+  granitehybrid.expert_count                           = 0
+  granitehybrid.expert_used_count                      = 0
+  granitehybrid.vocab_size                             = 100352
+  granitehybrid.rope.dimension_count                   = 128
+  granitehybrid.attention.scale                        = 0.0078125
+  granitehybrid.embedding_scale                        = 12
+  granitehybrid.residual_scale                         = 0.219999999
+  granitehybrid.logit_scale                            = 6
+  granitehybrid.expert_shared_feed_forward_length      = 4096
+  granitehybrid.ssm.conv_kernel                        = 4
+  granitehybrid.ssm.state_size                         = 128
+  granitehybrid.ssm.group_count                        = 1
+  granitehybrid.ssm.inner_size                         = 3072
+  granitehybrid.ssm.time_step_rank                     = 48
+  granitehybrid.rope.scaling.finetuned                 = false
+  general.quantization_version                         = 2
+  general.file_type                                    = 38
+
+-- TOKENIZER TUPLE (the selector, all three legs) --
+  tokenizer.ggml.model                   = "gpt2"
+  tokenizer.ggml.pre                     = "dbrx"
+  tokenizer.ggml.bos_token_id            = 100257
+  tokenizer.ggml.eos_token_id            = 100257
+  tokenizer.ggml.padding_token_id        = 100256
+  tokenizer.ggml.unknown_token_id        = 100269
+  tokenizer.ggml.add_bos_token           = false
+  tokenizer.ggml.add_eos_token           ABSENT
+  tokenizer.ggml.add_space_prefix        ABSENT
+  tokenizer.ggml.ignore_merges           ABSENT
+  tokenizer.ggml.tokens n                = 100352
+  tokenizer.ggml.merges                  = present
+
+-- TENSOR TYPE HISTOGRAM --
+  f32          297
+  mxfp4        4
+  q8_0         205
+
+-- TENSOR INVENTORY, layer indices resolved --
+  max layer index = 39  => layer count = 40
+  attn_k.weight            layers=4    ne=[1536,512]
+  attn_norm.weight         layers=40   ne=[1536,1]
+  attn_output.weight       layers=4    ne=[1536,1536]
+  attn_q.weight            layers=4    ne=[1536,1536]
+  attn_v.weight            layers=4    ne=[1536,512]
+  ffn_down.weight          layers=40   ne=[4096,1536]
+  ffn_gate.weight          layers=40   ne=[1536,4096]
+  ffn_norm.weight          layers=40   ne=[1536,1]
+  ffn_up.weight            layers=40   ne=[1536,4096]
+  ssm_a                    layers=36   ne=[1,48]
+  ssm_conv1d.bias          layers=36   ne=[3328,1]
+  ssm_conv1d.weight        layers=36   ne=[4,3328]
+  ssm_d                    layers=36   ne=[1,48]
+  ssm_dt.bias              layers=36   ne=[48,1]
+  ssm_in.weight            layers=36   ne=[1536,6448]
+  ssm_norm.weight          layers=36   ne=[3072,1]
+  ssm_out.weight           layers=36   ne=[3072,1536]
+
+-- NON-LAYER TENSORS --
+  output_norm.weight
+  token_embd.weight
+
+-- OPTIONAL PER-LAYER TENSORS: PRESENT OR ABSENT --
+  attn_q_norm.weight         ABSENT
+  attn_k_norm.weight         ABSENT
+  attn_q_norm.bias           ABSENT
+  attn_k_norm.bias           ABSENT
+  attn_q.bias                ABSENT
+  attn_k.bias                ABSENT
+  attn_v.bias                ABSENT
+  attn_output.bias           ABSENT
+  ffn_gate_inp.weight        ABSENT
+  ffn_norm.bias              ABSENT
+  attn_norm.bias             ABSENT
+  (a genuine per-layer tensor is verified at layer 0 AND its count
+   matches the layer count above, so it is not a single stray tensor)
