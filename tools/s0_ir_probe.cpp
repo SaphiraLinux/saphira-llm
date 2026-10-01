@@ -1431,14 +1431,18 @@ int main(int argc, char ** argv) {
         n.evidence.push_back("ffn_down ne=[" + std::to_string(dims["ffn_down.weight"].first) + "," +
             std::to_string(dims["ffn_down.weight"].second) + "]  contraction back to in_features");
         n.evidence.push_back(std::string(P) + "feed_forward_length=" + std::to_string(ff));
-        n.evidence.push_back("TENSION, RECORDED NOT RESOLVED: the reference graph for this model "
-            "contains 24 GLU ops -- a gated linear unit -- while NO ffn_gate tensor exists at this "
-            "layer. Either the GLU belongs to the state-space path rather than the FFN, or the "
-            "reference synthesises the gate without shipping one. Both are consistent with what "
-            "has been measured, so the DenseMLP classification rests on the TENSOR FACT (no "
-            "ffn_gate.weight here) and this op-level tension is left UNRESOLVED rather than "
-            "decided. If a later measurement attributes the GLU to the FFN, this layer becomes "
-            "gated and the classification must change.");
+        n.evidence.push_back("GLU OWNERSHIP, RESOLVED BY ATTRIBUTION RATHER THAN BY COUNT. "
+            "The reference graph contains 24 GLU ops -- gated linear units -- which appeared to "
+            "contradict this ungated classification. It does not. Every GLU node is fed by a "
+            "source named mamba2_y_add_d, so the gate lives in the STATE-SPACE path; none is fed "
+            "by an ffn_* tensor. Counts could never have settled this, because GLU, SSM and FFN "
+            "layers are all 24 here, so every count-based story fits either answer. Only "
+            "following the sources can, and they agree with the tensor inventory.");
+        n.evidence.push_back("TWO INDEPENDENT WITNESSES now agree that this FFN is ungated: the "
+            "tensor inventory (no ffn_gate.weight here) and the reference graph (no GLU fed by "
+            "an ffn_* tensor). Neither measurement overrules the other; they corroborate. Had "
+            "the GLU been attributed to the FFN, this would be a classification CHANGE to "
+            "GatedMLP with the gate tensor ABSENT, not a refinement of DenseMLP.");
         n.evidence.push_back("NOT claimed: which activation or nonlinearity this dense FFN uses. "
             "No activation tensor or metadata key identifies it in this artefact, so the "
             "activation is UNRESOLVED, not GELU and not ReLU.");

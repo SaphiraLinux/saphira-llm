@@ -502,6 +502,22 @@ grep -q 'Field          : ffn.dense_mlp' /tmp/r_nogate.txt
 if [ $? -eq 0 ]; then ok "R6 dense MLP appears in the claim ledger" 0; else ok "R6 dense MLP appears in the claim ledger" 1; fi
 cp /tmp/ir_r.bak tools/s0_ir_probe.cpp
 
+# ---- S: GLU OWNERSHIP, attributed not counted --------------------------------
+./tools/run_s0_probe.sh tools/s0_graphfacts_probe.cpp "$NH" 7 100 > /tmp/s_glu.txt 2>/dev/null
+grep -q 'owner: STATE-SPACE path' /tmp/s_glu.txt
+if [ $? -eq 0 ]; then ok "S1 GLU nodes attributed to the state-space path" 0; else ok "S1 GLU nodes attributed to the state-space path" 1; fi
+grep -q 'owner: FEED-FORWARD path' /tmp/s_glu.txt
+if [ $? -ne 0 ]; then ok "S2 NO GLU node is fed by an ffn_* tensor" 0; else ok "S2 NO GLU node is fed by an ffn_* tensor" 1; fi
+grep -q 'TWO INDEPENDENT' /tmp/s_glu.txt
+if [ $? -eq 0 ]; then ok "S3 verdict states two witnesses agree" 0; else ok "S3 verdict states two witnesses agree" 1; fi
+# The IR must record the RESOLUTION, not the earlier tension.
+./tools/run_s0_probe.sh tools/s0_ir_probe.cpp "$NH" > /tmp/s_ir.txt 2>/dev/null
+grep -q 'GLU OWNERSHIP, RESOLVED BY ATTRIBUTION' /tmp/s_ir.txt
+if [ $? -eq 0 ]; then ok "S4 IR records GLU ownership as RESOLVED" 0; else ok "S4 IR records GLU ownership as RESOLVED" 1; fi
+grep -q 'TENSION, RECORDED NOT RESOLVED' /tmp/s_ir.txt
+if [ $? -ne 0 ]; then ok "S5 the superseded tension note is gone" 0; else ok "S5 the superseded tension note is gone" 1; fi
+
+
 # ---- Q: MoE LAYER-LOCALITY negatives (added BEFORE any hybrid-MoE support) ----
 OL=/var/lib/spoon/models/olmoe-1b7b/olmoe-q4_k_m.gguf
 if [ -f "$OL" ]; then

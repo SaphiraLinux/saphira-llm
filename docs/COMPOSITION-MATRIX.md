@@ -44,6 +44,23 @@ Every op below was verified to be gated by `AT(role, layer)`, not by
 | ExpertRouter      | yes              | Q3, Q5            |
 | ExpertGatedFFN    | yes              | Q4, Q6            |
 
+## GLU ownership on Nemotron-H (resolved by attribution)
+
+24 `GLU` ops appeared to contradict the ungated classification, since a GLU is a
+multiplicative gate. Counts could never have settled it — GLU, SSM and FFN layers
+are all 24 here, so every count-based story fits either answer.
+
+| Witness | Says |
+|---------|------|
+| Tensor inventory | no `ffn_gate.weight` at the FFN layers |
+| Reference graph | all 24 GLU nodes fed by `mamba2_y_add_d-N` — the **state-space** path |
+| Reference graph | **zero** GLU nodes fed by an `ffn_*` tensor |
+
+Neither measurement overrules the other; they corroborate. `DenseMLP` now rests on
+**two independent witnesses**. Had the GLU been attributed to the FFN, the correct
+response would have been a classification *change* to `GatedMLP` with the gate
+tensor `ABSENT` — not a refinement of `DenseMLP`.
+
 ## Correctly model-global (NOT layer-owned)
 
 These are single tensors with no layer identity, so a model-global test is correct

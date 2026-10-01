@@ -43,6 +43,16 @@ struct Ev {
              * precomputed frequency table was passed. A probe that cannot look
              * must say so rather than implying the thing was absent. */
             std::string n0, n1, n2, n3;
+            /* Source NAMES for every input, not just the first four roles. GLU
+             * ownership is decided by which tensor family feeds the node, so the
+             * names must be available for all inputs. */
+            std::vector<std::string> snames;
+            std::string nsrc_name(int k) const {
+                if (k >= 0 && k < (int) snames.size()) return snames[k];
+                if (k == 0) return n0; if (k == 1) return n1;
+                if (k == 2) return n2; if (k == 3) return n3;
+                return std::string();
+            }
             int n_srcs; };
 static std::vector<Ev> g; static bool g_rec = false;
 static const char * opname(int op) {
@@ -103,9 +113,10 @@ static bool ev(ggml_tensor * t, bool ask, void *) {
         e.has_op_params = true;
     }
     e.n_srcs = 0;
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < GGML_MAX_SRC; ++i) {
         if (t->src[i] == NULL) { continue; }
         if (t->src[i]->name == NULL) { continue; }
+        e.snames.push_back(t->src[i]->name);
         ++e.n_srcs;
         if (i == 0) { e.n0 = t->src[i]->name; }
         else if (i == 1) { e.n1 = t->src[i]->name; }
@@ -543,6 +554,77 @@ int main(int argc, char ** argv) {
            * out exactly. Same discipline as ABSENT versus UNKNOWN. */
           printf("  head_dim NOT APPLICABLE -- head_count was measured to be 0\n");
       } else printf("  head_dim UNRESOLVED\n"); }
+
+    /* ---- GLU OWNERSHIP: an open evidence question, not a naming question ----
+     *
+     * Two observations are both true and appear to conflict:
+     *   1. the FFN layers ship ffn_up + ffn_down and NO ffn_gate tensor;
+     *   2. the graph contains 24 GLU ops, and a GLU is a multiplicative gate.
+     * The question is NOT whether one invalidates the other. It is which layer
+     * each GLU belongs to. Counting cannot answer it -- 24 GLU and 24 SSM and 24
+     * FFN layers are all the same number, so every count-based story is
+     * consistent with either answer.
+     *
+     * Ownership is decided by FOLLOWING THE SOURCES. A GLU node whose inputs are
+     * named after ssm_* tensors belongs to the state-space path; one whose inputs
+     * are named after ffn_* belongs to the feed-forward. That is attribution from
+     * the graph, not from a count, a name, or an architecture label. */
+    printf("\n== GLU OWNERSHIP (attributed by SOURCE TENSOR, not by count) ==\n");
+    { int n_glu = 0, glu_ssm = 0, glu_ffn = 0, glu_other = 0;
+      for (size_t i = 0; i < g.size(); ++i) {
+          if (g[i].op != "GLU") { continue; }
+          ++n_glu;
+          std::string all; for (int k = 0; k < 4; ++k) all += g[i].nsrc_name(k) + " ";
+          /* Attribution is by tensor FAMILY in the source names: ffn_* is the
+           * feed-forward, mamba2_* / ssm_* is the state-space path. Both counts
+           * are 24 here, so no count-based argument could have distinguished
+           * them -- the sources can, and they can because the reference names
+           * the node. A name still has to be corroborated by what it feeds: this
+           * section reports the source names verbatim so the attribution is
+           * auditable rather than asserted. Anything not matching either family
+           * is left unclassified and NOT guessed. */
+          const bool is_ffn = all.find("ffn") != std::string::npos;
+          const bool is_ssm = (all.find("ssm") != std::string::npos ||
+                               all.find("mamba") != std::string::npos);
+          if (is_ffn && !is_ssm) ++glu_ffn;
+          else if (is_ssm && !is_ffn) ++glu_ssm;
+          else ++glu_other;
+          if (n_glu <= 4) {
+              printf("   GLU node sources:");
+              for (int k = 0; k < 4; ++k) {
+                  const std::string nm = g[i].nsrc_name(k);
+                  if (nm.empty()) { continue; }
+                  printf(" [%d]=%s", k, nm.c_str());
+              }
+              printf("\n       -> owner: %s\n",
+                     (is_ffn && !is_ssm) ? "FEED-FORWARD path" :
+                     (is_ssm && !is_ffn) ? "STATE-SPACE path" : "UNCLASSIFIED (neither family named)");
+          }
+      }
+      printf("   %d GLU nodes total: %d attributed to the state-space path, %d to the\n",
+             n_glu, glu_ssm, glu_ffn);
+      printf("   feed-forward path, %d ambiguous.\n", glu_other);
+      if (glu_ffn == 0 && glu_other == 0) {
+          printf("   VERDICT: every GLU node is fed by a state-space source and NONE by an\n");
+          printf("   ffn_* tensor, so the gate lives in the STATE-SPACE PATH, not the\n");
+          printf("   feed-forward. The FFN is ungated on the GRAPH evidence as well as on\n");
+          printf("   the tensor evidence, and DenseMLP now rests on TWO INDEPENDENT\n");
+          printf("   WITNESSES instead of one. That is the resolution: not one measurement\n");
+          printf("   overruling another, but two agreeing.\n");
+      } else if (glu_ffn == 0) {
+          printf("   VERDICT: no GLU node is fed by an ffn_* tensor, but %d name neither\n", glu_other);
+          printf("   family, so DenseMLP is SUPPORTED and not fully PROVEN.\n");
+      } else if (glu_ffn > 0) {
+          printf("   VERDICT: %d GLU node(s) ARE fed by ffn_* tensors. The feed-forward\n", glu_ffn);
+          printf("   computes a gate that is FUSED rather than shipped as a tensor, so\n");
+          printf("   DenseMLP is WRONG for those layers and they are GATED with the gate\n");
+          printf("   tensor ABSENT. This is a classification CHANGE, not a refinement.\n");
+      }
+      if (glu_other > 0) {
+          printf("   UNRESOLVED: %d GLU nodes reference neither ssm_* nor ffn_* sources,\n", glu_other);
+          printf("   so ownership for those is undetermined and is NOT guessed.\n");
+      }
+    }
 
     /* ---- 3: which tensor does the final projection read? ---- */
     printf("\n== FINAL PROJECTION SOURCE (weight sharing) ==\n");
