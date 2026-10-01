@@ -389,6 +389,66 @@ present /tmp/n_falcon.txt SelectiveScan "O10 Falcon-H1 DOES emit SelectiveScan (
 present /tmp/n_falcon.txt Attention     "O11 Falcon-H1 DOES emit Attention (evidenced)"
 present /tmp/n_mamba.txt  SelectiveScan "O12 Mamba-2 DOES emit SelectiveScan (evidenced)"
 
+# ---- P: HETEROGENEOUS TOPOLOGY + LAYER-LOCAL ABSENCE -----------------------
+NH=/var/lib/spoon/models/nemotron-h-8b/nemotron-h-8b-q2_k.gguf
+if [ -f "$NH" ]; then
+  ./tools/run_s0_probe.sh tools/s0_ir_probe.cpp "$NH" > /tmp/p_nh.txt 2>/dev/null
+  P1="NEOX" ROUT="" HD="" RS="" RB="" ./tools/run_s0_probe.sh tools/s0_ir_probe.cpp "$NH" > /tmp/p_nh.txt 2>/dev/null
+
+  # The headline: the layer graph changes across depth.
+  grep -q 'HETEROGENEOUS -- the layer graph CHANGES across depth' /tmp/p_nh.txt
+  if [ $? -eq 0 ]; then ok "P1 model is HETEROGENEOUS across depth" 0; else ok "P1 model is HETEROGENEOUS across depth" 1; fi
+  grep -q 'distinct bodies = 3' /tmp/p_nh.txt
+  if [ $? -eq 0 ]; then ok "P2 three distinct layer bodies measured" 0; else ok "P2 three distinct layer bodies measured" 1; fi
+  # An op present SOMEWHERE must not be emitted for EVERY layer. These are the
+  # LAYER-LOCAL negatives, and they are the ones that found two fabrications:
+  # SelectiveScan and Attention were gated on dims.count(), which is keyed by
+  # ROLE, so a role present in one layer satisfied the gate for all 52.
+  awk '/^-- LAYER 7 /,/^-- LAYER 1 /' /tmp/p_nh.txt | grep -qE '^  SelectiveScan +layer=7 +\(none\)'
+  if [ $? -eq 0 ]; then ok "P3 attention-only layer has NO SelectiveScan (layer-local)" 0; else ok "P3 attention-only layer has NO SelectiveScan (layer-local)" 1; fi
+  awk '/^-- LAYER 1 /,/^-- LAYER 0 /' /tmp/p_nh.txt | grep -qE '^  SelectiveScan +layer=1 +\(none\)'
+  if [ $? -eq 0 ]; then ok "P4 FFN layer has NO SelectiveScan" 0; else ok "P4 FFN layer has NO SelectiveScan" 1; fi
+  awk '/^-- LAYER 0 /,0' /tmp/p_nh.txt | grep -qE '^  Attention +layer=0 +\(none\)'
+  if [ $? -eq 0 ]; then ok "P5 SSM layer has NO Attention" 0; else ok "P5 SSM layer has NO Attention" 1; fi
+  awk '/^-- LAYER 0 /,0' /tmp/p_nh.txt | grep -qE '^  GatedMLP +layer=0 +\(none\)'
+  if [ $? -eq 0 ]; then ok "P6 SSM layer has NO GatedMLP" 0; else ok "P6 SSM layer has NO GatedMLP" 1; fi
+  awk '/^-- LAYER 7 /,/^-- LAYER 1 /' /tmp/p_nh.txt | grep -qE '^  GatedMLP +layer=7 +\(none\)'
+  if [ $? -eq 0 ]; then ok "P7 attention-only layer has NO GatedMLP" 0; else ok "P7 attention-only layer has NO GatedMLP" 1; fi
+  # The positive half: each body must actually emit its own op, or the
+  # negatives above would pass on an emitter that emits nothing at all.
+  awk '/^-- LAYER 7 /,/^-- LAYER 1 /' /tmp/p_nh.txt | grep -qE '^  Attention +layer=7 +(blk|)'
+  if [ $? -eq 0 ]; then ok "P8 attention body DOES emit Attention" 0; else ok "P8 attention body DOES emit Attention" 1; fi
+  awk '/^-- LAYER 0 /,0' /tmp/p_nh.txt | grep -qE '^  SelectiveScan +layer=0 +ssm_in'
+  if [ $? -eq 0 ]; then ok "P9 SSM body DOES emit SelectiveScan" 0; else ok "P9 SSM body DOES emit SelectiveScan" 1; fi
+  awk '/^-- LAYER 1 /,/^-- LAYER 0 /' /tmp/p_nh.txt | grep -qE '^  GatedMLP +layer=1 +ffn_gate'
+  if [ $? -eq 0 ]; then ok "P10 FFN body DOES emit GatedMLP" 0; else ok "P10 FFN body DOES emit GatedMLP" 1; fi
+  # A name must not be taken as locality. attn_norm sits on all 52 layers here,
+  # including pure-SSM and pure-FFN layers, so despite its NAME it is a generic
+  # residual norm and NOT attention-local.
+  grep -q 'ATTN_NORM *52' /tmp/p_topo.txt 2>/dev/null || ./tools/run_s0_probe.sh tools/s0_topo_probe.cpp "$NH" > /tmp/p_topo.txt 2>/dev/null
+  grep -qE '^  ATTN_NORM +52 ' /tmp/p_topo.txt
+  if [ $? -eq 0 ]; then ok "P11 attn_norm is on ALL 52 layers: a name is not locality" 0; else ok "P11 attn_norm is on ALL 52 layers: a name is not locality" 1; fi
+  grep -qE '^  ATTN +4 ' /tmp/p_topo.txt
+  if [ $? -eq 0 ]; then ok "P12 attention exists in only 4 of 52 layers" 0; else ok "P12 attention exists in only 4 of 52 layers" 1; fi
+  # Per-layer metadata arrays must be reported as arrays, not coerced to a
+  # scalar. Reading feed_forward_length as a scalar aborted ggml outright.
+  grep -q 'METADATA THAT VARIES BY LAYER' /tmp/p_nh.txt
+  if [ $? -eq 0 ]; then ok "P13 per-layer metadata arrays reported, not coerced" 0; else ok "P13 per-layer metadata arrays reported, not coerced" 1; fi
+  grep -q 'UNKNOWN role' /tmp/p_nh.txt
+  if [ $? -ne 0 ]; then ok "P14 zero UNKNOWN roles for the heterogeneous model" 0; else ok "P14 zero UNKNOWN roles for the heterogeneous model" 1; fi
+  # NON-VACUITY on the layer-local gate: remove every SSM tensor at layer 0 ONLY,
+  # and the gate must close there. If the gate were model-global it would stay
+  # open and the assertion below would fail.
+  cp tools/s0_ir_probe.cpp /tmp/ir7.bak
+  # The gate is an OR over three tensors (ssm_a, ssm_in, ssm_conv1d), so
+  # removing ONE does not close it. Remove all three at layer 0 only.
+  sed -i 's|g_at_layer.insert("blk." + idx + "." + tn_.substr(d2 + 1));|{ std::string rr = "blk." + idx + "." + tn_.substr(d2 + 1); if (rr.compare(0,6,"blk.0.") != 0) g_at_layer.insert(rr); }|' tools/s0_ir_probe.cpp
+  P1="NEOX" ROUT="" HD="" RS="" RB="" ./tools/run_s0_probe.sh tools/s0_ir_probe.cpp "$NH" > /tmp/p_nhv.txt 2>/dev/null
+  awk '/^-- LAYER 0 /,0' /tmp/p_nhv.txt | grep -qE '^  SelectiveScan +layer=0 +\(none\)'
+  if [ $? -eq 0 ]; then ok "P15 non-vacuity: SSM absent at layer 0 -> SelectiveScan absent there" 0; else ok "P15 non-vacuity: SSM absent at layer 0 -> SelectiveScan absent there" 1; fi
+  cp /tmp/ir7.bak tools/s0_ir_probe.cpp
+fi
+
 echo
 echo "discovery-ir structural tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

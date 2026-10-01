@@ -169,9 +169,37 @@ static bool kv_f32(gguf_context * g, const std::string & k, double * out) {
     *out = gguf_get_val_f32(g, id);
     return true;
 }
+/* Type checking is a PERMANENT invariant of every reader, not a defensive check
+ * on the ones that happened to crash. A per-layer ARRAY such as
+ * feed_forward_length or attention.head_count_kv is a legitimate value of a
+ * legitimate quantity: it says the quantity VARIES BY LAYER. Reading it as a
+ * scalar aborts the probe inside ggml, so the type is checked before decoding
+ * and an array is reported rather than coerced. */
+/* File-scope LAYER-LOCAL tensor index. Every emitter asks AT(role, layer):
+ * does THIS tensor exist AT THIS LAYER. The earlier model-global question,
+ * "does this role exist somewhere", is what let SelectiveScan and Attention be
+ * emitted on layers that have neither. A file-scope set (rather than a macro
+ * local to main) is required because emitters live in separate functions. */
+static std::set<std::string> g_at_layer;
+static bool AT(const std::string & role, int layer) {
+    return g_at_layer.count("blk." + std::to_string(layer) + "." + role) > 0;
+}
+
+static std::vector<std::string> kv_arrays_seen;
+static bool kv_is_array(gguf_context * g, const std::string & k, long * n_out) {
+    const int64_t id = gguf_find_key(g, k.c_str());
+    if (id < 0) { return false; }
+    const enum gguf_type t = gguf_get_kv_type(g, id);
+    if (t != GGUF_TYPE_ARRAY) { return false; }
+    if (n_out != NULL) { *n_out = (long) gguf_get_arr_n(g, id); }
+    kv_arrays_seen.push_back(k + " (array of " + std::to_string((long) gguf_get_arr_n(g, id)) +
+                             " -- quantity VARIES BY LAYER, not a single value)");
+    return true;
+}
 static long kv_long(gguf_context * g, const std::string & k, long dflt) {
     const int64_t id = gguf_find_key(g, k.c_str());
     if (id < 0) { return dflt; }
+    if (gguf_get_kv_type(g, id) != GGUF_TYPE_UINT32) { return dflt; }
     return (long) gguf_get_val_u32(g, id);
 }
 
@@ -245,8 +273,7 @@ static void emit_ssm_block(gguf_context * g, const std::string & P,
      * of nothing. It was caught by a structural NEGATIVE assertion rather than
      * by a positive one, which is the strongest argument for having them: a
      * test asserting "SSM exists" would have passed here forever. */
-    if (!dims.count("ssm_a") && !dims.count("ssm_in.weight") &&
-        !dims.count("ssm_conv1d.weight")) {
+    if (!AT("ssm_a", L) && !AT("ssm_in.weight", L) && !AT("ssm_conv1d.weight", L)) {
         printf("  SelectiveScan      layer=%-3d  (none)\n", L);
         printf("      status          : ABSENT -- no ssm_a, ssm_in or ssm_conv1d tensor exists, so\n");
         printf("                       there is no recurrence to describe\n");
@@ -323,7 +350,18 @@ int main(int argc, char ** argv) {
     for (unsigned i = 0; i < sizeof ints / sizeof *ints; ++i) {
         const std::string k = P + ints[i].suffix;
         const int64_t id = gguf_find_key(g, k.c_str());
-        if (id >= 0) { *ints[i].out = (long) gguf_get_val_u32(g, id); }
+        if (id >= 0) {
+            if (gguf_get_kv_type(g, id) == GGUF_TYPE_UINT32) {
+                *ints[i].out = (long) gguf_get_val_u32(g, id);
+            } else if (gguf_get_kv_type(g, id) == GGUF_TYPE_ARRAY) {
+                /* Heterogeneity declared in the metadata itself. Not a defect in
+                 * the artefact and not something to average: it is per-layer. */
+                kv_arrays_seen.push_back(k + " (array of " +
+                    std::to_string((long) gguf_get_arr_n(g, id)) +
+                    " -- quantity VARIES BY LAYER; the scalar field is left unset"
+                    " rather than guessed from element 0)");
+            }
+        }
     }
     { const std::string k = P + "attention.layer_norm_rms_epsilon";
       const int64_t id = gguf_find_key(g, k.c_str());
@@ -665,8 +703,92 @@ int main(int argc, char ** argv) {
      * per layer, so every layer gets its own Attention node. Presentation may
      * deduplicate identical shapes later; the semantic IR must not, or the
      * alternation becomes unrepresentable. */
-    printf("\n-- LAYER 0 (representative body) --\n");
-    const int L = 0;
+    /* ---- LAYER TOPOLOGY: the layer graph, measured, not assumed ----
+     *
+     * dims[] is keyed by ROLE ONLY, so by this point the mapping from tensor to
+     * layer index has already been discarded. That is precisely the uniform
+     * layer assumption, and it is wrong for any model whose layers differ. It is
+     * also actively dangerous here: on a heterogeneous model, emitting only
+     * layer 0 describes the WHOLE model by one layer's body and hides every
+     * other body present. Layer locality must be recovered from the tensor
+     * names, so it is. */
+    printf("\n-- LAYER TOPOLOGY (measured from tensor names) --\n");
+    std::map<int, std::string> layer_body;
+    std::map<std::string, std::vector<int> > body_layers;
+    int n_layers = 0;
+    for (int64_t ti = 0; ti < gguf_get_n_tensors(g); ++ti) {
+        const std::string tn_ = gguf_get_tensor_name(g, ti);
+        const size_t d1 = tn_.find('.');
+        if (d1 == std::string::npos || tn_.substr(0, d1) != "blk") continue;
+        const size_t d2 = tn_.find('.', d1 + 1);
+        if (d2 == std::string::npos) continue;
+        const std::string idx = tn_.substr(d1 + 1, d2 - d1 - 1);
+        if (idx.empty() || idx.size() > 6) continue;
+        bool digits = true;
+        for (char c : idx) if (c < '0' || c > '9') { digits = false; break; }
+        if (!digits) continue;
+        const int l = atoi(idx.c_str());
+        if (l + 1 > n_layers) n_layers = l + 1;
+
+        std::string sig;
+        if (tn_.find("attn_q.") != std::string::npos || tn_.find("attn_k.") != std::string::npos ||
+            tn_.find("attn_v.") != std::string::npos || tn_.find("attn_output.") != std::string::npos) sig += "ATTN+";
+        if (tn_.find("ssm_a") != std::string::npos || tn_.find("ssm_conv1d") != std::string::npos ||
+            tn_.find("ssm_in.") != std::string::npos || tn_.find("ssm_out.") != std::string::npos) sig += "SSM+";
+        if (tn_.find("ffn_up") != std::string::npos || tn_.find("ffn_down") != std::string::npos ||
+            tn_.find("ffn_gate.") != std::string::npos) sig += "FFN+";
+        if (tn_.find("experts") != std::string::npos || tn_.find("ffn_gate_inp") != std::string::npos) sig += "MOE+";
+        if (!sig.empty() && layer_body[l].empty()) layer_body[l] = sig;
+    }
+    printf("  layer count = %d   distinct bodies = ", n_layers);
+    for (int l = 0; l < n_layers; ++l)
+        if (!layer_body[l].empty()) body_layers[layer_body[l]].push_back(l);
+    printf("%zu\n", body_layers.size());
+    for (std::map<std::string, std::vector<int> >::iterator it = body_layers.begin();
+         it != body_layers.end(); ++it) {
+        printf("  %-26s layers %2zu  indices:", it->first.c_str(), it->second.size());
+        for (size_t i = 0; i < it->second.size() && i < 60; ++i) printf(" %d", it->second[i]);
+        if (it->second.size() > 60) printf(" ...");
+        putchar('\n');
+    }
+    /* LAYER-LOCAL PRESENCE. dims[] is keyed by ROLE ONLY, so dims.count(r) asks
+     * "does this role exist somewhere in the model", which is a MODEL-GLOBAL
+     * question being used where a LAYER-LOCAL one is required. On a model whose
+     * layers differ, that fabricates: SelectiveScan appeared on an attention-only
+     * layer because some OTHER layer had ssm_a. Every emitter below must ask
+     * whether the tensor exists AT THIS LAYER, and only that. */
+    for (int64_t ti = 0; ti < gguf_get_n_tensors(g); ++ti) {
+        const std::string tn_ = gguf_get_tensor_name(g, ti);
+        const size_t d1 = tn_.find('.');
+        if (d1 == std::string::npos || tn_.substr(0, d1) != "blk") continue;
+        const size_t d2 = tn_.find('.', d1 + 1);
+        if (d2 == std::string::npos) continue;
+        const std::string idx = tn_.substr(d1 + 1, d2 - d1 - 1);
+        bool dg = !idx.empty();
+        for (char c : idx) if (c < '0' || c > '9') dg = false;
+        if (!dg) continue;
+        g_at_layer.insert("blk." + idx + "." + tn_.substr(d2 + 1));
+    }
+
+    printf("  %s\n", body_layers.size() <= 1
+        ? "  verdict: UNIFORM -- every layer shares one body."
+        : "  verdict: HETEROGENEOUS -- the layer graph CHANGES across depth.");
+    printf("  an op present in SOME layers must NOT be emitted for every layer.\n");
+
+    /* Emit the FIRST layer of each distinct body, so heterogeneity is visible in
+     * the IR itself rather than asserted beside it. Layer 0 alone is not
+     * representative of a heterogeneous model and must not stand in for one. */
+    std::vector<int> reps;
+    for (std::map<std::string, std::vector<int> >::iterator it = body_layers.begin();
+         it != body_layers.end() && !it->second.empty(); ++it) reps.push_back(it->second[0]);
+    if (reps.empty()) reps.push_back(0);
+    if (n_layers > 0 && body_layers.size() <= 1) reps.clear(), reps.push_back(0);
+
+    for (size_t ri = 0; ri < reps.size(); ++ri) {
+    printf("\n-- LAYER %d (body %s, first of %zu distinct) --\n",
+           reps[ri], body_layers.empty() ? "?" :
+           (body_layers.count(layer_body[reps[ri]]) ? layer_body[reps[ri]].c_str() : "?"), body_layers.size());
+    const int L = reps[ri];
     char buf[128];
     #define TN(role_) (snprintf(buf, sizeof buf, "blk.%d.%s", L, role_), std::string(buf))
 
@@ -808,8 +930,19 @@ int main(int argc, char ** argv) {
      * INTO the flash-attention node where an op histogram cannot see it. Claiming
      * the function for the attention site from the unfused one would be an
      * assumption dressed as a measurement. */
-    { const char * kA = (P + "attn_logit_softcapping").c_str();
-      const char * kF = (P + "final_logit_softcapping").c_str();
+    /* DANGLING POINTER FIXED HERE. These were
+     *   const char * kA = (P + "attn_logit_softcapping").c_str();
+     * which binds a pointer into a TEMPORARY std::string that dies at the end of
+     * the declaration. kA and kF then dangle, and reading them printed garbage
+     * into the evidence line -- nondeterministic output that happened to be
+     * byte-identical across runs often enough to pass. It was caught by the H24
+     * byte-exact restore test, which compared two runs of the same binary and
+     * found one differing line of uninitialised memory. Bind the strings to
+     * named locals; the pointers are then valid for the enclosing block. */
+    { const std::string keyA = P + "attn_logit_softcapping";
+      const std::string keyF = P + "final_logit_softcapping";
+      const char * kA = keyA.c_str();
+      const char * kF = keyF.c_str();
       const int64_t idA = gguf_find_key(g, kA);
       const int64_t idF = gguf_find_key(g, kF);
       if (idA < 0 && idF < 0) {
@@ -876,13 +1009,18 @@ int main(int argc, char ** argv) {
      * alternates sliding-window and full attention, so the pattern lives on each
      * Attention node. Presentation may deduplicate identical layers later; the
      * semantic IR must not, or the alternation becomes unrepresentable. */
-    if (!dims.count("attn_q.weight") && !dims.count("attn_k.weight") &&
-        !dims.count("ffn_gate_exps.weight")) {
+    /* LAYER-LOCAL, for the same reason as SelectiveScan and GatedMLP: dims is
+     * keyed by role, so a model-global presence test would emit Attention on
+     * every one of Nemotron-H's 48 non-attention layers. */
+    if (!AT("attn_q.weight", L) && !AT("attn_k.weight", L) &&
+        !AT("ffn_gate_exps.weight", L)) {
         printf("  Attention          layer=%-3d  (none)\n", L);
         printf("      status          : ABSENT -- head_count is %ld and there is no Q, K or V\n", heads);
         printf("                       projection and no KV cache to attend over\n");
-        printf("      evidence        : MEASURED -- an Attention node without projections would be\n");
-        printf("                       structure invented from an architecture name.\n");
+        printf("      evidence        : MEASURED -- no Q, K or V projection exists AT THIS LAYER.\n");
+        printf("                       head_count=%ld is model-global metadata and does NOT license an\n");
+        printf("                       Attention node here: an op present in SOME layers must not be\n");
+        printf("                       emitted for every layer.\n");
     } else {
     ir_node n = mk(IR_ATTENTION, L);
       n.head_dim = key_len; n.n_heads = heads; n.n_kv_heads = kv_heads;
@@ -1150,11 +1288,13 @@ int main(int argc, char ** argv) {
               "no always-on dense FFN alongside the experts");
           n.scope = "gated, per expert, on the router-selected subset";
           emit(n, arch); }
-    } else if (!dims.count("ffn_gate.weight") && !dims.count("ffn_down.weight")) {
+    } else if (!AT("ffn_gate.weight", L) && !AT("ffn_down.weight", L) && !AT("ffn_up.weight", L)) {
         printf("  GatedMLP           layer=%-3d  (none)\n", L);
         printf("      status          : ABSENT -- feed_forward_length is %ld and no FFN tensor exists\n", ff);
-        printf("      evidence        : MEASURED -- this architecture has no position-wise feed-forward\n");
-        printf("                       block at all, so no gated MLP is emitted\n");
+        printf("      evidence        : MEASURED -- NO FFN TENSOR EXISTS AT THIS LAYER, so no gated MLP is\n");
+        printf("                       emitted. Presence elsewhere in the model does not license it\n");
+        printf("                       here: an op present in SOME layers must not be emitted for every\n");
+        printf("                       layer, and that rule is enforced layer-locally.\n");
     } else {
         ir_node n = mk(IR_MLP, L);
         n.tensor = "ffn_gate.weight + ffn_up.weight + ffn_down.weight";
@@ -1196,6 +1336,16 @@ int main(int argc, char ** argv) {
               printf("  MIXED PATTERN CONFIRMED: a uniform layer body would be WRONG here.\n");
           }
       } }
+
+    } /* end per-distinct-body emission */
+
+    if (!kv_arrays_seen.empty()) {
+        printf("\n-- METADATA THAT VARIES BY LAYER (arrays, not scalars) --\n");
+        for (size_t i = 0; i < kv_arrays_seen.size(); ++i)
+            printf("  %s\n", kv_arrays_seen[i].c_str());
+        printf("  These are HETEROGENEITY IN THE METADATA. Reading one as a scalar\n");
+        printf("  aborts ggml; averaging it would invent a single layer body.\n");
+    }
 
     printf("\n-- PER-LAYER ROLE COVERAGE (all layers identical?) --\n");
     bool uniform = true;

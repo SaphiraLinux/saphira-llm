@@ -1,0 +1,462 @@
+compiling (quiet)
+running fresh binary
+=== DISCOVERY IR for /var/lib/spoon/models/nemotron-h-8b/nemotron-h-8b-q2_k.gguf ===
+architecture (from general.architecture) = nemotron_h
+block_count=52 embedding_length=4096 ffn_length=-1 heads=32 kv_heads=-1
+key_length=128 value_length=128 rope_dimension_count=128
+rms_eps=9.99999975e-06 rope_base=-1
+  TokenizerSelector (model)  tokenizer.ggml.{model,pre,tokens}
+      evidence        : MEASURED
+        - leg model   = "gpt2"
+        - leg pre     = "tekken"
+        - leg tokens  = 131072
+        - nemotron_h.vocab_size = 131072   [ARTEFACT MEASURED, the declared route]
+        - tokenizer_token_count = 131072   [ARTEFACT MEASURED]
+        - embedding_row_count   = 131072   [ARTEFACT MEASURED]: the physical capacity ids index
+        - output_projection_rows= 131072   [ARTEFACT MEASURED] (untied: a distinct output.weight exists)
+        - RELATION: declared vocab_size == tokenizer_token_count, EXACT MATCH, no padding  [MEASURED outcome]
+      NOTE            : model alone is NOT a sufficient selector; Qwen3 declares
+                        model=gpt2 while requiring pre=qwen2.
+      VOCAB DIMENSIONS ARE DISTINCT QUANTITIES, not one scalar: token count is
+                        how many tokens the tokenizer lists, embedding rows are the
+                        physical capacity ids index, and output rows are the head
+                        capacity. Equality between them is a MEASURED OUTCOME, not an
+                        invariant of this vocabulary, and a padded vocabulary is a
+                        DESIGN rather than a defect.
+      EXTERNAL UPSTREAM INFORMATION MAY NOT UPGRADE AN ABSENT FIELD TO MEASURED.
+                        A web search reports Gemma-2 rope_theta 10000 and OLMoE built
+                        with vocab_size = tokenizer.padded_vocab_size(); both may be
+                        true of those upstream configs, and neither is a reading of
+                        THESE files.
+
+-- MODEL SCOPE --
+  Embedding          (model)     token_embd.weight
+      type            : q2_K
+      in/out features : 4096 / 131072
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor token_embd.weight present, ne=[4096,131072]
+        - tokenizer.ggml.tokens n=131072
+  OutputProjection   (model)     output.weight
+      type            : q6_K
+      in/out features : 4096 / 131072
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor output.weight present, ne=[4096,131072]
+        - a DISTINCT output tensor exists => weights are NOT shared with the embedding, whatever the dimensions happen to be
+        - nemotron_h.embedding_length=4096 vs output in_features=4096 (dimensions match, weights still separate)
+
+-- LAYER TOPOLOGY (measured from tensor names) --
+  layer count = 52   distinct bodies = 3
+  ATTN+                      layers  4  indices: 7 18 29 40
+  FFN+                       layers 24  indices: 1 3 5 8 10 12 14 16 19 21 23 25 27 30 32 34 36 38 41 43 45 47 49 51
+  SSM+                       layers 24  indices: 0 2 4 6 9 11 13 15 17 20 22 24 26 28 31 33 35 37 39 42 44 46 48 50
+    verdict: HETEROGENEOUS -- the layer graph CHANGES across depth.
+  an op present in SOME layers must NOT be emitted for every layer.
+
+-- LAYER 7 (body ATTN+, first of 3 distinct) --
+  RMSNorm            layer=7    blk.7.attn_norm.weight
+      type            : f32
+      norm width      : 4096   bias=false
+      epsilon         : 9.99999975e-06
+      evidence        : MEASURED (read from artefact/reference graph)
+        - nemotron_h.attention.layer_norm_rms_epsilon=0.000010
+        - ne=[4096,1] i.e. width == embedding_length => reduces the residual
+        - blk.7.attn_norm.bias ABSENT => bias=false
+        - qwen3/Llama graph applies it to the residual before the QKV projection
+  RMSNorm            layer=7    blk.7.ffn_norm.weight
+      norm width      : 0   bias=false
+      epsilon         : 9.99999975e-06
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor name as written: "ffn_norm.weight" -- norms appear with and without the .weight suffix across models, which is a naming variant and not a different construct
+        - ne=[4096,1] => width == embedding_length
+        - applied to the post-attention residual before the FFN
+  RMSNorm            layer=7    blk.7.attn_q_norm.weight
+      status          : ABSENT for this architecture
+      evidence        : MEASURED -- tensor not present in the inventory,
+                       and not present in ANY layer (0 of 52)
+      NOTE            : ABSENT is not UNKNOWN. Absent means looked-and-
+                       not-there; UNKNOWN means could-not-determine.
+  RMSNorm            layer=7    blk.7.attn_k_norm.weight
+      status          : ABSENT for this architecture
+      evidence        : MEASURED -- tensor not present in the inventory,
+                       and not present in ANY layer (0 of 52)
+      NOTE            : ABSENT is not UNKNOWN. Absent means looked-and-
+                       not-there; UNKNOWN means could-not-determine.
+  SoftCap            layer=7    (none)
+      status          : ABSENT (no softcapping keys in metadata)
+      evidence        : MEASURED -- both keys absent from 48 kv pairs
+  Attention          layer=7    
+      head_dim=128  heads=32  kv_heads=-1
+      pattern         : full
+      evidence        : INFERRED (rule-based)
+        - no nemotron_h.attention.sliding_window key => pattern=full   [INFERRED: absence of a sliding-window key, which is weaker than a positive statement of full attention]
+        - q_heads=32 kv_heads=-1 head_dim=128  [MEASURED from metadata]
+        - pattern lives on the Attention NODE, not on a layer type: a layer is an ordered container of operations and may differ from its neighbours
+  Linear             layer=7    blk.7.attn_q.weight
+      type            : q2_K
+      in/out features : 4096 / 4096
+      head_dim=128  heads=32  kv_heads=-1
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor blk.7.attn_q.weight ne=[4096,4096]
+        - out_features 4096 = 32x128 (Q) or -1x128 (K/V) => GQA or MHA, measured
+        - blk.7.attn_q.weight.bias ABSENT => bias=false
+  Linear             layer=7    blk.7.attn_k.weight
+      type            : q2_K
+      in/out features : 4096 / 1024
+      head_dim=128  heads=32  kv_heads=-1
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor blk.7.attn_k.weight ne=[4096,1024]
+        - out_features 1024 = 32x128 (Q) or -1x128 (K/V) => GQA or MHA, measured
+        - blk.7.attn_k.weight.bias ABSENT => bias=false
+  Linear             layer=7    blk.7.attn_v.weight
+      type            : q3_K
+      in/out features : 4096 / 1024
+      head_dim=128  heads=32  kv_heads=-1
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor blk.7.attn_v.weight ne=[4096,1024]
+        - out_features 1024 = 32x128 (Q) or -1x128 (K/V) => GQA or MHA, measured
+        - blk.7.attn_v.weight.bias ABSENT => bias=false
+  Linear             layer=7    blk.7.attn_output.weight
+      type            : q3_K
+      in/out features : 4096 / 4096
+      head_dim=128  heads=32  kv_heads=-1
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor blk.7.attn_output.weight ne=[4096,4096]
+        - out_features 4096 = 32x128 (Q) or -1x128 (K/V) => GQA or MHA, measured
+        - blk.7.attn_output.weight.bias ABSENT => bias=false
+  RoPE               layer=7    (computed)
+      head_dim=128  heads=32  kv_heads=-1
+      pairing         : NEOX   [MEASURED from reference graph]
+      base            : -1
+      dim_count       : 128
+      scaling         : none
+      position_source : position index (pos), from inp_pos
+      evidence        : MEASURED (read from artefact/reference graph)
+        - rope applied to Q and K only, not V (graph)
+        - nemotron_h.rope.freq_base=-1.000000
+        - nemotron_h.rope.dimension_count=128
+        - nemotron_h.rope.scaling.type=none
+        - pairing=NEOX MEASURED from the reference graph: the ROPE node located by ggml op, its immediate producer snapshotted, both pairing hypotheses tested numerically
+        - not derived from general.architecture; the two models differ here despite both being decoder-only transformers
+      UNRESOLVED      : rope_base UNRESOLVED from the ARTEFACT: no nemotron_h.rope.freq_base key AND no precomputed rope_freqs table in this file. NOT assumed to be 10000, and NOT taken from the upstream paper or the HuggingFace config, which report 10000 but describe a different artefact. Supply SLLM_IR_ROPE_BASE_DEFAULT only to record the REFERENCE default as reference evidence, which is a different provenance class.
+  GatedMLP           layer=7    (none)
+      status          : ABSENT -- feed_forward_length is -1 and no FFN tensor exists
+      evidence        : MEASURED -- NO FFN TENSOR EXISTS AT THIS LAYER, so no gated MLP is
+                       emitted. Presence elsewhere in the model does not license it
+                       here: an op present in SOME layers must not be emitted for every
+                       layer, and that rule is enforced layer-locally.
+  DepthwiseConv1D    layer=7    blk.7.ssm_conv1d.weight
+      type            : f32
+      in/out features : 4 / 10240
+      evidence        : MEASURED (read from artefact/reference graph)
+        - nemotron_h.ssm.conv_kernel = 4   [ARTEFACT MEASURED]
+        - ssm_conv1d.weight ne[0]=4, which agrees with conv_kernel: the weights ARE the kernel taps
+        - ne[1]=10240 channels with a matching ssm_conv1d.bias, one bias per channel: that is what makes it DEPTHWISE rather than a dense convolution
+        - convolved over SEQUENCE, not over an attention axis
+  RMSNorm            layer=7    blk.7.ssm_norm.weight
+      type            : f32
+      norm width      : 1024   bias=false
+      epsilon         : -1
+      evidence        : MEASURED (read from artefact/reference graph)
+        - ssm_norm.weight ne=[1024,1]   [ARTEFACT MEASURED]
+        - SAME RMSNorm op as the residual norms; scope is the parameter that distinguishes it, not a different mathematics
+  SelectiveScan      layer=7    (none)
+      status          : ABSENT -- no ssm_a, ssm_in or ssm_conv1d tensor exists, so
+                       there is no recurrence to describe
+      evidence        : MEASURED -- emitting it would invent a state-space model from an
+                       architecture name.
+
+-- LAYER 1 (body FFN+, first of 3 distinct) --
+  RMSNorm            layer=1    blk.1.attn_norm.weight
+      type            : f32
+      norm width      : 4096   bias=false
+      epsilon         : 9.99999975e-06
+      evidence        : MEASURED (read from artefact/reference graph)
+        - nemotron_h.attention.layer_norm_rms_epsilon=0.000010
+        - ne=[4096,1] i.e. width == embedding_length => reduces the residual
+        - blk.1.attn_norm.bias ABSENT => bias=false
+        - qwen3/Llama graph applies it to the residual before the QKV projection
+  RMSNorm            layer=1    blk.1.ffn_norm.weight
+      norm width      : 0   bias=false
+      epsilon         : 9.99999975e-06
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor name as written: "ffn_norm.weight" -- norms appear with and without the .weight suffix across models, which is a naming variant and not a different construct
+        - ne=[4096,1] => width == embedding_length
+        - applied to the post-attention residual before the FFN
+  RMSNorm            layer=1    blk.1.attn_q_norm.weight
+      status          : ABSENT for this architecture
+      evidence        : MEASURED -- tensor not present in the inventory,
+                       and not present in ANY layer (0 of 52)
+      NOTE            : ABSENT is not UNKNOWN. Absent means looked-and-
+                       not-there; UNKNOWN means could-not-determine.
+  RMSNorm            layer=1    blk.1.attn_k_norm.weight
+      status          : ABSENT for this architecture
+      evidence        : MEASURED -- tensor not present in the inventory,
+                       and not present in ANY layer (0 of 52)
+      NOTE            : ABSENT is not UNKNOWN. Absent means looked-and-
+                       not-there; UNKNOWN means could-not-determine.
+  SoftCap            layer=1    (none)
+      status          : ABSENT (no softcapping keys in metadata)
+      evidence        : MEASURED -- both keys absent from 48 kv pairs
+  Attention          layer=1    (none)
+      status          : ABSENT -- head_count is 32 and there is no Q, K or V
+                       projection and no KV cache to attend over
+      evidence        : MEASURED -- no Q, K or V projection exists AT THIS LAYER.
+                       head_count=4334689 is model-global metadata and does NOT license an
+                       Attention node here: an op present in SOME layers must not be
+                       emitted for every layer.
+  Linear             layer=1    blk.1.attn_q.weight
+      type            : q2_K
+      in/out features : 4096 / 4096
+      head_dim=128  heads=32  kv_heads=-1
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor blk.1.attn_q.weight ne=[4096,4096]
+        - out_features 4096 = 32x128 (Q) or -1x128 (K/V) => GQA or MHA, measured
+        - blk.1.attn_q.weight.bias ABSENT => bias=false
+  Linear             layer=1    blk.1.attn_k.weight
+      type            : q2_K
+      in/out features : 4096 / 1024
+      head_dim=128  heads=32  kv_heads=-1
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor blk.1.attn_k.weight ne=[4096,1024]
+        - out_features 1024 = 32x128 (Q) or -1x128 (K/V) => GQA or MHA, measured
+        - blk.1.attn_k.weight.bias ABSENT => bias=false
+  Linear             layer=1    blk.1.attn_v.weight
+      type            : q3_K
+      in/out features : 4096 / 1024
+      head_dim=128  heads=32  kv_heads=-1
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor blk.1.attn_v.weight ne=[4096,1024]
+        - out_features 1024 = 32x128 (Q) or -1x128 (K/V) => GQA or MHA, measured
+        - blk.1.attn_v.weight.bias ABSENT => bias=false
+  Linear             layer=1    blk.1.attn_output.weight
+      type            : q3_K
+      in/out features : 4096 / 4096
+      head_dim=128  heads=32  kv_heads=-1
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor blk.1.attn_output.weight ne=[4096,4096]
+        - out_features 4096 = 32x128 (Q) or -1x128 (K/V) => GQA or MHA, measured
+        - blk.1.attn_output.weight.bias ABSENT => bias=false
+  RoPE               layer=1    (computed)
+      head_dim=128  heads=32  kv_heads=-1
+      pairing         : NEOX   [MEASURED from reference graph]
+      base            : -1
+      dim_count       : 128
+      scaling         : none
+      position_source : position index (pos), from inp_pos
+      evidence        : MEASURED (read from artefact/reference graph)
+        - rope applied to Q and K only, not V (graph)
+        - nemotron_h.rope.freq_base=-1.000000
+        - nemotron_h.rope.dimension_count=128
+        - nemotron_h.rope.scaling.type=none
+        - pairing=NEOX MEASURED from the reference graph: the ROPE node located by ggml op, its immediate producer snapshotted, both pairing hypotheses tested numerically
+        - not derived from general.architecture; the two models differ here despite both being decoder-only transformers
+      UNRESOLVED      : rope_base UNRESOLVED from the ARTEFACT: no nemotron_h.rope.freq_base key AND no precomputed rope_freqs table in this file. NOT assumed to be 10000, and NOT taken from the upstream paper or the HuggingFace config, which report 10000 but describe a different artefact. Supply SLLM_IR_ROPE_BASE_DEFAULT only to record the REFERENCE default as reference evidence, which is a different provenance class.
+  GatedMLP           layer=1    ffn_gate.weight + ffn_up.weight + ffn_down.weight
+      in/out features : 0 / 0
+      scope           : gated (SwiGLU-family): gate and up share out_features, down returns to in_features
+      evidence        : MEASURED (read from artefact/reference graph)
+        - ffn_gate ne=[0,0]
+        - ffn_up   ne=[4096,21504]  same shape as gate => parallel projections
+        - ffn_down ne=[21504,4096]  transpose of the gate shape => contraction
+        - nemotron_h.feed_forward_length=-1
+        - ffn_gate_inp.weight ABSENT => not MoE, and not inferred from the architecture name
+  DepthwiseConv1D    layer=1    blk.1.ssm_conv1d.weight
+      type            : f32
+      in/out features : 4 / 10240
+      evidence        : MEASURED (read from artefact/reference graph)
+        - nemotron_h.ssm.conv_kernel = 4   [ARTEFACT MEASURED]
+        - ssm_conv1d.weight ne[0]=4, which agrees with conv_kernel: the weights ARE the kernel taps
+        - ne[1]=10240 channels with a matching ssm_conv1d.bias, one bias per channel: that is what makes it DEPTHWISE rather than a dense convolution
+        - convolved over SEQUENCE, not over an attention axis
+  RMSNorm            layer=1    blk.1.ssm_norm.weight
+      type            : f32
+      norm width      : 1024   bias=false
+      epsilon         : -1
+      evidence        : MEASURED (read from artefact/reference graph)
+        - ssm_norm.weight ne=[1024,1]   [ARTEFACT MEASURED]
+        - SAME RMSNorm op as the residual norms; scope is the parameter that distinguishes it, not a different mathematics
+  SelectiveScan      layer=1    (none)
+      status          : ABSENT -- no ssm_a, ssm_in or ssm_conv1d tensor exists, so
+                       there is no recurrence to describe
+      evidence        : MEASURED -- emitting it would invent a state-space model from an
+                       architecture name.
+
+-- LAYER 0 (body SSM+, first of 3 distinct) --
+  RMSNorm            layer=0    blk.0.attn_norm.weight
+      type            : f32
+      norm width      : 4096   bias=false
+      epsilon         : 9.99999975e-06
+      evidence        : MEASURED (read from artefact/reference graph)
+        - nemotron_h.attention.layer_norm_rms_epsilon=0.000010
+        - ne=[4096,1] i.e. width == embedding_length => reduces the residual
+        - blk.0.attn_norm.bias ABSENT => bias=false
+        - qwen3/Llama graph applies it to the residual before the QKV projection
+  RMSNorm            layer=0    blk.0.ffn_norm.weight
+      norm width      : 0   bias=false
+      epsilon         : 9.99999975e-06
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor name as written: "ffn_norm.weight" -- norms appear with and without the .weight suffix across models, which is a naming variant and not a different construct
+        - ne=[4096,1] => width == embedding_length
+        - applied to the post-attention residual before the FFN
+  RMSNorm            layer=0    blk.0.attn_q_norm.weight
+      status          : ABSENT for this architecture
+      evidence        : MEASURED -- tensor not present in the inventory,
+                       and not present in ANY layer (0 of 52)
+      NOTE            : ABSENT is not UNKNOWN. Absent means looked-and-
+                       not-there; UNKNOWN means could-not-determine.
+  RMSNorm            layer=0    blk.0.attn_k_norm.weight
+      status          : ABSENT for this architecture
+      evidence        : MEASURED -- tensor not present in the inventory,
+                       and not present in ANY layer (0 of 52)
+      NOTE            : ABSENT is not UNKNOWN. Absent means looked-and-
+                       not-there; UNKNOWN means could-not-determine.
+  SoftCap            layer=0    (none)
+      status          : ABSENT (no softcapping keys in metadata)
+      evidence        : MEASURED -- both keys absent from 48 kv pairs
+  Attention          layer=0    (none)
+      status          : ABSENT -- head_count is 32 and there is no Q, K or V
+                       projection and no KV cache to attend over
+      evidence        : MEASURED -- no Q, K or V projection exists AT THIS LAYER.
+                       head_count=4334689 is model-global metadata and does NOT license an
+                       Attention node here: an op present in SOME layers must not be
+                       emitted for every layer.
+  Linear             layer=0    blk.0.attn_q.weight
+      type            : q2_K
+      in/out features : 4096 / 4096
+      head_dim=128  heads=32  kv_heads=-1
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor blk.0.attn_q.weight ne=[4096,4096]
+        - out_features 4096 = 32x128 (Q) or -1x128 (K/V) => GQA or MHA, measured
+        - blk.0.attn_q.weight.bias ABSENT => bias=false
+  Linear             layer=0    blk.0.attn_k.weight
+      type            : q2_K
+      in/out features : 4096 / 1024
+      head_dim=128  heads=32  kv_heads=-1
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor blk.0.attn_k.weight ne=[4096,1024]
+        - out_features 1024 = 32x128 (Q) or -1x128 (K/V) => GQA or MHA, measured
+        - blk.0.attn_k.weight.bias ABSENT => bias=false
+  Linear             layer=0    blk.0.attn_v.weight
+      type            : q3_K
+      in/out features : 4096 / 1024
+      head_dim=128  heads=32  kv_heads=-1
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor blk.0.attn_v.weight ne=[4096,1024]
+        - out_features 1024 = 32x128 (Q) or -1x128 (K/V) => GQA or MHA, measured
+        - blk.0.attn_v.weight.bias ABSENT => bias=false
+  Linear             layer=0    blk.0.attn_output.weight
+      type            : q3_K
+      in/out features : 4096 / 4096
+      head_dim=128  heads=32  kv_heads=-1
+      evidence        : MEASURED (read from artefact/reference graph)
+        - tensor blk.0.attn_output.weight ne=[4096,4096]
+        - out_features 4096 = 32x128 (Q) or -1x128 (K/V) => GQA or MHA, measured
+        - blk.0.attn_output.weight.bias ABSENT => bias=false
+  RoPE               layer=0    (computed)
+      head_dim=128  heads=32  kv_heads=-1
+      pairing         : NEOX   [MEASURED from reference graph]
+      base            : -1
+      dim_count       : 128
+      scaling         : none
+      position_source : position index (pos), from inp_pos
+      evidence        : MEASURED (read from artefact/reference graph)
+        - rope applied to Q and K only, not V (graph)
+        - nemotron_h.rope.freq_base=-1.000000
+        - nemotron_h.rope.dimension_count=128
+        - nemotron_h.rope.scaling.type=none
+        - pairing=NEOX MEASURED from the reference graph: the ROPE node located by ggml op, its immediate producer snapshotted, both pairing hypotheses tested numerically
+        - not derived from general.architecture; the two models differ here despite both being decoder-only transformers
+      UNRESOLVED      : rope_base UNRESOLVED from the ARTEFACT: no nemotron_h.rope.freq_base key AND no precomputed rope_freqs table in this file. NOT assumed to be 10000, and NOT taken from the upstream paper or the HuggingFace config, which report 10000 but describe a different artefact. Supply SLLM_IR_ROPE_BASE_DEFAULT only to record the REFERENCE default as reference evidence, which is a different provenance class.
+  GatedMLP           layer=0    (none)
+      status          : ABSENT -- feed_forward_length is -1 and no FFN tensor exists
+      evidence        : MEASURED -- NO FFN TENSOR EXISTS AT THIS LAYER, so no gated MLP is
+                       emitted. Presence elsewhere in the model does not license it
+                       here: an op present in SOME layers must not be emitted for every
+                       layer, and that rule is enforced layer-locally.
+  DepthwiseConv1D    layer=0    blk.0.ssm_conv1d.weight
+      type            : f32
+      in/out features : 4 / 10240
+      evidence        : MEASURED (read from artefact/reference graph)
+        - nemotron_h.ssm.conv_kernel = 4   [ARTEFACT MEASURED]
+        - ssm_conv1d.weight ne[0]=4, which agrees with conv_kernel: the weights ARE the kernel taps
+        - ne[1]=10240 channels with a matching ssm_conv1d.bias, one bias per channel: that is what makes it DEPTHWISE rather than a dense convolution
+        - convolved over SEQUENCE, not over an attention axis
+  RMSNorm            layer=0    blk.0.ssm_norm.weight
+      type            : f32
+      norm width      : 1024   bias=false
+      epsilon         : -1
+      evidence        : MEASURED (read from artefact/reference graph)
+        - ssm_norm.weight ne=[1024,1]   [ARTEFACT MEASURED]
+        - SAME RMSNorm op as the residual norms; scope is the parameter that distinguishes it, not a different mathematics
+  SelectiveScan      layer=0    ssm_in -> ssm_out with ssm_a, ssm_d and an input-derived step size
+      evidence        : MEASURED (read from artefact/reference graph)
+        - nemotron_h.ssm.state_size = 128   [ARTEFACT MEASURED]: the recurrent state width
+        - nemotron_h.ssm.inner_size = 8192   [ARTEFACT MEASURED]
+        - nemotron_h.ssm.time_step_rank = 128   [ARTEFACT MEASURED]: the step size is COMPUTED FROM THE INPUT by projecting the sequence to this rank, which is what makes the block SELECTIVE rather than a fixed-step recurrence
+        - nemotron_h.ssm.group_count = 8   [ARTEFACT MEASURED]
+        - ssm_a ne=[1,128]   [ARTEFACT MEASURED]: per-head state transition, one row per state dimension
+        - ssm_d ne=[1,128]   [ARTEFACT MEASURED]: per-head skip coefficient, so the recurrence carries a direct term as well as the state
+        - ssm_in.weight ne=[4096,18560]: projects the residual into the inner space, mixing the state and step-size paths
+        - ssm_out.weight ne=[8192,4096]: projects back out
+        - NO attention mathematics anywhere in this block: no Q, no K, no softmax over keys, no KV cache. A recurrence over a carried state is DIFFERENT mathematics, so it gets its own composable op rather than being renamed Attention
+
+-- METADATA THAT VARIES BY LAYER (arrays, not scalars) --
+  nemotron_h.feed_forward_length (array of 52 -- quantity VARIES BY LAYER; the scalar field is left unset rather than guessed from element 0)
+  nemotron_h.attention.head_count_kv (array of 52 -- quantity VARIES BY LAYER; the scalar field is left unset rather than guessed from element 0)
+  These are HETEROGENEITY IN THE METADATA. Reading one as a scalar
+  aborts ggml; averaging it would invent a single layer body.
+
+-- PER-LAYER ROLE COVERAGE (all layers identical?) --
+  layers seen=52  distinct roles=15  every layer has the same role set: NO (see below)
+    layer 0 has 9 roles
+    layer 1 has 3 roles
+    layer 2 has 9 roles
+    layer 3 has 3 roles
+    layer 4 has 9 roles
+    layer 5 has 3 roles
+    layer 6 has 9 roles
+    layer 7 has 5 roles
+    layer 8 has 3 roles
+    layer 9 has 9 roles
+    layer 10 has 3 roles
+    layer 11 has 9 roles
+    layer 12 has 3 roles
+    layer 13 has 9 roles
+    layer 14 has 3 roles
+    layer 15 has 9 roles
+    layer 16 has 3 roles
+    layer 17 has 9 roles
+    layer 18 has 5 roles
+    layer 19 has 3 roles
+    layer 20 has 9 roles
+    layer 21 has 3 roles
+    layer 22 has 9 roles
+    layer 23 has 3 roles
+    layer 24 has 9 roles
+    layer 25 has 3 roles
+    layer 26 has 9 roles
+    layer 27 has 3 roles
+    layer 28 has 9 roles
+    layer 29 has 5 roles
+    layer 30 has 3 roles
+    layer 31 has 9 roles
+    layer 32 has 3 roles
+    layer 33 has 9 roles
+    layer 34 has 3 roles
+    layer 35 has 9 roles
+    layer 36 has 3 roles
+    layer 37 has 9 roles
+    layer 38 has 3 roles
+    layer 39 has 9 roles
+    layer 40 has 5 roles
+    layer 41 has 3 roles
+    layer 42 has 9 roles
+    layer 43 has 3 roles
+    layer 44 has 9 roles
+    layer 45 has 3 roles
+    layer 46 has 9 roles
+    layer 47 has 3 roles
+    layer 48 has 9 roles
+    layer 49 has 3 roles
+    layer 50 has 9 roles
+    layer 51 has 3 roles

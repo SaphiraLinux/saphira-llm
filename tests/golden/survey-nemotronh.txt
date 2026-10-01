@@ -1,0 +1,100 @@
+compiling (quiet)
+running fresh binary
+########## NH ##########
+file = /var/lib/spoon/models/nemotron-h-8b/nemotron-h-8b-q2_k.gguf
+kv_pairs = 48   tensors = 311
+
+-- ARCHITECTURE-RELEVANT METADATA (tokenizer.* excluded) --
+  general.architecture                                 = "nemotron_h"
+  general.type                                         = "model"
+  general.name                                         = "Nemotron H 8B Reasoning 128K"
+  general.finetune                                     = "Reasoning-128k"
+  general.basename                                     = "Nemotron-H"
+  general.size_label                                   = "8B"
+  general.license                                      = "other"
+  general.license.name                                 = "nvidia-internal-scientific-research-and-development-model-license"
+  general.license.link                                 = "https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-internal-scientific-research-and-development-model-license/"
+  general.tags                                         = <arr>
+  general.languages                                    = <arr>
+  nemotron_h.block_count                               = 52
+  nemotron_h.context_length                            = 1048576
+  nemotron_h.embedding_length                          = 4096
+  nemotron_h.feed_forward_length                       = <arr>
+  nemotron_h.attention.head_count                      = 32
+  nemotron_h.attention.head_count_kv                   = <arr>
+  nemotron_h.attention.layer_norm_rms_epsilon          = 9.99999975e-06
+  nemotron_h.attention.layer_norm_epsilon              = 9.99999975e-06
+  nemotron_h.vocab_size                                = 131072
+  nemotron_h.rope.dimension_count                      = 128
+  nemotron_h.ssm.conv_kernel                           = 4
+  nemotron_h.ssm.state_size                            = 128
+  nemotron_h.ssm.group_count                           = 8
+  nemotron_h.ssm.inner_size                            = 8192
+  nemotron_h.ssm.time_step_rank                        = 128
+  nemotron_h.rope.scaling.finetuned                    = false
+  nemotron_h.attention.key_length                      = 128
+  nemotron_h.attention.value_length                    = 128
+  general.quantization_version                         = 2
+  general.file_type                                    = 10
+  quantize.imatrix.file                                = "/models_out/Nemotron-H-8B-Reasoning-128K-GGUF/nvidia_Nemotron-H-8B-Reasoning-128K-imatrix.gguf"
+  quantize.imatrix.dataset                             = "/training_dir/calibration_datav5.txt"
+  quantize.imatrix.entries_count                       = 112
+  quantize.imatrix.chunks_count                        = 822
+
+-- TOKENIZER TUPLE (the selector, all three legs) --
+  tokenizer.ggml.model                   = "gpt2"
+  tokenizer.ggml.pre                     = "tekken"
+  tokenizer.ggml.bos_token_id            = 1
+  tokenizer.ggml.eos_token_id            = 11
+  tokenizer.ggml.padding_token_id        = 0
+  tokenizer.ggml.unknown_token_id        = 0
+  tokenizer.ggml.add_bos_token           = true
+  tokenizer.ggml.add_eos_token           = false
+  tokenizer.ggml.add_space_prefix        ABSENT
+  tokenizer.ggml.ignore_merges           ABSENT
+  tokenizer.ggml.tokens n                = 131072
+  tokenizer.ggml.merges                  = present
+
+-- TENSOR TYPE HISTOGRAM --
+  f32          197
+  q2_K         81
+  q3_K         32
+  q6_K         1
+
+-- TENSOR INVENTORY, layer indices resolved --
+  max layer index = 51  => layer count = 52
+  attn_k.weight            layers=4    ne=[4096,1024]
+  attn_norm.weight         layers=52   ne=[4096,1]
+  attn_output.weight       layers=4    ne=[4096,4096]
+  attn_q.weight            layers=4    ne=[4096,4096]
+  attn_v.weight            layers=4    ne=[4096,1024]
+  ffn_down.weight          layers=24   ne=[21504,4096]
+  ffn_up.weight            layers=24   ne=[4096,21504]
+  ssm_a                    layers=24   ne=[1,128]
+  ssm_conv1d.bias          layers=24   ne=[10240,1]
+  ssm_conv1d.weight        layers=24   ne=[4,10240]
+  ssm_d                    layers=24   ne=[1,128]
+  ssm_dt.bias              layers=24   ne=[128,1]
+  ssm_in.weight            layers=24   ne=[4096,18560]
+  ssm_norm.weight          layers=24   ne=[1024,8]
+  ssm_out.weight           layers=24   ne=[8192,4096]
+
+-- NON-LAYER TENSORS --
+  output.weight
+  output_norm.weight
+  token_embd.weight
+
+-- OPTIONAL PER-LAYER TENSORS: PRESENT OR ABSENT --
+  attn_q_norm.weight         ABSENT
+  attn_k_norm.weight         ABSENT
+  attn_q_norm.bias           ABSENT
+  attn_k_norm.bias           ABSENT
+  attn_q.bias                ABSENT
+  attn_k.bias                ABSENT
+  attn_v.bias                ABSENT
+  attn_output.bias           ABSENT
+  ffn_gate_inp.weight        ABSENT
+  ffn_norm.bias              ABSENT
+  attn_norm.bias             ABSENT
+  (a genuine per-layer tensor is verified at layer 0 AND its count
+   matches the layer count above, so it is not a single stray tensor)
