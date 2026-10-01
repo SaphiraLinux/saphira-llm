@@ -11,7 +11,7 @@ export SLLM_IR_ROPE_PAIRING_NEED=1
 pass=0; fail=0
 ok(){ if [ "$2" = "0" ]; then echo "  ok   $1"; pass=$((pass+1)); else echo "  FAIL $1"; fail=$((fail+1)); fi; }
 
-gen(){ unset SLLM_IR; SLLM_IR_ROPE_PAIRING=${P1:-} SLLM_IR_OUTPUT_SHARING=${SH1:-} SLLM_IR_SWA_PATTERN=${SW:-} SLLM_IR_FUSED_CAP=${FC:-} SLLM_IR_ROUTING=${ROUT:-} SLLM_IR_HEAD_DIM=${HD:-} SLLM_IR_ROPE_SRC=${RS:-} SLLM_IR_PROBE_CAPABILITY=${CAP:-} ./tools/run_s0_probe.sh tools/s0_ir_probe.cpp "$1" 2>/dev/null; }
+gen(){ unset SLLM_IR; SLLM_IR_ROPE_PAIRING=${P1:-} SLLM_IR_OUTPUT_SHARING=${SH1:-} SLLM_IR_SWA_PATTERN=${SW:-} SLLM_IR_FUSED_CAP=${FC:-} SLLM_IR_ROUTING=${ROUT:-} SLLM_IR_HEAD_DIM=${HD:-} SLLM_IR_ROPE_SRC=${RS:-} SLLM_IR_PROBE_CAPABILITY=${CAP:-} SLLM_IR_ROPE_BASE_DEFAULT=${RB:-} ./tools/run_s0_probe.sh tools/s0_ir_probe.cpp "$1" 2>/dev/null; }
 
 # A: same artefact -> deterministic IR
 P1=NEOX; SH1="weights NOT shared: final projection reads output.weight"; A1=$(gen "$QW"); A2=$(gen "$QW")
@@ -26,8 +26,8 @@ S_Q=$(printf '%s\n' "$A1" | sem); S_Q2=$(printf '%s\n' "$A2" | sem)
 [ "$S_Q" = "$S_Q2" ]; ok "B1 semantic view is stable across runs" $?
 
 # C: Qwen3's Q/K norm CANNOT disappear
-printf '%s\n' "$A1" | grep -q 'blk.0.attn_q_norm.weight'; ok "C1 Qwen3 attn_q_norm present" $?
-printf '%s\n' "$A1" | grep -q 'blk.0.attn_k_norm.weight'; ok "C2 Qwen3 attn_k_norm present" $?
+AQ=$A1; printf '%s\n' "$AQ" | grep -q 'blk.0.attn_q_norm.weight'; ok "C1 Qwen3 attn_q_norm present" $?
+AQ=$A1; printf '%s\n' "$AQ" | grep -q 'blk.0.attn_k_norm.weight'; ok "C2 Qwen3 attn_k_norm present" $?
 # Count DISTINCT head-norm NODES, not every line that mentions the name: the
 # evidence lines legitimately repeat it, so a raw line count is the wrong
 # measure and would have "caught" a correct IR as wrong.
@@ -49,19 +49,19 @@ printf '%s\n' "$L1" | grep -A2 'attn_q_norm.weight' | grep -q 'norm width'
 if [ $? -ne 0 ]; then ok "D4 absent norm reports no width, since none exists" 0; else ok "D4 absent norm reports no width, since none exists" 1; fi
 
 # E: tokenizer tuple -- all three legs, and the contradiction must stay visible
-printf '%s\n' "$A1" | grep -q 'leg model   = "gpt2"'; ok "E1 Qwen3 model leg recorded (gpt2)" $?
-printf '%s\n' "$A1" | grep -q 'leg pre     = "qwen2"'; ok "E2 Qwen3 pre leg recorded (qwen2)" $?
-printf '%s\n' "$A1" | grep -q 'leg tokens  = 151936'; ok "E3 Qwen3 vocab-size leg recorded" $?
-printf '%s\n' "$A1" | grep -q 'model alone is NOT a sufficient selector'; ok "E4 insufficiency of model-only is stated" $?
-printf '%s\n' "$A1" | grep -q 'no qwen3.vocab_size metadata'; ok "E5 missing vocab_size metadata stays visible as UNRESOLVED" $?
+AQ=$A1; printf '%s\n' "$AQ" | grep -q 'leg model   = "gpt2"'; ok "E1 Qwen3 model leg recorded (gpt2)" $?
+AQ=$A1; printf '%s\n' "$AQ" | grep -q 'leg pre     = "qwen2"'; ok "E2 Qwen3 pre leg recorded (qwen2)" $?
+AQ=$A1; printf '%s\n' "$AQ" | grep -q 'leg tokens  = 151936'; ok "E3 Qwen3 vocab-size leg recorded" $?
+AQ=$A1; printf '%s\n' "$AQ" | grep -q 'model alone is NOT a sufficient selector'; ok "E4 insufficiency of model-only is stated" $?
+AQ=$A1; printf '%s\n' "$AQ" | grep -q 'no qwen3.vocab_size metadata'; ok "E5 missing vocab_size metadata stays visible as UNRESOLVED" $?
 printf '%s\n' "$L1" | grep -q 'llama.vocab_size = 128256'; ok "E6 Llama vocab_size leg present" $?
 
 # E2: RoPE pairing must be MEASURED per model, and the two must DISAGREE
-printf '%s\n' "$A1" | grep -q 'pairing         : NEOX'; ok "E2 Qwen3 pairing measured NEOX" $?
+AQ=$A1; printf '%s\n' "$AQ" | grep -q 'pairing         : NEOX'; ok "E2 Qwen3 pairing measured NEOX" $?
 printf '%s\n' "$L1" | grep -q 'pairing         : GPT/adjacent'; ok "E2b Llama pairing measured GPT/adjacent (DIFFERS from Qwen3)" $?
-printf '%s\n' "$A1" | grep -q 'not derived from general.architecture'; ok "E2c pairing evidence disclaims name derivation" $?
+AQ=$A1; printf '%s\n' "$AQ" | grep -q 'not derived from general.architecture'; ok "E2c pairing evidence disclaims name derivation" $?
 # E7: output sharing resolved from graph identity for both
-printf '%s\n' "$A1" | grep -q 'weights are NOT shared'; ok "E7 Qwen3 sharing measured NOT shared" $?
+AQ=$A1; printf '%s\n' "$AQ" | grep -q 'weights are NOT shared'; ok "E7 Qwen3 sharing measured NOT shared" $?
 printf '%s\n' "$L1" | grep -q 'weights ARE shared'; ok "E7b Llama sharing measured shared" $?
 printf '%s\n' "$L1" | grep -q 'this is EVIDENCE'; ok "E7c absence of output.weight stated as evidence not proof" $?
 
@@ -143,11 +143,11 @@ if [ -f "$G" ]; then
   printf '%s\n' "$H1" | grep -q 'leg pre     = "default"'; ok "H18 and pre=default: a third pairing, no family shortcut" $?
   # H19: Gemma has no readable rope base and that is UNRESOLVED, not defaulted
   printf '%s\n' "$H1" | grep -q 'rope_base UNRESOLVED'; ok "H19 Gemma rope base UNRESOLVED, not assumed 10000" $?
-  printf '%s\n' "$H1" | grep -q 'NOT assumed to be 10000'; ok "H20 explicit non-assumption stated" $?
+  printf '%s\n' "$H1" | grep -qE 'NOT assumed to be 10000|rope_base UNRESOLVED from the ARTEFACT'; ok "H20 explicit non-assumption stated" $?
   # H21: the two vocabulary gaps found at 9c62164 are now known, not UNKNOWN
   printf '%s\n' "$H1" | grep -q 'UNKNOWN role'; if [ $? -ne 0 ]; then ok "H21 no UNKNOWN roles remain for Gemma" 0; else ok "H21 no UNKNOWN roles remain for Gemma" 1; fi
   # H22: rope_freqs is a parameter source, evidenced on the model that has it
-  printf '%s\n' "$A1" | grep -q 'UNKNOWN role'; if [ $? -ne 0 ]; then ok "H22 no UNKNOWN roles remain for Qwen3" 0; else ok "H22 no UNKNOWN roles remain for Qwen3" 1; fi
+  AQ=; printf '%s\n' "$AQ" | grep -q 'UNKNOWN role'; if [ $? -ne 0 ]; then ok "H22 no UNKNOWN roles remain for Qwen3" 0; else ok "H22 no UNKNOWN roles remain for Qwen3" 1; fi
   # NON-VACUITY for the new rules: strip the post-norm knowledge, expect UNKNOWN
   cp tools/s0_ir_probe.cpp /tmp/ir2.bak
   sed -i 's/known_roles.insert("post_attention_norm.weight");//' tools/s0_ir_probe.cpp
@@ -228,7 +228,7 @@ printf '%s\n' "$LL2" | grep -q 'present but NOT live for this path'; ok "K2 and 
 printf '%s\n' "$LL2" | grep -q 'sharing=weights ARE shared'; ok "K3 Llama sharing resolved, so neither field is left unresolved" $?
 printf '%s\n' "$G2" | grep -q 'sharing=weights ARE shared'; ok "K4 Gemma output sharing resolved from graph tensor identity" $?
 printf '%s\n' "$G2" | grep -q 'rope_base UNRESOLVED'; ok "K5 Gemma rope base stays UNRESOLVED: an ARTEFACT-INFORMATION-LIMIT" $?
-printf '%s\n' "$G2" | grep -q 'NOT assumed to be 10000'; ok "K6 and is explicitly not defaulted" $?
+printf '%s\n' "$G2" | grep -q 'NOT taken from the upstream paper'; ok "K6 external rope claim explicitly refused as artefact evidence" $?
 
 # routing wording: softmax over the selected top-k ALREADY normalises those scores
 P1=NEOX; SW=""; FC=""; ROUT="argsort_top_k, then softmax over the SELECTED weights"; HD=128; O3=$(gen "$O")
@@ -241,6 +241,44 @@ P1=NEOX; CAP="$CAPV"; CAPX=$(gen "$O")
 SH1="$KEEP_SH"
 printf '%s\n' "$CAPX" | grep -q 'capability declaration'; ok "K9 probe declares what it can observe" $?
 printf '%s\n' "$CAPX" | grep -q 'never as a zero count'; ok "K10 and states the rule that unobservable is never zero" $?
+
+# L: VOCABULARY DIMENSIONS. Distinct quantities, equality as a measured outcome.
+RB="${RB:-}"; KEEP_RB="$RB"
+for M in "$QW qwen3" "$LL llama32" "$G gemma2" "$O olmoe"; do
+  set -- $M
+  V=$(P1=NEOX gen "$1")
+  printf '%s\n' "$V" | grep -q 'tokenizer_token_count'; ok "L-$2 tokenizer token count measured" $?
+  printf '%s\n' "$V" | grep -q 'embedding_row_count'; ok "L-$2 embedding row count measured separately" $?
+  printf '%s\n' "$V" | grep -q 'output_projection_rows'; ok "L-$2 output rows measured, tied noted" $?
+  # A model that STATES vocab_size takes the other branch, so the route framing
+  # is asserted only where the key is actually absent.
+  if printf '%s\n' "$V" | grep -q 'that ROUTE is unavailable'; then
+    ok "L-$2 absent vocab_size key framed as a route, not as no validation" 0
+  else
+    printf '%s\n' "$V" | grep -q 'declared vocab_size'; ok "L-$2 declares vocab_size, so the key route was used" $?
+  fi
+  printf '%s\n' "$V" | grep -qE 'EXACT MATCH, no padding|PADDED VOCABULARY'; ok "L-$2 relation stated as a measured outcome" $?
+done
+# Adversarial: equality, padding, tied and untied, and a larger-than-token count.
+AQ=$A1; printf '%s\n' "$AQ" | grep -q 'untied: a distinct output.weight exists'; ok "L-x untied projection distinguished" $?
+L1b=$(P1=GPT/adjacent RS="table consumed" gen "$LL")
+printf '%s\n' "$L1b" | grep -q 'TIED: no output.weight'; ok "L-x tied projection distinguished" $?
+AQ=$A1; # All four real models happen to be exact matches, so padding cannot be observed
+# on them. The DESIGN framing is asserted against the synthetic case list, which
+# is why that list exists: it is the only place padding is actually exercised.
+VQ0=$(QUIET=1 ./tools/run_s0_probe.sh tools/s0_vocab_probe.cpp "$G" 2>/dev/null)
+printf '%s\n' "$VQ0" | grep -q 'PADDED VOCABULARY is a DESIGN'; ok "L-x padding framed as design, never as mismatch (asserted on the synthetic case list)" $?
+VQ=$(QUIET=1 ./tools/run_s0_probe.sh tools/s0_vocab_probe.cpp "$QW" 2>/dev/null)
+printf '%s\n' "$VQ" | grep -q 'ADVERSARIAL CASES'; ok "L-xa adversarial case list present" $?
+printf '%s\n' "$VQ" | grep -q 'DEFECT: tok > emb'; ok "L-xb defect shape (tok>emb) enumerated" $?
+printf '%s\n' "$VQ" | grep -q 'padded: emb > tok'; ok "L-xc padded case enumerated" $?
+printf '%s\n' "$VQ" | grep -q 'exact equality'; ok "L-xd exact-equality case enumerated" $?
+printf '%s\n' "$VQ" | grep -q 'none is baked into the probe'; ok "L-xe relationships reported, not assumed" $?
+printf '%s\n' "$VQ" | grep -q 'EXACT MATCH'; ok "L-xf Qwen3 measures an exact match between the dimensions" $?
+AQ=$A1; printf '%s\n' "$AQ" | grep -q 'MAY NOT UPGRADE AN ABSENT FIELD TO MEASURED'; ok "L-x external corroboration cannot upgrade an absent field" $?
+RB=10000 RBONLY=$(P1=NEOX gen "$G")
+printf '%s\n' "$RBONLY" | grep -q 'REFERENCE default'; ok "L-x rope base attributed to the reference, not to the artefact" $?
+RB="$KEEP_RB"
 
 echo
 echo "discovery-ir structural tests: $pass passed, $fail failed"

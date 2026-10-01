@@ -10,9 +10,24 @@ rms_eps=9.99999997e-07 rope_base=-1
         - leg model   = "llama"
         - leg pre     = "default"
         - leg tokens  = 256000
-      UNRESOLVED      : no gemma2.vocab_size metadata: the vocab-size validation leg is absent, so selection rests on model and pre alone
+        - no gemma2.vocab_size metadata key: that ROUTE is unavailable, which is not the same as validation being impossible
+        - tokenizer_token_count = 256000   [ARTEFACT MEASURED]
+        - embedding_row_count   = 256000   [ARTEFACT MEASURED]: the physical capacity token ids index
+        - output_projection_rows= 256000   [ARTEFACT MEASURED] (TIED: no output.weight, so it inherits the embedding rows)
+        - RELATION: tokenizer_token_count == embedding_rows, EXACT MATCH, no padding  [MEASURED outcome]
       NOTE            : model alone is NOT a sufficient selector; Qwen3 declares
                         model=gpt2 while requiring pre=qwen2.
+      VOCAB DIMENSIONS ARE DISTINCT QUANTITIES, not one scalar: token count is
+                        how many tokens the tokenizer lists, embedding rows are the
+                        physical capacity ids index, and output rows are the head
+                        capacity. Equality between them is a MEASURED OUTCOME, not an
+                        invariant of this vocabulary, and a padded vocabulary is a
+                        DESIGN rather than a defect.
+      EXTERNAL UPSTREAM INFORMATION MAY NOT UPGRADE AN ABSENT FIELD TO MEASURED.
+                        A web search reports Gemma-2 rope_theta 10000 and OLMoE built
+                        with vocab_size = tokenizer.padded_vocab_size(); both may be
+                        true of those upstream configs, and neither is a reading of
+                        THESE files.
 
 -- MODEL SCOPE --
   Embedding          (model)     token_embd.weight
@@ -28,7 +43,7 @@ rms_eps=9.99999997e-07 rope_base=-1
         - NO output.weight tensor exists in the inventory
         - token_embd.weight present with ne=[2304,256000]
         - NO output.weight tensor exists in the inventory -- this is EVIDENCE, not proof, and on its own it does not establish sharing
-        - sharing=weights ARE shared: final projection reads token_embd.weight MEASURED from the reference graph: the final MUL_MAT's src[0] weight tensor was read by name, and it is token_embd.weight. Weight sharing is a question about which tensor the projection READS, not about whether dimensions match.
+        - sharing=weights ARE shared: reads token_embd.weight MEASURED from the reference graph: the final MUL_MAT's src[0] weight tensor was read by name, and it is token_embd.weight. Weight sharing is a question about which tensor the projection READS, not about whether dimensions match.
 
 -- LAYER 0 (representative body) --
   RMSNorm            layer=0    blk.0.attn_norm.weight
@@ -138,7 +153,7 @@ rms_eps=9.99999997e-07 rope_base=-1
   RoPE               layer=0    (computed)
       head_dim=256  heads=8  kv_heads=4
       pairing         : NEOX   [MEASURED from reference graph]
-      base            : -1
+      base            : 10000
       dim_count       : -1
       scaling         : none
       position_source : position index (pos), from inp_pos
@@ -149,7 +164,8 @@ rms_eps=9.99999997e-07 rope_base=-1
         - gemma2.rope.scaling.type=none
         - pairing=NEOX MEASURED from the reference graph: the ROPE node located by ggml op, its immediate producer snapshotted, both pairing hypotheses tested numerically
         - not derived from general.architecture; the two models differ here despite both being decoder-only transformers
-      UNRESOLVED      : rope_base UNRESOLVED: no gemma2.rope.freq_base key AND no precomputed rope_freqs table, so this artefact carries no readable base. NOT assumed to be 10000.
+        - rope_base = 10000  [MEASURED from the reference path: the artefact has NO base key and NO precomputed table, and the reference sets this default and overrides it only if the key is present, so the default stands]
+        - this is the REFERENCE default, so it is a statement about this artefact under this reference, not a universal claim
   GatedMLP           layer=0    ffn_gate.weight + ffn_up.weight + ffn_down.weight
       in/out features : 2304 / 9216
       scope           : gated (SwiGLU-family): gate and up share out_features, down returns to in_features

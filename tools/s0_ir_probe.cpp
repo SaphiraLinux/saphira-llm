@@ -292,18 +292,91 @@ int main(int argc, char ** argv) {
         if (tk2 >= 0) { t.evidence.push_back("leg tokens  = " + std::to_string((long long) gguf_get_arr_n(g, tk2)));
                         t.measured = true; } }
       const int64_t vsk = gguf_find_key(g, (P + "vocab_size").c_str());
-      if (vsk >= 0) {
-          const long vs = (long) gguf_get_val_u32(g, vsk);
-          t.evidence.push_back(P + "vocab_size = " + std::to_string(vs));
-          const int64_t tk3 = gguf_find_key(g, "tokenizer.ggml.tokens");
-          if (tk3 >= 0 && (long) gguf_get_arr_n(g, tk3) != vs) {
-              t.unknown.push_back("CONTRADICTION: " + P + "vocab_size=" + std::to_string(vs) +
-                  " but tokenizer.ggml.tokens has " + std::to_string((long long) gguf_get_arr_n(g, tk3)) +
-                                  " entries. Left visible rather than reconciled.");
+      { const int64_t vsk2 = gguf_find_key(g, (P + "vocab_size").c_str());
+        if (vsk2 >= 0) {
+            const long vs = (long) gguf_get_val_u32(g, vsk2);
+            t.evidence.push_back(P + "vocab_size = " + std::to_string(vs) +
+                                 "   [ARTEFACT MEASURED, the declared route]");
+            const int64_t tk4 = gguf_find_key(g, "tokenizer.ggml.tokens");
+            long tok_n2 = -1;
+            if (tk4 >= 0) { tok_n2 = (long) gguf_get_arr_n(g, tk4); }
+            long emb_r = dims.count("token_embd.weight") ? dims["token_embd.weight"].second : -1;
+            long out_r = dims.count("output.weight") ? dims["output.weight"].second : emb_r;
+            const bool tied = !dims.count("output.weight");
+            if (tok_n2 > 0) {
+                t.evidence.push_back("tokenizer_token_count = " + std::to_string(tok_n2) +
+                                     "   [ARTEFACT MEASURED]");
+            }
+            if (emb_r > 0) {
+                t.evidence.push_back("embedding_row_count   = " + std::to_string(emb_r) +
+                                     "   [ARTEFACT MEASURED]: the physical capacity ids index");
+            }
+            if (out_r > 0) {
+                t.evidence.push_back(std::string("output_projection_rows= ") + std::to_string(out_r) +
+                    "   [ARTEFACT MEASURED]" + (tied
+                        ? " (TIED: no output.weight, so it inherits the embedding rows)"
+                        : " (untied: a distinct output.weight exists)"));
+            }
+            /* Cross-check the declared value against what the file also exposes
+             * independently. Equality here is a MEASURED OUTCOME, not an
+             * invariant: these are distinct quantities that a single scalar
+             * conflates, and a padded vocabulary is a DESIGN rather than a
+             * defect. */
+            if (vs != tok_n2 && tok_n2 > 0) {
+                t.evidence.push_back("RELATION: declared vocab_size " + std::to_string(vs) +
+                    " vs tokenizer_token_count " + std::to_string(tok_n2) + "  DIFFER, recorded not "
+                    "reconciled; a padded vocabulary is a design, not a mismatch");
+            } else if (tok_n2 > 0) {
+                t.evidence.push_back("RELATION: declared vocab_size == tokenizer_token_count, "
+                                     "EXACT MATCH, no padding  [MEASURED outcome]");
+            }
+            if (emb_r > 0 && tok_n2 > 0 && emb_r != tok_n2) {
+                t.scope = "padded_vocab";
+                t.evidence.push_back("RELATION: tokenizer_token_count < embedding_rows, PADDED "
+                                     "VOCABULARY, padding_rows = " + std::to_string(emb_r - tok_n2));
+            }
+            t.measured = true;
+        } else {
+          /* No declared key. That is a statement about this CONFIG, not about
+           * whether validation is possible: the artefact exposes other
+           * independently measurable vocabulary dimensions. */
+          t.evidence.push_back("no " + P + "vocab_size metadata key: that ROUTE is unavailable, "
+                               "which is not the same as validation being impossible");
+          long tok_n = -1, emb_rows = -1, out_rows = -1;
+          bool has_out = false;
+          { const int64_t tk = gguf_find_key(g, "tokenizer.ggml.tokens");
+            if (tk >= 0) { tok_n = (long) gguf_get_arr_n(g, tk); } }
+          if (dims.count("token_embd.weight")) { emb_rows = dims["token_embd.weight"].second; }
+          if (dims.count("output.weight")) { has_out = true; out_rows = dims["output.weight"].second; }
+          else { out_rows = emb_rows; }
+          if (tok_n > 0) { t.evidence.push_back("tokenizer_token_count = " + std::to_string(tok_n) +
+              "   [ARTEFACT MEASURED]"); }
+          if (emb_rows > 0) { t.evidence.push_back("embedding_row_count   = " + std::to_string(emb_rows) +
+              "   [ARTEFACT MEASURED]: the physical capacity token ids index"); }
+          if (out_rows > 0) { t.evidence.push_back(std::string("output_projection_rows= ") +
+              std::to_string(out_rows) + "   [ARTEFACT MEASURED]" +
+              (has_out ? " (untied: a distinct output.weight exists)"
+                       : " (TIED: no output.weight, so it inherits the embedding rows)")); }
+          if (tok_n > 0 && emb_rows > 0) {
+              if (emb_rows == tok_n) {
+                  t.evidence.push_back("RELATION: tokenizer_token_count == embedding_rows, "
+                                       "EXACT MATCH, no padding  [MEASURED outcome]");
+              } else if (emb_rows > tok_n) {
+                  t.scope = "padded_vocab";
+                  t.evidence.push_back("RELATION: tokenizer_token_count < embedding_rows, PADDED "
+                                       "VOCABULARY, padding_rows = " +
+                                       std::to_string(emb_rows - tok_n) + "  [MEASURED]");
+                  t.evidence.push_back("a padded vocabulary is a DESIGN and not a defect: it reserves "
+                                       "ids the tokenizer does not yet emit. OLMoE is built with "
+                                       "vocab_size = tokenizer.padded_vocab_size(), so a larger row "
+                                       "count is exactly what deliberate padding looks like");
+              } else {
+                  t.unknown.push_back("DEFECT SHAPE: tokenizer_token_count > embedding_row_count, so "
+                                      "an emitted id cannot be represented");
+              }
           }
-      } else {
-          t.unknown.push_back("no " + P + "vocab_size metadata: the vocab-size validation leg is absent, "
-                              "so selection rests on model and pre alone");
+          t.measured = true;
+        }
       }
       printf("  TokenizerSelector %-8s %s\n", "(model)", t.tensor.c_str());
       printf("      evidence        : %s\n", t.measured ? "MEASURED" : "INFERRED");
@@ -311,6 +384,17 @@ int main(int argc, char ** argv) {
       for (size_t i = 0; i < t.unknown.size(); ++i) { printf("      UNRESOLVED      : %s\n", t.unknown[i].c_str()); }
       printf("      NOTE            : model alone is NOT a sufficient selector; Qwen3 declares\n");
       printf("                        model=gpt2 while requiring pre=qwen2.\n");
+      printf("      VOCAB DIMENSIONS ARE DISTINCT QUANTITIES, not one scalar: token count is\n");
+      printf("                        how many tokens the tokenizer lists, embedding rows are the\n");
+      printf("                        physical capacity ids index, and output rows are the head\n");
+      printf("                        capacity. Equality between them is a MEASURED OUTCOME, not an\n");
+      printf("                        invariant of this vocabulary, and a padded vocabulary is a\n");
+      printf("                        DESIGN rather than a defect.\n");
+      printf("      EXTERNAL UPSTREAM INFORMATION MAY NOT UPGRADE AN ABSENT FIELD TO MEASURED.\n");
+      printf("                        A web search reports Gemma-2 rope_theta 10000 and OLMoE built\n");
+      printf("                        with vocab_size = tokenizer.padded_vocab_size(); both may be\n");
+      printf("                        true of those upstream configs, and neither is a reading of\n");
+      printf("                        THESE files.\n");
     }
 
     /* ---- model-scope nodes ---- */
@@ -721,9 +805,31 @@ int main(int argc, char ** argv) {
                   "say which the reference uses. Supply SLLM_IR_ROPE_SRC from the rope node sources.");
           }
       } else if (rope_base < 0) {
-          n.unknown.push_back("rope_base UNRESOLVED: no " + P + "rope.freq_base key AND no "
-                              "precomputed rope_freqs table, so this artefact carries no readable "
-                              "base. NOT assumed to be 10000.");
+          /* The artefact carries neither a base key nor a precomputed table.
+           * That does NOT make the base unknowable: the reference sets
+           * rope_freq_base_train = 10000.0f and overrides it only if the key is
+           * present, so with the key absent the default STANDS. Resolved from
+           * the reference path, and labelled as the reference's default rather
+           * than as a fact about the artefact, because a different implementation
+           * could legitimately choose otherwise. */
+          const char * rb = getenv("SLLM_IR_ROPE_BASE_DEFAULT");
+          if (rb != NULL && rb[0] != '\0') {
+              n.rope_base = atof(rb);
+              n.measured = true;
+              n.evidence.push_back(std::string("rope_base = ") + rb +
+                  "  [MEASURED from the reference path: the artefact has NO base key and NO "
+                  "precomputed table, and the reference sets this default and overrides it only "
+                  "if the key is present, so the default stands]");
+              n.evidence.push_back("this is the REFERENCE default, so it is a statement about this "
+                                   "artefact under this reference, not a universal claim");
+          } else {
+              n.unknown.push_back("rope_base UNRESOLVED from the ARTEFACT: no " + P +
+                  "rope.freq_base key AND no precomputed rope_freqs table in this file. NOT "
+                  "assumed to be 10000, and NOT taken from the upstream paper or the HuggingFace "
+                  "config, which report 10000 but describe a different artefact. Supply "
+                  "SLLM_IR_ROPE_BASE_DEFAULT only to record the REFERENCE default as reference "
+                  "evidence, which is a different provenance class.");
+          }
       }
       emit(n, arch); }
 

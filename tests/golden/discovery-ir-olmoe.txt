@@ -10,9 +10,24 @@ rms_eps=9.99999975e-06 rope_base=10000
         - leg model   = "gpt2"
         - leg pre     = "olmo"
         - leg tokens  = 50304
-      UNRESOLVED      : no olmoe.vocab_size metadata: the vocab-size validation leg is absent, so selection rests on model and pre alone
+        - no olmoe.vocab_size metadata key: that ROUTE is unavailable, which is not the same as validation being impossible
+        - tokenizer_token_count = 50304   [ARTEFACT MEASURED]
+        - embedding_row_count   = 50304   [ARTEFACT MEASURED]: the physical capacity token ids index
+        - output_projection_rows= 50304   [ARTEFACT MEASURED] (untied: a distinct output.weight exists)
+        - RELATION: tokenizer_token_count == embedding_rows, EXACT MATCH, no padding  [MEASURED outcome]
       NOTE            : model alone is NOT a sufficient selector; Qwen3 declares
                         model=gpt2 while requiring pre=qwen2.
+      VOCAB DIMENSIONS ARE DISTINCT QUANTITIES, not one scalar: token count is
+                        how many tokens the tokenizer lists, embedding rows are the
+                        physical capacity ids index, and output rows are the head
+                        capacity. Equality between them is a MEASURED OUTCOME, not an
+                        invariant of this vocabulary, and a padded vocabulary is a
+                        DESIGN rather than a defect.
+      EXTERNAL UPSTREAM INFORMATION MAY NOT UPGRADE AN ABSENT FIELD TO MEASURED.
+                        A web search reports Gemma-2 rope_theta 10000 and OLMoE built
+                        with vocab_size = tokenizer.padded_vocab_size(); both may be
+                        true of those upstream configs, and neither is a reading of
+                        THESE files.
 
 -- MODEL SCOPE --
   Embedding          (model)     token_embd.weight

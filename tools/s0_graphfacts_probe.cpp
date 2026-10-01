@@ -349,6 +349,52 @@ int main(int argc, char ** argv) {
           }
       } }
 
+    /* RoPE BASE, when the artefact carries NO base key at all.
+     *
+     * An earlier web search claimed Gemma-2 uses base 10000. That is a claim
+     * about the PAPER, not about this artefact, so it is checked against the
+     * reference instead of adopted. The reference sets
+     *     hparams.rope_freq_base_train = 10000.0f    (llama-model.cpp:1409)
+     * and then overrides it with the file value if and only if the key is
+     * present. Gemma-2 has no such key, so the DEFAULT STANDS and the reference
+     * genuinely uses 10000. That is a positive reading from the reference, not
+     * an assumption imported from documentation. */
+    printf("\n== RoPE BASE (artefact has no base key) ==\n");
+    { gguf_init_params gp3; memset(&gp3,0,sizeof gp3); gp3.no_alloc = true;
+      gguf_context * gg3 = gguf_init_from_file(argv[1], gp3);
+      if (gg3 != NULL) {
+          std::string P3 = "gemma2.";
+          const int64_t ai = gguf_find_key(gg3, "general.architecture");
+          if (ai >= 0) { const char * av = gguf_get_val_str(gg3, ai); if (av) { P3 = std::string(av) + "."; } }
+          const int64_t kb = gguf_find_key(gg3, (P3 + "rope.freq_base").c_str());
+          printf("  %srope.freq_base is %s\n", P3.c_str(),
+                 kb >= 0 ? "PRESENT" : "ABSENT from the artefact");
+          if (kb >= 0) { printf("  value = %.9g  [MEASURED from the file]\n", gguf_get_val_f32(gg3, kb)); }
+          else {
+              printf("  reference default: llama-model.cpp sets rope_freq_base_train = 10000.0f and\n");
+              printf("  overrides it ONLY if the key is present, so with the key absent the default\n");
+              printf("  STANDS. base = 10000  [MEASURED from the reference path, not from a paper]\n");
+              printf("  NOTE this is the reference%s default, so a different implementation could\n", "'");
+              printf("  differ. The claim under test was about THIS artefact under THIS reference.\n");
+          }
+          gguf_free(gg3); } }
+
+    /* EXTERNAL CORROBORATION, kept strictly separate from artefact evidence.
+     *
+     * A web search reports that Gemma-2 uses RoPE theta 10000 upstream, and
+     * AllenAI builds OLMoE with vocab_size = tokenizer.padded_vocab_size(). Both
+     * may well be true and both are worth recording, but neither is a reading of
+     * THIS file. The rule enforced here is that an artefact-ABSENT field never
+     * becomes MEASURED because something outside says so. Upstream information
+     * may TEST our interpretation; it may not substitute for it. */
+    printf("\n== EXTERNAL CORROBORATION (NOT artefact evidence) ==\n");
+    printf("  Reported upstream: Gemma-2 rope_theta = 10000.00, and OLMoE is constructed with\n");
+    printf("  vocab_size = tokenizer.padded_vocab_size(), making padded vocabularies deliberate.\n");
+    printf("  Effect on this probe: NONE. Both are recorded as claims about upstream\n");
+    printf("  configurations, not about these artefacts. An artefact-ABSENT field stays\n");
+    printf("  UNRESOLVED regardless of what any external source asserts, and external\n");
+    printf("  corroboration may never upgrade an ABSENT field to MEASURED.\n");
+
     /* HEAD DIM, derivable when the artefact omits key_length. */
     { long hd2 = -1; long n_embd2 = -1;
       gguf_init_params gp2; memset(&gp2,0,sizeof gp2); gp2.no_alloc = true;
