@@ -18,7 +18,7 @@ trap 'rm -f "$OUT" "$TMP"' EXIT INT TERM
 LLAMA_DIR="${LLAMA_DIR:-third_party/llama.cpp}"
 LIBDIR="${LIBDIR:-/tmp/lcpbuild/bin}"
 
-printf 'compiling %s -> %s\n' "$SRC" "$TMP"
+if [ -n "${QUIET:-}" ]; then printf 'compiling (quiet)\n'; else printf 'compiling %s -> %s\n' "$SRC" "$TMP"; fi
 if ! g++ -O2 -std=c++17 -I"$LLAMA_DIR/include" -I"$LLAMA_DIR/ggml/include" \
         "$SRC" -o "$TMP" -L"$LIBDIR" -lllama -lggml-base -Wl,-rpath,"$LIBDIR"; then
     printf 'COMPILE FAILED: refusing to run. No executable was produced.\n' >&2
