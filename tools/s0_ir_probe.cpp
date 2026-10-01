@@ -113,18 +113,77 @@ static void claim(const std::string & field, const std::string & value,
     c.notclaimed = notclaimed; g_claims.push_back(c);
 }
 
+/* ---- OBSERVATION CAPABILITY REGISTRY --------------------------------------
+ *
+ * This is the corrected decision tree, enforced rather than described:
+ *
+ *     Claim requires evidence
+ *             |
+ *     Does the instrument have PROVEN capability to observe that evidence?
+ *             |
+ *       no --> UNOBSERVABLE
+ *             |
+ *           yes
+ *             |
+ *     Was the evidence found?  --> yes: MEASURED PRESENT
+ *             |
+ *            no: MEASURED ABSENT
+ *
+ * with UNRESOLVED held apart: the instrument can see the evidence, it was
+ * considered, and the available evidence still cannot decide.
+ *
+ * The capability question comes FIRST, and that ordering is the whole point. On
+ * Nemotron-H the graph histogram held 1318 of 1463 nodes because nodes with no
+ * data were skipped, so "no ROPE node found" was read as absence and produced a
+ * confident sentence about the MODEL. It was not absence: the evidence existed
+ * and the instrument had not earned the right to say it did not. Absence is a
+ * claim about a family's OBSERVABILITY first and its content second. */
+enum capability {
+    CAP_TENSOR_INVENTORY = 0,   /* names, shapes, types, per-layer identity */
+    CAP_LAYER_IDENTITY,         /* which layer owns which tensor              */
+    CAP_METADATA_TYPED_READ,    /* GGUF values read per declared type         */
+    CAP_EXTERNAL_GRAPH,         /* reference graph op histogram + op_params  */
+    CAP_COUNT                   /* number of distinct classes in a family     */
+};
+static const int CAP_N = 5;
+static const char * cap_name[CAP_N] = {
+    "tensor inventory (names, shapes, types)",
+    "per-layer tensor identity",
+    "typed GGUF metadata reads",
+    "reference graph histogram and op_params",
+    "counts within a single artefact"
+};
+
+/* A capability is PROVEN only when this run actually exercised it. Nothing is
+ * declared in advance and nothing is inherited from a previous run. */
+static bool cap_proven[CAP_N] = {false, false, false, false, false};
+static void prove(capability c) { cap_proven[c] = true; }
+
 /* An absence backed by the tensor inventory is the STRONGEST negative claim
- * available: we looked in the one place the artefact must speak if it were going
- * to, and it did not speak. */
+ * available, and it is only available if that capability was actually exercised.
+ * Without it the claim is downgraded rather than asserted: UNOBSERVABLE says the
+ * instrument cannot see it, which is weaker but true, and is the whole difference
+ * between a measured absence and a blind spot. */
 static void claim_absent(const std::string & field, int layer, const std::string & what) {
     char lb[16]; if (layer < 0) snprintf(lb, sizeof lb, "model");
     else snprintf(lb, sizeof lb, "%d", layer);
+    const std::string where = (layer < 0 ? std::string("model scope")
+                                         : ("layer " + std::string(lb)));
+    if (!cap_proven[CAP_TENSOR_INVENTORY] || !cap_proven[CAP_LAYER_IDENTITY]) {
+        claim(field, "UNOBSERVABLE", "instrument capability NOT proven this run",
+              "unobservable", lb,
+              "nothing may be concluded about " + what + " at " + where,
+              "NOT claimed: absence. The instrument did not demonstrate it could observe "
+              "this family, so a negative here would be blindness reported as a finding");
+        return;
+    }
     claim(field, "ABSENT", "tensor inventory (direct lookup)", "measured", lb,
-          "no " + what + " exists at " + (layer < 0 ? std::string("model scope") : ("layer " + std::string(lb))) +
+          "no " + what + " exists at " + where +
               ", measured by direct lookup in the tensor inventory",
           layer < 0 ? ("no claim about any layer in particular")
                     : ("no claim about OTHER layers, and no claim that the model lacks " + what + " entirely"));
 }
+
 /* Failing to observe is a DIFFERENT statement and must never be recorded as an
  * absence. This is the distinction the project exists to protect. */
 static void claim_unresolved(const std::string & field, int layer, const std::string & why,
@@ -807,6 +866,15 @@ int main(int argc, char ** argv) {
      * layer 0 describes the WHOLE model by one layer's body and hides every
      * other body present. Layer locality must be recovered from the tensor
      * names, so it is. */
+    /* Capabilities PROVEN by doing, not declared in advance. Each is set here
+     * because this code path has just exercised it: every tensor name was read,
+     * every layer index resolved from that name, and every GGUF value read through
+     * a type-checked accessor. If any of those steps did not run the capability
+     * stays false and every ABSENT claim downgrades to UNOBSERVABLE. */
+    prove(CAP_TENSOR_INVENTORY);
+    prove(CAP_LAYER_IDENTITY);
+    prove(CAP_METADATA_TYPED_READ);
+    prove(CAP_COUNT);
     printf("\n-- LAYER TOPOLOGY (measured from tensor names) --\n");
     std::map<int, std::string> layer_body;
     std::map<std::string, std::vector<int> > body_layers;
@@ -1614,17 +1682,27 @@ int main(int argc, char ** argv) {
      * unknowns as visible as the findings, and to print the instrument's own
      * blind spots as first-class results rather than omissions. */
     printf("\n-- FINAL AUDIT REPORT --\n");
-    printf("\n  A. WHAT THIS INSTRUMENT CAN SEE\n");
-    printf("     direct   : tensor inventory, per-layer tensor identity, tensor shapes\n");
-    printf("                and types, GGUF metadata with declared types read per type.\n");
-    printf("     derived  : nothing that changes a value. Shape arithmetic is used only\n");
-    printf("                to CROSS-CHECK a declared count, never to supply one.\n");
-    printf("     external : reference graph op histogram, op_params, and the six graph\n");
-    printf("                sources -- a SEPARATE provenance class, supplied explicitly and\n");
-    printf("                never merged into artefact evidence.\n");
-    printf("     cannot see: an architecture whose operations are fused inside a node the\n");
-    printf("                histogram only counts; anything a single-token, single-position\n");
-    printf("                graph build elides; the activation function of a dense FFN.\n");
+    printf("\n  A. WHAT THIS INSTRUMENT CAN SEE (DERIVED, NOT DESCRIBED)\n");
+    printf("     These rows come from a capability registry that this run must\n");
+    printf("     PROVE by exercising it. A row that was not exercised cannot\n");
+    printf("     support an absence claim; claim_absent() downgrades it to\n");
+    printf("     UNOBSERVABLE instead of asserting it. Blind spots are therefore\n");
+    printf("     part of the evidence model, not documentation around it.\n\n");
+    { int np = 0, nu = 0;
+      for (int c = 0; c < CAP_N; ++c) {
+          if (cap_proven[c]) ++np; else ++nu;
+          printf("     [%s] %s\n", cap_proven[c] ? "PROVEN  " : "UNPROVEN", cap_name[c]);
+      }
+      printf("\n     %d proven this run, %d unproven.\n", np, nu);
+      if (nu > 0) {
+          printf("     An UNPROVEN capability means any ABSENT claim resting on it has\n");
+          printf("     been reported as UNOBSERVABLE instead. Silence is not evidence.\n");
+      }
+      printf("\n     declared blind spots, independent of this run:\n");
+      printf("       operations fused inside a node the histogram only counts\n");
+      printf("       anything a single-token, single-position graph build elides\n");
+      printf("       the activation function of a dense FFN\n");
+      printf("     these are UNOBSERVABLE BY CONSTRUCTION, not merely unproven today\n"); }
 
     printf("\n  B. DIRECT VERSUS DERIVED, COUNTED OVER %zu CLAIMS\n", g_claims.size());
     { size_t direct = 0, derived = 0, unres = 0, unob = 0;

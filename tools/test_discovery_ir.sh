@@ -593,5 +593,41 @@ fi
 
 
 echo
+# ---- U: THE CAPABILITY GATE, and proof that it CLOSES -----------------------
+# The absence claim must be gated on a capability the instrument PROVED by
+# exercising it. Section A used to be printed prose; it is now derived from a
+# registry, so the gate is load-bearing rather than decorative.
+./tools/run_s0_probe.sh tools/s0_ir_probe.cpp "$NH" > /tmp/u_base.txt 2>/dev/null
+grep -q 'A. WHAT THIS INSTRUMENT CAN SEE (DERIVED, NOT DESCRIBED)' /tmp/u_base.txt
+if [ $? -eq 0 ]; then ok "U1 capability section is DERIVED, not described" 0; else ok "U1 capability section is DERIVED, not described" 1; fi
+grep -q '\[PROVEN  \] tensor inventory' /tmp/u_base.txt
+if [ $? -eq 0 ]; then ok "U2 tensor inventory capability PROVEN by exercise" 0; else ok "U2 tensor inventory capability PROVEN by exercise" 1; fi
+grep -q '\[PROVEN  \] per-layer tensor identity' /tmp/u_base.txt
+if [ $? -eq 0 ]; then ok "U3 per-layer identity capability PROVEN" 0; else ok "U3 per-layer identity capability PROVEN" 1; fi
+# The IR probe does NOT run the reference graph, so that capability is honestly
+# UNPROVEN here. Reporting it as proven would be the exact failure the audit exists
+# to prevent, in the tool's own audit section.
+grep -q '\[UNPROVEN\] reference graph histogram and op_params' /tmp/u_base.txt
+if [ $? -eq 0 ]; then ok "U4 graph capability honestly UNPROVEN by the IR probe" 0; else ok "U4 graph capability honestly UNPROVEN by the IR probe" 1; fi
+# THE GATE CLOSES. With capabilities proven, an absence is ABSENT.
+grep -A2 'Field          : attention' /tmp/u_base.txt | grep -q 'Value        : ABSENT'
+if [ $? -eq 0 ]; then ok "U5 with capability proven, absence is ABSENT" 0; else ok "U5 with capability proven, absence is ABSENT" 1; fi
+# NON-VACUITY: withdraw the capability and the SAME claim must downgrade to
+# UNOBSERVABLE rather than still claiming absence. If this passes while the claim
+# stayed ABSENT, the gate would be decorative.
+cp tools/s0_ir_probe.cpp /tmp/ir_u.bak
+sed -i 's|^    prove(CAP_TENSOR_INVENTORY);|    /* withdrawn for the non-vacuity check */|' tools/s0_ir_probe.cpp
+./tools/run_s0_probe.sh tools/s0_ir_probe.cpp "$NH" > /tmp/u_unproven.txt 2>/dev/null
+grep -q '\[UNPROVEN\] tensor inventory' /tmp/u_unproven.txt
+if [ $? -eq 0 ]; then ok "U6 withdrawing the capability is visible in section A" 0; else ok "U6 withdrawing the capability is visible in section A" 1; fi
+grep -A6 'Field          : attention' /tmp/u_unproven.txt | grep -q 'Value        : UNOBSERVABLE'
+if [ $? -eq 0 ]; then ok "U7 GATE CLOSES: absence downgrades to UNOBSERVABLE" 0; else ok "U7 GATE CLOSES: absence downgrades to UNOBSERVABLE" 1; fi
+grep -A7 'Field          : attention' /tmp/u_unproven.txt | grep -q 'NOT claimed: absence'
+if [ $? -eq 0 ]; then ok "U8 the downgrade states it is NOT claiming absence" 0; else ok "U8 the downgrade states it is NOT claiming absence" 1; fi
+grep -A7 'Field          : attention' /tmp/u_unproven.txt | grep -q 'blindness reported as a finding'
+if [ $? -eq 0 ]; then ok "U9 the downgrade names blindness as the cause" 0; else ok "U9 the downgrade names blindness as the cause" 1; fi
+cp /tmp/ir_u.bak tools/s0_ir_probe.cpp
+
+
 echo "discovery-ir structural tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

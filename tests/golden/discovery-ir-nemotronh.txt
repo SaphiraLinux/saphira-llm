@@ -804,17 +804,28 @@ rms_eps=9.99999975e-06 rope_base=-1
 
 -- FINAL AUDIT REPORT --
 
-  A. WHAT THIS INSTRUMENT CAN SEE
-     direct   : tensor inventory, per-layer tensor identity, tensor shapes
-                and types, GGUF metadata with declared types read per type.
-     derived  : nothing that changes a value. Shape arithmetic is used only
-                to CROSS-CHECK a declared count, never to supply one.
-     external : reference graph op histogram, op_params, and the six graph
-                sources -- a SEPARATE provenance class, supplied explicitly and
-                never merged into artefact evidence.
-     cannot see: an architecture whose operations are fused inside a node the
-                histogram only counts; anything a single-token, single-position
-                graph build elides; the activation function of a dense FFN.
+  A. WHAT THIS INSTRUMENT CAN SEE (DERIVED, NOT DESCRIBED)
+     These rows come from a capability registry that this run must
+     PROVE by exercising it. A row that was not exercised cannot
+     support an absence claim; claim_absent() downgrades it to
+     UNOBSERVABLE instead of asserting it. Blind spots are therefore
+     part of the evidence model, not documentation around it.
+
+     [PROVEN  ] tensor inventory (names, shapes, types)
+     [PROVEN  ] per-layer tensor identity
+     [PROVEN  ] typed GGUF metadata reads
+     [UNPROVEN] reference graph histogram and op_params
+     [PROVEN  ] counts within a single artefact
+
+     4 proven this run, 1 unproven.
+     An UNPROVEN capability means any ABSENT claim resting on it has
+     been reported as UNOBSERVABLE instead. Silence is not evidence.
+
+     declared blind spots, independent of this run:
+       operations fused inside a node the histogram only counts
+       anything a single-token, single-position graph build elides
+       the activation function of a dense FFN
+     these are UNOBSERVABLE BY CONSTRUCTION, not merely unproven today
 
   B. DIRECT VERSUS DERIVED, COUNTED OVER 59 CLAIMS
      49   measured DIRECTLY from the artefact
