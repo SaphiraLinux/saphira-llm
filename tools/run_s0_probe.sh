@@ -28,6 +28,7 @@ fi
 
 mv -f "$TMP" "$OUT"                    # publish only on success
 printf 'running fresh binary\n'
+set +e
 "$OUT" "$@"
 rc=$?
 rm -f "$OUT"
