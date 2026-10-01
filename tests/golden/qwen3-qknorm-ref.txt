@@ -1,0 +1,61 @@
+Q/K NORM REFERENCE, STAGE START (2026-09-30)
+Model: /var/lib/spoon/models/qwen3-8b/Qwen3-8B-Q4_K_M.gguf
+
+== PROVEN FROM THE REFERENCE SOURCE, not inferred ==
+third_party/llama.cpp/src/models/qwen3.cpp is the reference graph.
+
+  line 39  attn_k_norm = create_tensor(..., { n_embd_head_k }, 0)
+  line 40  attn_q_norm = create_tensor(..., { n_embd_head_k }, 0)
+  line 88  Qcur = build_norm(Qcur, attn_q_norm, NULL, LLM_NORM_RMS, il)
+  line 89  cb(Qcur, "Qcur_normed", il)
+  line 91  Qcur = ggml_rope_ext(ctx0, Qcur, inp_pos, nullptr, ...)
+  line 97  Kcur = build_norm(Kcur, attn_k_norm, NULL, LLM_NORM_RMS, il)
+  line 98  cb(Kcur, "Kcur_normed", il)
+  line 100 Kcur = ggml_rope_ext(ctx0, Kcur, inp_pos, nullptr, ...)
+
+ORDERING, PROVED NOT GUESSED: the per-head norm is applied BEFORE RoPE, for Q
+and for K. Lines 88 and 97 are the norms; lines 91 and 100 are the ropes; the
+norm line is strictly earlier in both pairs. An implementation that normed after
+RoPE would consume the WRONG tensor: RoPE rotates pairs of components, and RMS
+norm over a rotated vector is a different operation with a different result. The
+reference even names the intermediate "Qcur_normed" via its debug callback, so
+the order is visible in the source rather than only in its effect.
+
+THE NORM IS RMS, not LayerNorm. qwen3.cpp passes LLM_NORM_RMS, and
+llama-graph.cpp:1600 maps that to ggml_rms_norm(ctx0, cur,
+hparams.f_norm_rms_eps). No mean subtraction and no bias: the bias slots
+attn_q_norm_b and attn_k_norm_b exist in llama-model.h but are not created by
+qwen3.cpp, and this GGUF carries no ".bias" tensors for them.
+
+== PROVEN FROM THE FILE ==
+  qwen3.attention.layer_norm_rms_epsilon  f32  9.999999974752427e-07
+  qwen3.attention.key_length               u32  128
+  qwen3.attention.head_count               u32  32
+  qwen3.attention.head_count_kv            u32  8
+
+HEAD DIMENSION IS 128, and it is stated three independent ways: key_length says
+128, the tensor shape is { n_embd_head_k }, and the captured tensors are
+ne = [128, 1] F32. Q HEADS 32, KV HEADS 8.
+
+WHY THIS MATTERS NUMERICALLY, and it is not just an extra call. The norm
+reduces 128 head elements, not n_embd 4096, so it is 32x narrower than every
+norm in the BitNet graph. It is applied PER HEAD, and because head_count is 32
+while head_count_kv is 8, the 8 KV heads each need their own K norm; a K norm
+shared across heads or applied once to the whole 1024-wide K would be wrong.
+And a shared attn_k_norm.weight of ne [128,1] is indexed by head.
+
+== STILL TO CAPTURE BEFORE THIS REFERENCE IS SEALED ==
+Numeric vectors, all at a NON-ZERO head index, for at least one Q head and one
+K head:
+  - the input head vector BEFORE the norm
+  - the attn_q_norm / attn_k_norm weight vector
+  - the post-norm vector
+  - a whole-vector hash for each, plus representative values and min/max/mean
+  - the epsilon as actually used by the reference call
+  - a numeric demonstration that norm-then-RoPE and RoPE-then-norm differ, so
+    the ordering proved from source above is also proved from numbers
+
+No Qwen compute is to be implemented until this file is complete. Gap 7 of
+docs/PLAN-MAINSTREAM-GGUF.md places this measurement ahead of the matmul gap for
+exactly that reason: the ordering is the kind of fact that is cheap to get wrong
+and invisible in a model that scores plausibly.
