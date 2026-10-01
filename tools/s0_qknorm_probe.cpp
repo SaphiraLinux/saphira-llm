@@ -60,7 +60,10 @@ static std::string op_name_local(int op) {
         case GGML_OP_SILU_BACK:  return "SILU_BACK";
         case GGML_OP_GET_ROWS:   return "GET_ROWS";
         case GGML_OP_NORM:       return "NORM";
-        default: { char b[32]; snprintf(b, sizeof b, "OP%d", op); return b; }
+        case GGML_OP_MUL:        return "MUL";
+        case GGML_OP_DUP:        return "DUP";
+        case GGML_OP_CPY:        return "CPY";
+        default: { char b[32]; snprintf(b, sizeof b, "UNMAPPED_OP%d", op); return b; }
     }
 }
 static std::string norm_name(const char * raw) {
@@ -217,50 +220,43 @@ int main(int argc, char ** argv) {
         if (normed == NULL || roped == NULL) {
             printf("  no graph-identity pair; REFUSING\n"); ++bad; continue;
         }
-        /* PRODUCER SELECTED ARITHMETICALLY, NOT BY HEURISTIC.
+        /* TRAVERSE src[0] BACKWARDS, ONE EDGE AT A TIME.
          *
-         * ggml reuses storage, so one address carries several ops in sequence:
-         * attn_norm, then the Q/K projection, then the head norm, then RoPE.
-         * "Earliest on this address" and "latest before the head norm" both pick
-         * something, and neither is guaranteed to be the projection output --
-         * for K it was not, and the arithmetic caught it. So every earlier event
-         * on this address is offered as a candidate and RMSNorm's own identity
-         * out = in * weight * inv_rms selects the correct one. The rule is
-         * verified by the reconstruction rather than assumed. */
-        const Ev * producer = NULL; double prod_err = 1e30;
+         * The previous approach searched every event sharing an ADDRESS, which
+         * conflates distinct ops because ggml reuses storage: attn_norm, the
+         * projection and the head norm can all land on one address. Instead walk
+         * the graph itself. The normed node is a view/dup whose src[0] is the
+         * RMS_NORM result; that node's own src[0] is the projection output. Each
+         * hop is resolved by pointer equality on src[0], so the chain is graph
+         * structure and never an address coincidence.
+         *
+         * Every hop is snapshotted in its OWN eval callback, so the bytes are
+         * those that existed when that node ran, regardless of what a later
+         * in-place op did to the same storage. */
+        const Ev * n1 = NULL;   /* the RMS_NORM result feeding the normed node */
         for (size_t k = 0; k < g_evs.size(); ++k) {
-            const Ev & c = g_evs[k];
-            if (c.ptr != normed->ptr || c.seq >= normed->seq) { continue; }
-            if ((int) c.bytes.size() != S.nel) { continue; }
-            const std::vector<float> h = head_of(c.bytes, hd, S.h);
-            double ss = 0;
-            for (int i = 0; i < hd; ++i) { ss += (double) h[i] * h[i]; }
-            const float inv = 1.0f / sqrtf((float)(ss / hd) + 1e-6f);
-            const std::vector<float> pn = head_of(normed->bytes, hd, S.h);
-            std::vector<float> wt;
-            { std::vector<float> full;
-              char nm[128];
-              snprintf(nm, sizeof nm, "blk.0.attn_%c_norm.weight",
-                       (S.nname[0] >= 'A' && S.nname[0] <= 'Z') ? S.nname[0] + 32 : S.nname[0]);
-              if (!read_norm_weight(path, nm, hd, full)) { continue; } wt = full; }
-            double worst = 0;
-            for (int i = 0; i < hd; ++i) {
-                const double rec = (double) h[i] * wt[i] * inv;
-                worst = std::max(worst, fabs(rec - pn[i]));
+            if (g_evs[k].ptr == normed->src0 && g_evs[k].seq < normed->seq) {
+                if (n1 == NULL || g_evs[k].seq < n1->seq) { n1 = &g_evs[k]; }
             }
-            if (worst < prod_err) { prod_err = worst; producer = &c; }
         }
-        printf("  candidate producer: seq=%d op=%s reconstruction err=%.6g\n",
-               producer ? producer->seq : -1,
-               producer ? op_name_local(producer->opid).c_str() : "NONE", prod_err);
-        printf("  normed : seq=%d op=%-8s ptr=%p ne=[%lld,%lld]\n", normed->seq,
-               op_name_local(normed->opid).c_str(), normed->ptr, (long long) normed->ne[0], (long long) normed->ne[1]);
-        printf("  roped  : seq=%d op=%-8s src0=%p  edge(src0==normed.ptr)=%s\n", roped->seq,
-               op_name_local(roped->opid).c_str(), roped->src0, roped->src0 == normed->ptr ? "YES" : "NO");
-        printf("  producer: seq=%d op=%-8s ptr=%p  <- pre-norm snapshot\n",
-               producer ? producer->seq : -1, producer ? op_name_local(producer->opid).c_str() : "NONE",
-               producer ? producer->ptr : NULL);
-        if (producer == NULL) { printf("  no producer; pre-norm UNRECOVERED\n"); ++bad; continue; }
+        const Ev * n2 = NULL;   /* the projection feeding the RMS_NORM         */
+        if (n1 != NULL) {
+            for (size_t k = 0; k < g_evs.size(); ++k) {
+                if (g_evs[k].ptr == n1->src0 && g_evs[k].seq < n1->seq) {
+                    if (n2 == NULL || g_evs[k].seq < n2->seq) { n2 = &g_evs[k]; }
+                }
+            }
+        }
+        printf("  chain: normed(seq=%d,op=%s[id=%d]).src0 -> %s\n", normed->seq,
+               op_name_local(normed->opid).c_str(), normed->opid,
+               n1 ? op_name_local(n1->opid).c_str() : "NONE");
+        if (n1 != NULL) {
+            printf("  chain: rmsnorm(seq=%d,op=%s).src0 -> %s\n", n1->seq,
+                   op_name_local(n1->opid).c_str(),
+                   n2 ? op_name_local(n2->opid).c_str() : "NONE");
+        }
+        const Ev * producer = n2;
+        if (producer == NULL) { printf("  no projection node found; pre-norm VOID\n"); ++bad; continue; }
 
         Seal & Z = seals[si];
         Z.label = S.nname; Z.layer = 0; Z.head = S.h; Z.pos = pos; Z.n_heads = S.heads;
@@ -268,40 +264,38 @@ int main(int argc, char ** argv) {
         Z.post_norm = head_of(normed->bytes, hd, S.h);
         Z.post_rope = head_of(roped->bytes, hd, S.h);
         Z.normed_ptr = normed->ptr; Z.roped_ptr = roped->ptr; Z.producer_ptr = producer->ptr;
-        Z.pre_op = op_name_local(producer->opid); Z.norm_op = op_name_local(normed->opid); Z.rope_op = op_name_local(roped->opid);
-        char nm[128];
-        snprintf(nm, sizeof nm, "blk.0.attn_%c_norm.weight",
-                 (S.nname[0] >= 'A' && S.nname[0] <= 'Z') ? S.nname[0] + 32 : S.nname[0]);
-        if (!read_norm_weight(path, nm, hd, Z.w)) { printf("  weights MISSING for %s\n", nm); ++bad; }
-
-        /* IS THE "PRE-NORM" VECTOR ACTUALLY THE Q-PROJECTION OUTPUT?
-         *
-         * Storage is reused by ggml, so the earliest snapshot on an address can
-         * be an EARLIER op entirely -- here attn_norm, which normalises the
-         * residual before the Q projection, not the projection's own output.
-         * That is indistinguishable by name, position or pointer, so it is
-         * settled ARITHMETICALLY: RMSNorm is out = in * weight * inv_rms, with
-         * inv_rms from in. If this candidate is the true pre-norm vector, the
-         * reconstruction must reproduce post_norm to float tolerance. If it does
-         * not, the candidate is the wrong tensor and the capture is void. */
-        { double ss = 0;
-          for (int i = 0; i < hd; ++i) { ss += (double) Z.pre[i] * Z.pre[i]; }
-          const float inv = 1.0f / sqrtf((float)(ss / hd) + 1e-6f);
-          double worst = 0;
-          for (int i = 0; i < hd; ++i) {
-              const double rec = (double) Z.pre[i] * Z.w[i] * inv;
-              const double d2 = fabs(rec - Z.post_norm[i]);
-              worst = std::max(worst, d2);
-          }
-          printf("  PRE-NORM CHECK max|reconstructed-post_norm| = %.6g %s\n", worst,
-                 worst < 1e-2 ? "PASS (this really is the norm input)"
-                              : "FAIL (WRONG TENSOR: not the projection output)");
-          if (!(worst < 1e-2)) { ++bad; } }
+        Z.pre_op = op_name_local(producer->opid); Z.norm_op = op_name_local(normed->opid);
+        Z.rope_op = op_name_local(roped->opid);
+        { char nm[128];
+          snprintf(nm, sizeof nm, "blk.0.attn_%c_norm.weight",
+                   (S.nname[0] >= 'A' && S.nname[0] <= 'Z') ? S.nname[0] + 32 : S.nname[0]);
+          if (!read_norm_weight(path, nm, hd, Z.w)) { printf("  weights MISSING for %s\n", nm); ++bad; } }
 
         stats("pre-RMSNorm",  Z.pre);
         stats("norm weights",  Z.w);
         stats("post-RMSNorm", Z.post_norm);
         stats("post-RoPE",    Z.post_rope);
+
+        /* IS THE TRAVERSED PRODUCER REALLY THE NORM INPUT?
+         *
+         * Graph traversal says this MUL_MAT feeds this RMS_NORM. That is a claim
+         * about structure, so it is confirmed arithmetically: RMSNorm is
+         * out = in * weight * inv_rms with inv_rms from in. If the reconstruction
+         * reproduces post-RMSNorm, the producer is the true input. Traversal
+         * alone would have accepted the earlier wrong-tensor result, and only
+         * this check exposed that. */
+        { double ss = 0;
+          for (int i = 0; i < hd; ++i) { ss += (double) Z.pre[i] * Z.pre[i]; }
+          const float inv = 1.0f / sqrtf((float)(ss / hd) + 1e-6f);
+          double worst = 0, scale = 0;
+          for (int i = 0; i < hd; ++i) { scale = std::max(scale, fabs((double) Z.post_norm[i])); }
+          for (int i = 0; i < hd; ++i) {
+              worst = std::max(worst, fabs((double) Z.pre[i] * Z.w[i] * inv - Z.post_norm[i]));
+          }
+          const double rel = worst / (scale > 0 ? scale : 1.0);
+          printf("  RMS RECONSTRUCTION max abs=%.6g relative to post_norm scale=%.6g = %.3g %s\n",
+                 worst, scale, rel, rel < 1e-3 ? "PASS" : "FAIL");
+          if (!(rel < 1e-3)) { ++bad; } }
 
         /* GATES */
         const uint64_t hp = fnv(Z.pre.data(), Z.pre.size() * 4);
