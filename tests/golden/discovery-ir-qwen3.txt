@@ -102,17 +102,18 @@ rms_eps=9.99999997e-07 rope_base=1000000
         - blk.0.attn_output.weight.bias ABSENT => bias=false
   RoPE               layer=0    (computed)
       head_dim=128  heads=32  kv_heads=8
-      pairing         : UNRESOLVED  (requires measurement from the reference graph)
+      pairing         : NEOX   [MEASURED from reference graph]
       base            : 1000000
       dim_count       : -1
       scaling         : none
       position_source : position index (pos), from inp_pos
-      evidence        : INFERRED (rule-based)
+      evidence        : MEASURED (read from artefact/reference graph)
         - rope applied to Q and K only, not V (graph)
         - qwen3.rope.freq_base=1000000.000000
         - qwen3.rope.dimension_count=ABSENT
         - qwen3.rope.scaling.type=none
-      UNRESOLVED      : pairing NOT derivable from the GGUF: NEOX vs GPT-style is a property of the reference graph, so it is MEASURED from the reference, not read here
+        - pairing=NEOX MEASURED from the reference graph: the ROPE node located by ggml op, its immediate producer snapshotted, both pairing hypotheses tested numerically
+        - not derived from general.architecture; the two models differ here despite both being decoder-only transformers
   GatedMLP           layer=0    ffn_gate.weight + ffn_up.weight + ffn_down.weight
       in/out features : 4096 / 12288
       scope           : gated (SwiGLU-family): gate and up share out_features, down returns to in_features

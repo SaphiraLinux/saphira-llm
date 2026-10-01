@@ -1,0 +1,22 @@
+compiling (quiet)
+running fresh binary
+events=1266
+
+== ROPE, LOCATED BY OP ==
+  rope node seq=7 ne=[128,32,1,1]
+  producer seq=6 op=MUL  head_dim=128  n_heads_dim1=32
+  PAIRING adjacent(k,k+1)  worst rel=3.284 <= NOT GPT pairing
+  PAIRING NEOX(k,k+64)    worst rel=1.061e-07 <= consistent with NEOX pairing
+  whole-head L2 rel=6.933e-09  rotation=YES
+  VERDICT pairing = NEOX (measured)   [MEASURED from the reference graph at pos=7]
+
+== FINAL PROJECTION SOURCE (weight sharing) ==
+  final MUL_MAT seq=1265  ne=[151936,1]
+  src[0] WEIGHT     : "output.weight"
+  src[1] activation : "result_norm"
+  SHARING: final projection reads output.weight -- weights are NOT shared.
+           MEASURED.
+  output.weight present = YES
+  token_embd.weight present = YES
+  => weight sharing is decided by tensor IDENTITY in the graph, not by whether
+     output.weight exists; a model may reuse token_embd with no separate tensor.

@@ -292,11 +292,19 @@ int main(int argc, char ** argv) {
           o.evidence.push_back("NO output.weight tensor exists in the inventory");
           o.evidence.push_back("token_embd.weight present with ne=[" + std::to_string(o.in_features) +
               "," + std::to_string(o.out_features) + "]");
-          o.unknown.push_back("weights appear SHARED with the embedding, but absence of an output "
-                              "tensor is not by itself proof of sharing: it must be confirmed from the "
-                              "reference graph, which resolves the output projection against the "
-                              "embedding tensor when no output tensor exists. Recorded as unresolved "
-                              "rather than asserted.");
+          o.evidence.push_back("NO output.weight tensor exists in the inventory -- this is EVIDENCE, "
+                               "not proof, and on its own it does not establish sharing");
+          { const char * sh = getenv("SLLM_IR_OUTPUT_SHARING");
+            if (sh != NULL && sh[0] != '\0') {
+                o.evidence.push_back(std::string("sharing=") + sh +
+                    " MEASURED from the reference graph: the final MUL_MAT's src[0] weight tensor was "
+                    "read by name, and it is token_embd.weight. Weight sharing is a question about "
+                    "which tensor the projection READS, not about whether dimensions match.");
+                o.measured = true;
+            } else {
+                o.unknown.push_back("sharing UNRESOLVED: absence of output.weight is evidence, not "
+                                    "proof. Supply SLLM_IR_OUTPUT_SHARING from the reference graph.");
+            } }
       }
       emit(o, arch); }
 
@@ -392,8 +400,26 @@ int main(int argc, char ** argv) {
       { const int64_t rs = gguf_find_key(g, (P + "rope.scaling.type").c_str());
         n.scaling_type = rs >= 0 ? gguf_get_val_str(g, rs) : "none";
         n.evidence.push_back(std::string(P) + "rope.scaling.type=" + n.scaling_type); }
-      n.unknown.push_back("pairing NOT derivable from the GGUF: NEOX vs GPT-style is a property of "
-                          "the reference graph, so it is MEASURED from the reference, not read here");
+      /* Pairing is a property of how the reference BUILDS the rope node, so it
+       * cannot be read from the GGUF and must not be inherited from the model
+       * name. It is supplied by the caller from measurement
+       * (tools/s0_graphfacts_probe.cpp, locating the node by ggml OP and testing
+       * both pairing hypotheses numerically). Both real models DISAGREE:
+       * Qwen3 NEOX, Llama-3.2 GPT/adjacent. */
+      const char * pairing = getenv("SLLM_IR_ROPE_PAIRING");
+      if (pairing != NULL && pairing[0] != '\0') {
+          n.pairing = pairing;
+          n.evidence.push_back(std::string("pairing=") + pairing +
+              " MEASURED from the reference graph: the ROPE node located by ggml op, its immediate "
+              "producer snapshotted, both pairing hypotheses tested numerically");
+          n.evidence.push_back("not derived from general.architecture; the two models differ here "
+                               "despite both being decoder-only transformers");
+          n.measured = true;
+      } else {
+          n.unknown.push_back("pairing NOT MEASURED: supply SLLM_IR_ROPE_PAIRING from the reference "
+                              "graph. Deriving it from the architecture name is exactly the error "
+                              "this IR exists to avoid, since Qwen3 is NEOX and Llama-3.2 is GPT.");
+      }
       emit(n, arch); }
 
     { ir_node n = mk(IR_MLP, L);

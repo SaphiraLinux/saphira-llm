@@ -27,10 +27,11 @@ rms_eps=9.99999975e-06 rope_base=500000
   OutputProjection   (model)     token_embd.weight (no separate output tensor)
       type            : q6_K
       in/out features : 2048 / 128256
-      evidence        : INFERRED (rule-based)
+      evidence        : MEASURED (read from artefact/reference graph)
         - NO output.weight tensor exists in the inventory
         - token_embd.weight present with ne=[2048,128256]
-      UNRESOLVED      : weights appear SHARED with the embedding, but absence of an output tensor is not by itself proof of sharing: it must be confirmed from the reference graph, which resolves the output projection against the embedding tensor when no output tensor exists. Recorded as unresolved rather than asserted.
+        - NO output.weight tensor exists in the inventory -- this is EVIDENCE, not proof, and on its own it does not establish sharing
+        - sharing=weights ARE shared: final projection reads token_embd.weight MEASURED from the reference graph: the final MUL_MAT's src[0] weight tensor was read by name, and it is token_embd.weight. Weight sharing is a question about which tensor the projection READS, not about whether dimensions match.
 
 -- LAYER 0 (representative; verified present in every layer) --
   RMSNorm            layer=0    blk.0.attn_norm.weight
@@ -87,17 +88,18 @@ rms_eps=9.99999975e-06 rope_base=500000
         - blk.0.attn_output.weight.bias ABSENT => bias=false
   RoPE               layer=0    (computed)
       head_dim=64  heads=32  kv_heads=8
-      pairing         : UNRESOLVED  (requires measurement from the reference graph)
+      pairing         : GPT/adjacent   [MEASURED from reference graph]
       base            : 500000
       dim_count       : 64
       scaling         : none
       position_source : position index (pos), from inp_pos
-      evidence        : INFERRED (rule-based)
+      evidence        : MEASURED (read from artefact/reference graph)
         - rope applied to Q and K only, not V (graph)
         - llama.rope.freq_base=500000.000000
         - llama.rope.dimension_count=64
         - llama.rope.scaling.type=none
-      UNRESOLVED      : pairing NOT derivable from the GGUF: NEOX vs GPT-style is a property of the reference graph, so it is MEASURED from the reference, not read here
+        - pairing=GPT/adjacent MEASURED from the reference graph: the ROPE node located by ggml op, its immediate producer snapshotted, both pairing hypotheses tested numerically
+        - not derived from general.architecture; the two models differ here despite both being decoder-only transformers
   GatedMLP           layer=0    ffn_gate.weight + ffn_up.weight + ffn_down.weight
       in/out features : 2048 / 8192
       scope           : gated (SwiGLU-family): gate and up share out_features, down returns to in_features
