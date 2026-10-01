@@ -1,0 +1,85 @@
+compiling (quiet)
+running fresh binary
+########## GEMMA2-2B ##########
+file = /var/lib/spoon/models/gemma2-2b/gemma-2-2b-it-Q4_K_M.gguf
+kv_pairs = 39   tensors = 288
+
+-- ARCHITECTURE-RELEVANT METADATA (tokenizer.* excluded) --
+  general.architecture                                 = "gemma2"
+  general.type                                         = "model"
+  general.name                                         = "Gemma 2 2b It"
+  general.finetune                                     = "it"
+  general.basename                                     = "gemma-2"
+  general.size_label                                   = "2B"
+  general.license                                      = "gemma"
+  general.tags                                         = <arr>
+  gemma2.context_length                                = 8192
+  gemma2.embedding_length                              = 2304
+  gemma2.block_count                                   = 26
+  gemma2.feed_forward_length                           = 9216
+  gemma2.attention.head_count                          = 8
+  gemma2.attention.head_count_kv                       = 4
+  gemma2.attention.layer_norm_rms_epsilon              = 9.99999997e-07
+  gemma2.attention.key_length                          = 256
+  gemma2.attention.value_length                        = 256
+  general.file_type                                    = 15
+  gemma2.attn_logit_softcapping                        = 50
+  gemma2.final_logit_softcapping                       = 30
+  gemma2.attention.sliding_window                      = 4096
+  general.quantization_version                         = 2
+  quantize.imatrix.file                                = "/models_out/gemma-2-2b-it-GGUF/gemma-2-2b-it.imatrix"
+  quantize.imatrix.dataset                             = "/training_dir/calibration_datav3.txt"
+  quantize.imatrix.entries_count                       = 182
+  quantize.imatrix.chunks_count                        = 128
+
+-- TOKENIZER TUPLE (the selector, all three legs) --
+  tokenizer.ggml.model                   = "llama"
+  tokenizer.ggml.pre                     = "default"
+  tokenizer.ggml.bos_token_id            = 2
+  tokenizer.ggml.eos_token_id            = 1
+  tokenizer.ggml.padding_token_id        = 0
+  tokenizer.ggml.unknown_token_id        = 3
+  tokenizer.ggml.add_bos_token           = true
+  tokenizer.ggml.add_eos_token           = false
+  tokenizer.ggml.add_space_prefix        = false
+  tokenizer.ggml.ignore_merges           ABSENT
+  tokenizer.ggml.tokens n                = 256000
+  tokenizer.ggml.merges                  = ABSENT
+
+-- TENSOR TYPE HISTOGRAM --
+  f32          105
+  q4_K         156
+  q6_K         27
+
+-- TENSOR INVENTORY, layer indices resolved --
+  max layer index = 25  => layer count = 26
+  attn_k.weight            layers=26   ne=[2304,1024]
+  attn_norm.weight         layers=26   ne=[2304,1]
+  attn_output.weight       layers=26   ne=[2048,2304]
+  attn_q.weight            layers=26   ne=[2304,2048]
+  attn_v.weight            layers=26   ne=[2304,1024]
+  ffn_down.weight          layers=26   ne=[9216,2304]
+  ffn_gate.weight          layers=26   ne=[2304,9216]
+  ffn_norm.weight          layers=26   ne=[2304,1]
+  ffn_up.weight            layers=26   ne=[2304,9216]
+  post_attention_norm.weight layers=26   ne=[2304,1]
+  post_ffw_norm.weight     layers=26   ne=[2304,1]
+
+-- NON-LAYER TENSORS --
+  output_norm.weight
+  token_embd.weight
+
+-- OPTIONAL PER-LAYER TENSORS: PRESENT OR ABSENT --
+  attn_q_norm.weight         ABSENT
+  attn_k_norm.weight         ABSENT
+  attn_q_norm.bias           ABSENT
+  attn_k_norm.bias           ABSENT
+  attn_q.bias                ABSENT
+  attn_k.bias                ABSENT
+  attn_v.bias                ABSENT
+  attn_output.bias           ABSENT
+  ffn_gate_inp.weight        ABSENT
+  ffn_norm.bias              ABSENT
+  attn_norm.bias             ABSENT
+  (a genuine per-layer tensor is verified at layer 0 AND its count
+   matches the layer count above, so it is not a single stray tensor)
