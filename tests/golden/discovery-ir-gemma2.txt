@@ -176,11 +176,12 @@ rms_eps=9.99999997e-07 rope_base=-1
       in/out features : 2304 / 9216
       scope           : gated (SwiGLU-family): gate and up share out_features, down returns to in_features
       evidence        : MEASURED (read from artefact/reference graph)
-        - ffn_gate ne=[2304,9216]
+        - ffn_gate ne=[2304,9216]  GATE TENSOR EXISTS AT THIS LAYER, measured by direct lookup, so the gated claim is earned
         - ffn_up   ne=[2304,9216]  same shape as gate => parallel projections
         - ffn_down ne=[9216,2304]  transpose of the gate shape => contraction
         - gemma2.feed_forward_length=9216
         - ffn_gate_inp.weight ABSENT => not MoE, and not inferred from the architecture name
+        - NOT claimed: which activation the gate uses. SwiGLU and GeGLU are the SAME op with a different activation, and nothing in this artefact identifies it.
   SelectiveScan      layer=0    (none)
       status          : ABSENT -- no ssm_a, ssm_in or ssm_conv1d tensor exists, so
                        there is no recurrence to describe
@@ -227,7 +228,7 @@ rms_eps=9.99999997e-07 rope_base=-1
   'not observed' is NEVER 'does not exist'. Absence is a claim ABOUT A SCOPE,
   and the scope is printed on every row.
 
-  totals: 17 measured/present, 0 inferred, 3 unresolved, 1 unobservable
+  totals: 18 measured/present, 0 inferred, 3 unresolved, 1 unobservable
 
   Field          : Embedding
     Value        : PRESENT
@@ -364,6 +365,14 @@ rms_eps=9.99999997e-07 rope_base=-1
     Confidence   : measured
     Claim allowed: a GatedMLP op exists at layer 0, with the parameters listed above resolved from the artefact
     NOT claimed  : no claim about any parameter shown as -1 or UNRESOLVED, and no claim about other layers
+
+  Field          : ffn.gated_mlp
+    Value        : PRESENT (gate tensor measured at this layer)
+    Evidence src : tensor inventory (direct lookup)
+    Layer        : 0
+    Confidence   : measured
+    Claim allowed: a GATED MLP exists at layer 0
+    NOT claimed  : NOT claimed: a specific activation function, and NOT claimed any gate elsewhere in the model
 
   Field          : ssm.selective_scan
     Value        : ABSENT

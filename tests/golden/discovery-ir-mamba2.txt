@@ -112,10 +112,8 @@ rms_eps=9.99999975e-06 rope_base=-1
                        is none. Emitting a RoPE node would invent one.
   GatedMLP           layer=0    (none)
       status          : ABSENT -- feed_forward_length is 0 and no FFN tensor exists
-      evidence        : MEASURED -- NO FFN TENSOR EXISTS AT THIS LAYER, so no gated MLP is
-                       emitted. Presence elsewhere in the model does not license it
-                       here: an op present in SOME layers must not be emitted for every
-                       layer, and that rule is enforced layer-locally.
+      evidence        : MEASURED -- NO FFN TENSOR EXISTS AT THIS LAYER. Presence
+                       elsewhere in the model does not license one here.
   DepthwiseConv1D    layer=0    blk.0.ssm_conv1d.weight
       type            : f32
       in/out features : 4 / 1792
@@ -264,8 +262,8 @@ rms_eps=9.99999975e-06 rope_base=-1
     Evidence src : tensor inventory (direct lookup)
     Layer        : 0
     Confidence   : measured
-    Claim allowed: no FFN tensor (ffn_gate / ffn_up / ffn_down) exists at layer 0, measured by direct lookup in the tensor inventory
-    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks FFN tensor (ffn_gate / ffn_up / ffn_down) entirely
+    Claim allowed: no FFN tensor (ffn_gate / fn_up / ffn_down) exists at layer 0, measured by direct lookup in the tensor inventory
+    NOT claimed  : no claim about OTHER layers, and no claim that the model lacks FFN tensor (ffn_gate / fn_up / ffn_down) entirely
 
   Field          : DepthwiseConv1D
     Value        : PRESENT

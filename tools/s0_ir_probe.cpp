@@ -31,7 +31,7 @@
 #include <algorithm>
 
 enum ir_kind { IR_UNKNOWN = 0, IR_EMBEDDING, IR_RMSNORM, IR_LINEAR, IR_ROPE,
-               IR_HEADSPLIT, IR_ATTENTION, IR_RESIDUAL, IR_MLP, IR_OUTPUT, IR_SOFTCAP,
+               IR_HEADSPLIT, IR_ATTENTION, IR_RESIDUAL, IR_MLP, IR_DENSE_MLP, IR_OUTPUT, IR_SOFTCAP,
                IR_ROUTER, IR_EXPERTFFN, IR_SSM, IR_CONV1D, IR_SCAN };
 
 static const char * kind_name(ir_kind k) {
@@ -45,6 +45,7 @@ static const char * kind_name(ir_kind k) {
         case IR_ATTENTION:  return "Attention";
         case IR_RESIDUAL:   return "ResidualAdd";
         case IR_MLP:        return "GatedMLP";
+        case IR_DENSE_MLP:  return "DenseMLP";
         case IR_OUTPUT:     return "OutputProjection";
         case IR_SOFTCAP:    return "SoftCap";
         case IR_ROUTER:     return "ExpertRouter";
@@ -186,7 +187,7 @@ static void emit(const ir_node & n, const char * arch) {
         printf("      scaling         : %s\n", n.scaling_type.c_str());
         printf("      position_source : %s\n", n.position_source.c_str());
     }
-    if (n.kind == IR_MLP) { printf("      scope           : %s\n", n.scope.c_str()); }
+    if (n.kind == IR_MLP || n.kind == IR_DENSE_MLP) { printf("      scope           : %s\n", n.scope.c_str()); }
     if (n.kind == IR_ATTENTION) {
         printf("      pattern         : %s\n", n.pairing.c_str());
         if (n.rope_base >= 0) { printf("      window          : %.0f\n", n.rope_base); }
@@ -1396,13 +1397,48 @@ int main(int argc, char ** argv) {
           n.scope = "gated, per expert, on the router-selected subset";
           emit(n, arch); }
     } else if (!AT("ffn_gate.weight", L) && !AT("ffn_down.weight", L) && !AT("ffn_up.weight", L)) {
-        printf("  GatedMLP           layer=%-3d  (none)\n", L);
+        printf("  %-18s layer=%-3d  (none)\n", "GatedMLP", L);
         printf("      status          : ABSENT -- feed_forward_length is %ld and no FFN tensor exists\n", ff);
-        printf("      evidence        : MEASURED -- NO FFN TENSOR EXISTS AT THIS LAYER, so no gated MLP is\n");
-        printf("                       emitted. Presence elsewhere in the model does not license it\n");
-        claim_absent("ffn.gated_mlp", L, "FFN tensor (ffn_gate / ffn_up / ffn_down)");
-        printf("                       here: an op present in SOME layers must not be emitted for every\n");
-        printf("                       layer, and that rule is enforced layer-locally.\n");
+        printf("      evidence        : MEASURED -- NO FFN TENSOR EXISTS AT THIS LAYER. Presence\n");
+        printf("                       elsewhere in the model does not license one here.\n");
+        claim_absent("ffn.gated_mlp", L, "FFN tensor (ffn_gate / fn_up / ffn_down)");
+    } else if (!AT("ffn_gate.weight", L)) {
+        /* DENSE FFN. The FFN tensors exist but there is NO GATE, so the
+         * mathematics is up-then-down, NOT gate*up-then-down. Those are
+         * DIFFERENT MATHEMATICS and therefore different ops under the rule that
+         * the same mathematics is the same op. Emitting GatedMLP here would name
+         * a tensor that does not exist in the artefact, which is fabrication of
+         * exactly the kind this project exists to prevent.
+         *
+         * The rule, stated so it generalises:
+         *     NO GATE EVIDENCE  ->  NO GatedMLP CLAIM
+         * It is not about SwiGLU versus GeGLU, which are the same op with a
+         * different activation. It is about whether a gate tensor exists at all.
+         * A future GeGLU or SwiGLU model with a real ffn_gate lands on GatedMLP; a
+         * GELU MLP or a dense MLP lands here; a parallel MLP needs its own op
+         * because its residual wiring differs; an expert FFN already has
+         * ExpertGatedFFN. Every one of those now has an honest place to land, and
+         * none of them can be reached by a partial match. */
+        ir_node n = mk(IR_DENSE_MLP, L);
+        n.tensor = "ffn_up.weight + ffn_down.weight";
+        n.in_features = dims["ffn_up.weight"].first;
+        n.out_features = dims["ffn_down.weight"].first;
+        n.scope = "dense, ungated: up then down, no multiplicative gate";
+        n.evidence.push_back("ffn_gate.weight ABSENT AT THIS LAYER -- measured by direct lookup, "
+            "so no gate tensor is named and GatedMLP is NOT emitted");
+        n.evidence.push_back("ffn_up   ne=[" + std::to_string(dims["ffn_up.weight"].first) + "," +
+            std::to_string(dims["ffn_up.weight"].second) + "]");
+        n.evidence.push_back("ffn_down ne=[" + std::to_string(dims["ffn_down.weight"].first) + "," +
+            std::to_string(dims["ffn_down.weight"].second) + "]  contraction back to in_features");
+        n.evidence.push_back(std::string(P) + "feed_forward_length=" + std::to_string(ff));
+        n.evidence.push_back("NOT claimed: which activation or nonlinearity this dense FFN uses. "
+            "No activation tensor or metadata key identifies it in this artefact, so the "
+            "activation is UNRESOLVED, not GELU and not ReLU.");
+        n.measured = true; emit(n, arch);
+        claim("ffn.dense_mlp", "PRESENT (ungated)", "tensor inventory (direct lookup)", "measured",
+              std::to_string(L),
+              "a DENSE (ungated) MLP exists at layer " + std::to_string(L) + ": up then down",
+              "NOT claimed: a gated MLP here, and NOT claimed any particular activation function");
     } else {
         ir_node n = mk(IR_MLP, L);
         n.tensor = "ffn_gate.weight + ffn_up.weight + ffn_down.weight";
@@ -1410,7 +1446,8 @@ int main(int argc, char ** argv) {
       n.out_features = dims["ffn_gate.weight"].second;
       n.scope = "gated (SwiGLU-family): gate and up share out_features, down returns to in_features";
       n.evidence.push_back("ffn_gate ne=[" + std::to_string(dims["ffn_gate.weight"].first) + "," +
-          std::to_string(dims["ffn_gate.weight"].second) + "]");
+          std::to_string(dims["ffn_gate.weight"].second) + "]  GATE TENSOR EXISTS AT THIS LAYER, "
+          "measured by direct lookup, so the gated claim is earned");
       n.evidence.push_back("ffn_up   ne=[" + std::to_string(dims["ffn_up.weight"].first) + "," +
           std::to_string(dims["ffn_up.weight"].second) + "]  same shape as gate => parallel projections");
       n.evidence.push_back("ffn_down ne=[" + std::to_string(dims["ffn_down.weight"].first) + "," +
@@ -1418,7 +1455,14 @@ int main(int argc, char ** argv) {
       n.evidence.push_back(std::string(P) + "feed_forward_length=" + std::to_string(ff));
       n.evidence.push_back("ffn_gate_inp.weight ABSENT => not MoE, and not inferred from the "
                            "architecture name");
-      n.measured = true; emit(n, arch); }
+      n.evidence.push_back("NOT claimed: which activation the gate uses. SwiGLU and GeGLU are the "
+          "SAME op with a different activation, and nothing in this artefact identifies it.");
+      n.measured = true; emit(n, arch);
+      claim("ffn.gated_mlp", "PRESENT (gate tensor measured at this layer)",
+            "tensor inventory (direct lookup)", "measured", std::to_string(L),
+            "a GATED MLP exists at layer " + std::to_string(L),
+            "NOT claimed: a specific activation function, and NOT claimed any gate elsewhere in the model");
+    }
 
     emit_ssm_block(g, P, dims, types, L, arch);
 

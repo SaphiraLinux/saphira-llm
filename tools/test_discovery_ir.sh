@@ -402,7 +402,6 @@ present /tmp/n_mamba.txt  SelectiveScan "O12 Mamba-2 DOES emit SelectiveScan (ev
 # ---- P: HETEROGENEOUS TOPOLOGY + LAYER-LOCAL ABSENCE -----------------------
 NH=/var/lib/spoon/models/nemotron-h-8b/nemotron-h-8b-q2_k.gguf
 if [ -f "$NH" ]; then
-  ./tools/run_s0_probe.sh tools/s0_ir_probe.cpp "$NH" > /tmp/p_nh.txt 2>/dev/null
   P1="NEOX" ROUT="" HD="" RS="" RB="" ./tools/run_s0_probe.sh tools/s0_ir_probe.cpp "$NH" > /tmp/p_nh.txt 2>/dev/null
 
   # The headline: the layer graph changes across depth.
@@ -430,8 +429,19 @@ if [ -f "$NH" ]; then
   if [ $? -eq 0 ]; then ok "P8 attention body DOES emit Attention" 0; else ok "P8 attention body DOES emit Attention" 1; fi
   awk '/^-- LAYER 0 /,0' /tmp/p_nh.txt | grep -qE '^  SelectiveScan +layer=0 +ssm_in'
   if [ $? -eq 0 ]; then ok "P9 SSM body DOES emit SelectiveScan" 0; else ok "P9 SSM body DOES emit SelectiveScan" 1; fi
-  awk '/^-- LAYER 1 /,/^-- LAYER 0 /' /tmp/p_nh.txt | grep -qE '^  GatedMLP +layer=1 +ffn_gate'
-  if [ $? -eq 0 ]; then ok "P10 FFN body DOES emit GatedMLP" 0; else ok "P10 FFN body DOES emit GatedMLP" 1; fi
+  # Nemotron-H's FFN layers are DENSE: ffn_up + ffn_down, NO ffn_gate. The rule
+  # is NO GATE EVIDENCE -> NO GatedMLP CLAIM, so the honest op is DenseMLP and
+  # GatedMLP must NOT appear. P10 previously asserted the opposite -- it demanded
+  # GatedMLP at a layer with no gate tensor -- which is how the mislabel survived
+  # a test suite. A test can encode the wrong invariant.
+  awk '/^-- LAYER 1 /,/^-- LAYER 0 /' /tmp/p_nh.txt | grep -qE '^  DenseMLP +layer=1 +ffn_up'
+  if [ $? -eq 0 ]; then ok "P10 dense FFN body emits DenseMLP" 0; else ok "P10 dense FFN body emits DenseMLP" 1; fi
+  awk '/^-- LAYER 1 /,/^-- LAYER 0 /' /tmp/p_nh.txt | grep -qE '^  GatedMLP +layer=1 '
+  if [ $? -ne 0 ]; then ok "P13 dense FFN body emits NO GatedMLP claim" 0; else ok "P13 dense FFN body emits NO GatedMLP claim" 1; fi
+  # The gate tensor must not be NAMED anywhere it does not exist.
+  if grep -q 'ffn_gate.weight' <(awk '/^-- LAYER 1 /,/^-- LAYER 0 /' /tmp/p_nh.txt | grep -E '^  (DenseMLP|GatedMLP) '); then
+    ok "P14 no ffn_gate.weight named at a layer lacking one" 1
+  else ok "P14 no ffn_gate.weight named at a layer lacking one" 0; fi
   # A name must not be taken as locality. attn_norm sits on all 52 layers here,
   # including pure-SSM and pure-FFN layers, so despite its NAME it is a generic
   # residual norm and NOT attention-local.
@@ -458,6 +468,32 @@ if [ -f "$NH" ]; then
   if [ $? -eq 0 ]; then ok "P15 non-vacuity: SSM absent at layer 0 -> SelectiveScan absent there" 0; else ok "P15 non-vacuity: SSM absent at layer 0 -> SelectiveScan absent there" 1; fi
   cp /tmp/ir7.bak tools/s0_ir_probe.cpp
 fi
+
+
+# ---- R: THE GATE-EVIDENCE RULE ---------------------------------------------
+# NO GATE EVIDENCE -> NO GatedMLP CLAIM.
+# Positive half first: Qwen3 DOES have ffn_gate at layer 0, so GatedMLP is earned.
+# Without this, the non-vacuity check below would pass on an emitter that had
+# simply stopped emitting gated MLPs altogether.
+./tools/run_s0_probe.sh tools/s0_ir_probe.cpp "$QW" > /tmp/r_gated.txt 2>/dev/null
+grep -qE '^  GatedMLP +layer=0 +ffn_gate' /tmp/r_gated.txt
+if [ $? -eq 0 ]; then ok "R1 GatedMLP emitted where a gate tensor EXISTS" 0; else ok "R1 GatedMLP emitted where a gate tensor EXISTS" 1; fi
+grep -qE '^  DenseMLP +layer=0 ' /tmp/r_gated.txt
+if [ $? -ne 0 ]; then ok "R2 no DenseMLP where a gate exists" 0; else ok "R2 no DenseMLP where a gate exists" 1; fi
+# NON-VACUITY: remove the gate tensor at layer 0 and the claim must flip to
+# DenseMLP. This proves the rule is EVIDENCE-DRIVEN, not a hardcoded preference.
+cp tools/s0_ir_probe.cpp /tmp/ir_r.bak
+sed -i 's|g_at_layer.insert("blk." + idx + "." + tn_.substr(d2 + 1));|{ std::string rr = "blk." + idx + "." + tn_.substr(d2 + 1); if (rr != "blk.0.ffn_gate.weight") g_at_layer.insert(rr); }|' tools/s0_ir_probe.cpp
+./tools/run_s0_probe.sh tools/s0_ir_probe.cpp "$QW" > /tmp/r_nogate.txt 2>/dev/null
+grep -qE '^  DenseMLP +layer=0 +ffn_up' /tmp/r_nogate.txt
+if [ $? -eq 0 ]; then ok "R3 gate removed -> GatedMLP claim flips to DenseMLP" 0; else ok "R3 gate removed -> GatedMLP claim flips to DenseMLP" 1; fi
+grep -A8 '^  DenseMLP .*layer=0' /tmp/r_nogate.txt | grep -q 'ffn_gate.weight ABSENT AT THIS LAYER'
+if [ $? -eq 0 ]; then ok "R4 the absent gate is stated, not merely implied" 0; else ok "R4 the absent gate is stated, not merely implied" 1; fi
+grep -q 'NOT claimed: which activation' /tmp/r_nogate.txt
+if [ $? -eq 0 ]; then ok "R5 dense MLP refuses to claim an activation" 0; else ok "R5 dense MLP refuses to claim an activation" 1; fi
+grep -q 'Field          : ffn.dense_mlp' /tmp/r_nogate.txt
+if [ $? -eq 0 ]; then ok "R6 dense MLP appears in the claim ledger" 0; else ok "R6 dense MLP appears in the claim ledger" 1; fi
+cp /tmp/ir_r.bak tools/s0_ir_probe.cpp
 
 # ---- Q: MoE LAYER-LOCALITY negatives (added BEFORE any hybrid-MoE support) ----
 OL=/var/lib/spoon/models/olmoe-1b7b/olmoe-q4_k_m.gguf
