@@ -51,12 +51,12 @@ TESTBIN  = saphira-llm-test
 
 CORE_SRC = src/status.c src/log.c src/isa.c src/gguf.c src/kernel_probe.c \
            src/eval.c src/i2s_convert.c src/qat.c \
-           src/topology.c src/thread.c src/quant.c src/ops.c src/unicode_data.c src/i2s_gemm.c src/tokenizer.c src/forward.c
+           src/topology.c src/thread.c src/quant.c src/dispatch.c src/ops.c src/unicode_data.c src/i2s_gemm.c src/tokenizer.c src/forward.c
 MAIN_SRC = src/main.c
 TEST_SRC = tests/main.c tests/test_isa.c tests/test_gguf.c tests/test_thread.c \
             tests/test_eval.c tests/test_i2s_convert.c tests/test_i2s_hermetic.c tests/test_qat.c tests/test_lifecycle.c tests/test_export.c \
             tests/test_ops.c tests/test_i2s.c tests/test_tokenizer.c tests/test_forward.c \
-            tests/test_phase5.c tests/test_dot_f16.c tests/test_quant_k.c tests/test_gemv.c
+            tests/test_phase5.c tests/test_dot_f16.c tests/test_quant_k.c tests/test_gemv.c tests/test_dispatch.c
 
 CORE_OBJ = $(CORE_SRC:%.c=$(OBJDIR)/%.o)
 MAIN_OBJ = $(MAIN_SRC:%.c=$(OBJDIR)/%.o)
