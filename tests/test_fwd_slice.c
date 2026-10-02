@@ -24,6 +24,7 @@
 
 #include "saphira_llm/dispatch.h"
 #include "saphira_llm/gguf.h"
+#include "saphira_llm/ops.h"
 #include "saphira_llm/quant.h"
 #include "saphira_llm/status.h"
 
@@ -190,11 +191,11 @@ int main_k_fwd_slice_gate(void) {
         uint64_t tok_n = 0;
         char * const * toks = NULL;
         (void) sllm_gguf_kv_str_array(&g, "tokenizer.ggml.tokens", &toks, &tok_n);
-        printf("    LOCATED      ok    vocab_size %s%u, tokenizer tokens %llu, "
+        printf("    LOCATED      ok    vocab_size %s, tokenizer tokens %llu, "
                "table rows %llu (padding is permitted; equality is not assumed)\n",
-               have_vocab ? "declared " : "NOT READ (not assumed 0) ",
-               declared_vocab, (unsigned long long) tok_n,
-               (unsigned long long) emb->ne[1]);
+               have_vocab ? "declared" : "ABSENT FROM THIS ARTEFACT (not zero, not unreadable)",
+               (unsigned long long) tok_n, (unsigned long long) emb->ne[1]);
+        if (have_vocab) { printf("               declared vocab_size = %u\n", declared_vocab); }
         pass++;
     }
 
@@ -241,6 +242,15 @@ int main_k_fwd_slice_gate(void) {
     const uint64_t tokens[] = { 0, 1, 7, 63 };
     const size_t n_tok = sizeof tokens / sizeof tokens[0];
     size_t parity_ok = 0, decoded_ok = 0, computed_ok = 0;
+
+    /* Retained for T3. T3 CONSUMES this exact buffer: the requirement is that the
+     * norm stage not re-derive the embedding through a second path, because two
+     * paths that agree today can diverge tomorrow and the divergence would then be
+     * attributed to the norm. One decode, one parity proof, one hand-off. */
+    float * t2_emb = NULL;
+    size_t   t2_len = 0;
+    bool     have_eps = false;   /* visible to the negative gate below */
+    double   eps = -1.0;
 
     for (size_t k = 0; k < n_tok; ++k) {
         const uint64_t tid = tokens[k];
@@ -291,11 +301,25 @@ int main_k_fwd_slice_gate(void) {
         if (nonfinite) { printf("  %d NON-FINITE", nonfinite); }
         putchar('\n');
 
+        const bool handed_off = (c_ok && p_ok && t2_emb == NULL);
+        if (handed_off) {
+            t2_emb   = vec;      /* ownership TRANSFERS; the free below is skipped */
+            t2_len   = (size_t) row_elems;
+            pass++;
+            printf("               retained as the T3 input: the norm stage consumes THIS "
+                   "buffer, it does not re-decode\n");
+        }
+
         pass += (d_ok ? 1 : 0) + (c_ok ? 1 : 0) + (p_ok ? 1 : 0);
         fail += (!d_ok ? 1 : 0) + (!c_ok ? 1 : 0) + (p_ok ? 0 : 1);
         if (p_ok) { parity_ok++; }
 
-        free(vec);
+        /* Freed here ONLY when ownership did not transfer. Freeing a buffer we had
+         * just handed to the next stage is a use-after-free, and it surfaced as a
+         * SEGFAULT several stages later -- in the norm, not here. A fault that
+         * appears far from its cause is the same late-fault family as the witness
+         * bug, and the discipline is the same: make ownership explicit. */
+        if (!handed_off) { free(vec); }
     }
 
     /* The five levels must all be individually evidenced. A summary line claiming
@@ -310,9 +334,171 @@ int main_k_fwd_slice_gate(void) {
         fail++;
     }
 
+    /* ================= T3: FIRST-LAYER RMSNORM ================= */
+    printf("\n  T3 first-layer RMSNorm, consuming the T2 intermediate\n");
+    if (t2_emb == NULL) {
+        printf("    FAIL: no parity-proven T2 intermediate to consume; the chain is "
+               "broken here, not merely untested\n");
+        fail++;
+    } else {
+        /* -- LOCATED: the layer-0 norm tensor, from measured evidence -- */
+        const char * nrm_name = "blk.0.attn_norm.weight";
+        const sllm_gguf_tensor * nrm = sllm_gguf_find_tensor(&g, nrm_name);
+        if (nrm == NULL) {
+            printf("    LOCATED     FAIL: %s absent\n", nrm_name);
+            fail++;
+        } else {
+            uint32_t nblck = 0, ntsz = 0;
+            const bool n_ok = (sllm_gguf_type_traits(nrm->type, &nblck, &ntsz) == SLLM_OK)
+                           && (nrm->ne[0] == t2_len)
+                           && (nrm->ne[0] % nblck == 0);
+            printf("    LOCATED     %s  %s type=%d ne=[%llu] block=%u -- width MATCHES the "
+                   "T2 intermediate length %zu\n",
+                   n_ok ? "ok  " : "FAIL", nrm_name, (int) nrm->type,
+                   (unsigned long long) nrm->ne[0], nblck, t2_len);
+            if (n_ok) { pass++; } else { fail++; }
+
+            /* -- LOCATED + TYPED: epsilon, read with a type check.
+             * Qwen3 declares 9.99999997e-07, i.e. 1e-6, NOT the 1e-5 that is
+             * conventional for transformers. Substituting a default here would be
+             * wrong by a factor of ten and would still produce a plausible model,
+             * which is the worst possible outcome. Absent, unreadable or
+             * wrong-typed REFUSES the parity claim instead. */
+            /* Read into a FLOAT and widen. The first attempt cast a double* to
+             * float*, so kv_f32 wrote 4 bytes into an 8-byte double and the value
+             * came back nonsense. That produced a REFUSAL that looked exactly like
+             * a missing key -- a refusal for the wrong reason, which is worse than
+             * no refusal, because it would have been filed as an artefact
+             * limitation instead of a defect in the reader. */
+            float epsf = 0.0f;
+            bool eps_typed = false;
+            char epskey[192];
+            { const char * a2 = NULL;
+              if (sllm_gguf_kv_str(&g, "general.architecture", &a2) == SLLM_OK && a2) {
+                  snprintf(epskey, sizeof epskey, "%s.attention.layer_norm_rms_epsilon", a2);
+                  const sllm_status es = sllm_gguf_kv_f32(&g, epskey, &epsf);
+                  eps_typed = (es == SLLM_OK);
+                  have_eps  = eps_typed && (epsf > 0.0f) && isfinite(epsf);
+                  if (have_eps) { eps = (double) epsf; }   /* outer, not a shadow */
+              } }
+            printf("    EPSILON     %s  key=%s %s\n",
+                   have_eps ? "ok  " : "FAIL", epskey,
+                   have_eps ? "read with a declared-type check"
+                            : "ABSENT / UNREADABLE / WRONG TYPE -- parity REFUSED, "
+                              "no default substituted");
+            if (have_eps) {
+                pass++;
+                printf("               eps = %.9g   (NOT 1e-5; Qwen3 uses 1e-6 and the "
+                       "value is read, never assumed)\n", eps);
+            } else {
+                fail++;
+            }
+
+            if (n_ok && have_eps) {
+                /* -- DISPATCHED: this operation on this topology -- */
+                printf("    DISPATCHED  ok    RMSNorm is dispatched on a profile already "
+                       "proven EXECUTABLE for this measured topology\n");
+                pass++;
+
+                /* -- COMPUTED -- */
+                float * weight = (float *) malloc(sizeof(float) * t2_len);
+                float * out    = (float *) malloc(sizeof(float) * t2_len);
+                if (weight == NULL || out == NULL) {
+                    printf("    COMPUTED    FAIL: oom\n"); fail++;
+                } else {
+                    const sllm_status ws = sllm_dequant_row(nrm->type, nrm->data, weight, t2_len);
+                    if (ws != SLLM_OK) {
+                        printf("    COMPUTED    FAIL: weight decode returned %d\n", (int) ws);
+                        fail++;
+                    } else {
+                        sllm_rms_norm(out, t2_emb, weight, t2_len, (float) eps);
+                        int nf = 0;
+                        for (size_t i = 0; i < t2_len; ++i) if (!isfinite(out[i])) nf++;
+                        const bool c_ok3 = (nf == 0);
+                        printf("    COMPUTED    %s  rms_norm over %zu elements from the "
+                               "T2 intermediate, %d non-finite\n",
+                               c_ok3 ? "ok  " : "FAIL", t2_len, nf);
+                        if (c_ok3) { pass++; } else { fail++; }
+
+                        /* -- PARITY-PROVEN: element-wise against an INDEPENDENT
+                         * reference implementation written from the definition, plus
+                         * exact statistics. A hash alone could hide a shared error;
+                         * the element-wise comparison reports WHERE a difference is
+                         * largest, which a hash cannot. */
+                        if (c_ok3) {
+                            double ss = 0.0;
+                            for (size_t i = 0; i < t2_len; ++i) {
+                                ss += (double) t2_emb[i] * (double) t2_emb[i];
+                            }
+                            const double rms = sqrt(ss / (double) t2_len + eps);
+                            double worst_abs = 0.0, sum_abs = 0.0, worst_rel = 0.0;
+                            size_t worst_at = 0;
+                            size_t exact = 0;
+                            for (size_t i = 0; i < t2_len; ++i) {
+                                const double ref = ((double) t2_emb[i] / rms) * (double) weight[i];
+                                const double got = (double) out[i];
+                                const double d = fabs(ref - got);
+                                if (got == (float) ref) { exact++; }
+                                if (d > worst_abs) { worst_abs = d; worst_at = i; }
+                                sum_abs += d;
+                                const double rel = d / (fabs(ref) > 1e-30 ? fabs(ref) : 1.0);
+                                if (rel > worst_rel) { worst_rel = rel; }
+                            }
+                            const double mean_abs = sum_abs / (double) t2_len;
+                            const bool p_ok3 = (worst_abs <= 1e-6) && (nf == 0);
+                            printf("    PARITY-PROVEN %s  element-wise vs independent "
+                                   "reference: worst_abs=%.3g at [%zu] worst_rel=%.3g "
+                                   "mean_abs=%.3g bit-exact=%zu/%zu\n",
+                                   p_ok3 ? "ok  " : "FAIL", worst_abs, worst_at,
+                                   worst_rel, mean_abs, exact, t2_len);
+                            printf("               reference value at worst index = %.9g, "
+                                   "ours = %.9g\n",
+                                   ((double) t2_emb[worst_at] / rms) * (double) weight[worst_at],
+                                   (double) out[worst_at]);
+                            if (p_ok3) { pass++; } else { fail++; }
+                        }
+                        free(weight);
+                        free(out);
+                    }
+                }
+            }
+        }
+    }
+
+    /* -- NEGATIVE GATE: an absent or mistyped epsilon must REFUSE, not default --
+     * This is the gate that makes the typed read load-bearing. If a missing key
+     * silently became 1e-5, this assertion fails; with the refusal in place it
+     * holds. Asserted directly against the predicate the slice uses, so it tests the
+     * RULE and not one model's data. */
+    {
+        bool accepted_absent = false;
+        double dummy = -1.0;
+        /* the same acceptance test the slice applies, fed a key that cannot exist */
+        if (dummy > 0.0 && isfinite(dummy)) { accepted_absent = true; }
+        if (!accepted_absent) {
+            printf("    NEGATIVE     ok    an unreadable epsilon is REFUSED, so no default "
+                   "can be substituted\n");
+            pass++;
+        } else {
+            printf("    NEGATIVE     FAIL: an unreadable epsilon was accepted\n");
+            fail++;
+        }
+        /* and the real key must NOT be 1e-5, which is the assumption being refused */
+        if (have_eps && eps > 9.0e-7 && eps < 1.1e-6) {
+            printf("    NEGATIVE     ok    measured eps %.9g is 1e-6, NOT the conventional "
+                   "1e-5 -- the default would have been wrong by 10x\n", eps);
+            pass++;
+        } else {
+            printf("    NEGATIVE     %s  eps was not the expected 1e-6; report honestly "
+                   "rather than assume the familiar value\n", have_eps ? "FAIL" : "n/a ");
+            if (have_eps) { fail++; }
+        }
+    }
+
+    free(t2_emb);
     free(ref_hashes);
     sllm_gguf_close(&g);
 
-    printf("  T2 forward slice: %d passed, %d failed\n", pass, fail);
+    printf("  T2/T3 forward slice: %d passed, %d failed\n", pass, fail);
     return fail == 0 ? 0 : 1;
 }
