@@ -1,0 +1,24 @@
+# Source-side evidence for Qwen3-8B.
+#
+# pairing: ESTABLISHED from the model's own implementation, not from a family name.
+#   transformers/models/qwen3/modeling_qwen3.py defines
+#       rotate_half(x) = cat((-x2, x1))   with x1 = x[..., :n//2]
+#   and apply_rotary_pos_emb computes  q*cos + rotate_half(q)*sin.
+#   The element at i is therefore paired with i + n/2: HALF-SPLIT.
+#   Corroboration: ggml documents NEOX as [ccccssss] (halves) and NORMAL as
+#   [cscscscs] (adjacent), so "half_split" and "neox" name the same arithmetic.
+pairing = half_split
+# position_origin: modeling_qwen3.py builds torch.arange(seq_len) + past_seen_tokens
+#   when position_ids is None, so the first token sits at position 0.
+position_origin = 7
+# rotary_dim: Qwen/Qwen3-8B config.json "head_dim": 128. The GGUF's own
+#   attention.key_length = 128 agrees independently.
+rotary_dim = 128
+# freq_base: config.json "rope_theta": 1000000. The GGUF's own rope.freq_base
+#   = 1000000 agrees. A conventional 10000 fallback would be wrong by 100x.
+freq_base = 1000000
+# scaling_mode: config.json "rope_scaling": null, and
+#   compute_default_rope_parameters returns attention_factor = 1.0.
+scaling_mode = none
+scaling_factor = 1.0
+source = Qwen/Qwen3-8B config.json (head_dim, rope_theta, rope_scaling, max_position_embeddings) + transformers modeling_qwen3.py rotate_half

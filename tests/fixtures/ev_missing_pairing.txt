@@ -1,0 +1,8 @@
+# Source-side evidence for Qwen3-8B, established from the model's own
+# configuration and implementation. pairing is deliberately absent here.
+position_origin = 0
+rotary_dim = 128
+freq_base = 1000000
+scaling_mode = none
+scaling_factor = 1.0
+source = Qwen/Qwen3-8B config.json + transformers modeling_qwen3.py

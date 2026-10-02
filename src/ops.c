@@ -32,11 +32,18 @@ sllm_status sllm_rope_type_parse(const char * name, sllm_rope_type * out) {
     if (name == NULL || out == NULL) {
         return SLLM_ERR_ARG;
     }
-    if (strcmp(name, "neox") == 0) {
+    /* "half_split" and "adjacent" are the canonical spellings: they say what the
+     * pairing IS rather than naming a model family. The legacy "neox"/"normal"
+     * vocabulary is still accepted because artefacts in the wild carry it, but
+     * those words have been remapped between implementations -- the vendored
+     * reference path maps one architecture to "normal" while the model's own
+     * implementation does the half-split thing -- so relying on them as if they
+     * were unambiguous is exactly the mistake this contract exists to remove. */
+    if (strcmp(name, "half_split") == 0 || strcmp(name, "neox") == 0) {
         *out = SLLM_ROPE_NEOX;
         return SLLM_OK;
     }
-    if (strcmp(name, "normal") == 0) {
+    if (strcmp(name, "adjacent") == 0 || strcmp(name, "normal") == 0) {
         *out = SLLM_ROPE_NORMAL;
         return SLLM_OK;
     }

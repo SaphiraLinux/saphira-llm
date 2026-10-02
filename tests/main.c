@@ -29,6 +29,7 @@ int  main_k_quant_gate(void);
 int  main_k_gemv_gate(void);
 int  main_k_dispatch_gate(void);
 int  main_k_fwd_slice_gate(void);
+int  main_k_rope_contract_gate(void);
 
 int sllm_tests_run    = 0;
 int sllm_tests_failed = 0;
@@ -63,6 +64,7 @@ int main(void) {
     sllm_run_product_gate(main_k_gemv_gate,    "f32 GEMV vs reference double-accumulated golden");
     sllm_run_product_gate(main_k_dispatch_gate,"execution dispatched by measured evidence");
     sllm_run_product_gate(main_k_fwd_slice_gate,"forward slice: T2/T3/T4/T5/T6 claim levels");
+    sllm_run_product_gate(main_k_rope_contract_gate,"RoPE semantics contract + rotation parity");
 
     printf("\n%d checks, %d failed\n", sllm_tests_run, sllm_tests_failed);
     return sllm_tests_failed == 0 ? 0 : 1;
