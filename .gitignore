@@ -28,3 +28,7 @@ opencode.*
 *.gguf
 *.f32.tmp
 *.log
+
+# Local upstream investigation report: never committed or pushed with Saphira.
+# The .gitignore entry may be committed; the report file itself stays untracked.
+llama.cpp-bugreport.md

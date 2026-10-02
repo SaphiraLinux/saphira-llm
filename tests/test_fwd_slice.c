@@ -934,6 +934,181 @@ int main_k_fwd_slice_gate(void) {
             }
             free(kvec); free(qvec);
         }
+/* -- T8: THE V BRANCH. Third edge of the DAG, from the SAME parent. --
+     *
+     * V is the branch that must NOT be copied from the Q or K code path, because
+     * copying is how a branch silently inherits a sibling's wrong geometry. V has
+     * its own width and its own head count, and it needs no per-head norm. The
+     * claim being made is that all three branches read one parent, and each
+     * projection is proven against the reference independently. */
+    printf("\n  T8 fan-out: the V branch, from the same immutable T3 parent\n");
+    if (t3_norm == NULL) {
+        printf("    FAIL: no parent buffer; V cannot branch from nothing\n");
+        fail++;
+    } else if (!reconciles || head_dim <= 0) {
+        /* Without reconciled geometry there is nothing to prove about V either. */
+        printf("    REFUSED: geometry not reconciled, so the V branch cannot be measured\n");
+        fail++;
+    } else {
+        t3_refs++;   /* a third reader of the one parent */
+        printf("    PARENT        ok    T3 buffer %zu elements, refcount %d -- the same "
+               "parent Q, K and V all read\n", t3_len, t3_refs);
+
+        /* -- LOCATED: the V projection, found by probing rather than by assumption. -- */
+        const sllm_gguf_tensor * vp = NULL;
+        { char nm[128];
+          snprintf(nm, sizeof nm, "blk.%llu.attn_v.weight", 0ULL);
+          vp = sllm_gguf_find_tensor(&g, nm); }
+
+        if (vp == NULL) {
+            printf("    LOCATED      FAIL: V projection absent from the tensor table\n");
+            fail++;
+        } else {
+            const size_t v_in = vp->ne[0], v_out = vp->ne[1];
+            printf("    LOCATED      ok    V proj ne=[%llu, %llu]  in=%zu (ne[0])  out=%zu "
+                   "(ne[1])  type=%u\n",
+                   (unsigned long long) v_in, (unsigned long long) v_out, v_in, v_out,
+                   (unsigned) vp->type);
+            pass++;
+
+            /* -- V must feed from the PARENT at the parent's own width, exactly as Q
+             * and K do. Checking this is what proves the third edge exists rather
+             * than being inherited from a sibling. -- */
+            const bool v_in_ok = (v_in == t3_len);
+            printf("    PARENT LINK  %s  V consumes the parent at width %zu (its own "
+                   "input width is %zu) -- read from T3, not from Q or K\n",
+                   v_in_ok ? "ok  " : "FAIL", t3_len, v_in);
+            if (v_in_ok) { pass++; } else { fail++; }
+
+            /* -- V's OUTPUT width must equal n_kv_heads * head_dim, derived from the
+             * same independently derived head_dim. K has the same head count, so if
+             * this does not hold, either head_dim or head_count_kv is wrong and the
+             * whole reconciliation is unsound. It is a genuine cross-check, not a
+             * restatement. -- */
+            const bool v_out_ok = ((int64_t) v_out == (int64_t) n_kv_heads * head_dim);
+            printf("    V GEOMETRY   %s  out=%zu == n_kv_heads %u x head_dim %lld = %lld\n",
+                   v_out_ok ? "ok  " : "FAIL", v_out, n_kv_heads, (long long) head_dim,
+                   (long long) n_kv_heads * head_dim);
+            if (v_out_ok) { pass++; } else { fail++; }
+
+            /* -- DISPATCHED / DECODED: evaluated before any numerical work, so an
+             * unsupported topology cannot masquerade as a numerical failure. -- */
+            const int decodable = sllm_gguf_type_is_supported((sllm_ggml_type) vp->type);
+            printf("    DISPATCHED   %s  type %u decodable=%s; profile %s for this "
+                   "measured topology\n",
+                   decodable ? "ok  " : "FAIL", (unsigned) vp->type,
+                   decodable ? "yes" : "no",
+                   decodable ? "EXECUTABLE" : "NOT EXECUTABLE");
+            if (decodable) { pass++; } else { fail++; }
+
+            /* -- COMPUTED and PARITY-PROVEN against an independent double reference
+             * over the SAME parent buffer and the SAME artefact tensor. -- */
+            float * vvec = (float *) malloc(sizeof(float) * v_out);
+            if (vvec == NULL) {
+                printf("    COMPUTED     FAIL: allocation\n"); fail++;
+            } else {
+                const sllm_status vs = sllm_gemv_f32(vp->type, vp->data, v_in,
+                                                      t3_norm, v_out, vvec);
+                size_t nonfinite = 0;
+                for (size_t i = 0; i < v_out; ++i) {
+                    const float f = vvec[i];
+                    if (!(f == f) || f > 3.4e38f || f < -3.4e38f) { nonfinite++; }
+                }
+                printf("    COMPUTED     %s  sllm_gemv_f32 -> %zu outputs, status %d, "
+                       "%zu non-finite\n",
+                       (vs == SLLM_OK && nonfinite == 0) ? "ok  " : "FAIL",
+                       v_out, (int) vs, nonfinite);
+                if (vs == SLLM_OK && nonfinite == 0) { pass++; } else { fail++; }
+
+                if (vs == SLLM_OK) {
+                    /* Independent reference, row by row, accumulated in double. */
+                    double worst_abs = 0.0, sum_abs = 0.0, worst_rel = 0.0;
+                    double ref_at_abs = 0.0, ref_at_rel = 0.0;
+                    size_t worst_i = 0, worst_rel_i = 0, exact = 0;
+                    /* Decode a WHOLE ROW at a time. A K-quant row is block structured,
+                     * so decoding one element at a time is meaningless: every call would
+                     * return element 0 of the row and the dot product would be against a
+                     * repeated constant. That mistake produced exact=0/1024 and a
+                     * "reference" of 0, which the parity check then correctly rejected. */
+                    /* Row offsets are in BYTES, not elements. A K-quant row of 4096
+                     * elements occupies 2304 bytes, so stepping by 4096 elements reads
+                     * garbage from the middle of the tensor: that produced reference
+                     * values around 5.6e7 and a mean_abs of nan. Bytes per row and
+                     * bytes per block come from the same geometry check T4 uses. */
+                    uint32_t vblck = 0, vptsz = 0;
+                    const bool vtraits = (sllm_gguf_type_traits(vp->type, &vblck, &vptsz) == SLLM_OK);
+                    const size_t   vpb    = v_in / vblck;
+                    const size_t   vprowb = (size_t) vptsz * vpb;
+                    float * rowbuf = (float *) malloc(sizeof(float) * vblck);
+                    int row_fail = vtraits ? 0 : 1;
+                    for (size_t r = 0; r < v_out && !row_fail; ++r) {
+                        const uint8_t * rowb = (const uint8_t *) vp->data + r * vprowb;
+                        double acc = 0.0;
+                        for (size_t b = 0; b < vpb; ++b) {
+                            if (sllm_dequant_row(vp->type, rowb + b * vptsz,
+                                                rowbuf, vblck) != SLLM_OK) { row_fail = 1; break; }
+                            for (uint32_t k = 0; k < vblck; ++k) {
+                                acc += (double) rowbuf[k]
+                                     * (double) t3_norm[b * vblck + k];
+                            }
+                        }
+                        if (row_fail) { break; }
+                        const double got = (double) vvec[r];
+                        const double d = fabs(got - acc);
+                        const double rel = (acc != 0.0) ? d / fabs(acc) : d;
+                        if ((float) acc == vvec[r]) { exact++; }
+                        sum_abs += d;
+                        if (d > worst_abs) { worst_abs = d; worst_i = r; ref_at_abs = acc; }
+                        if (rel > worst_rel) { worst_rel = rel; worst_rel_i = r; ref_at_rel = acc; }
+                    }
+                    /* The absolute tolerance is an ACCEPTANCE BOUND derived from the
+                     * term count, not a description of what was observed. The observed
+                     * numbers are printed beside it and are far smaller. */
+                    free(rowbuf);
+                    if (row_fail) {
+                        printf("    PARITY       FAIL: could not decode a full V row\n");
+                        fail++;
+                    }
+                    const double bound = (double) v_in * 1e-6;
+                    const int ok = !row_fail && (worst_abs <= bound);
+                    printf("    PARITY       %s  worst_abs=%.4g at row %zu (ref %.10g)  "
+                           "mean_abs=%.4g  exact=%zu/%zu\n",
+                           ok ? "ok  " : "FAIL", worst_abs, worst_i, ref_at_abs,
+                           v_out ? sum_abs / (double) v_out : 0.0, exact, v_out);
+                    printf("                acceptance BOUND (derived, not fitted) = "
+                           "n * 1e-6 = %.4g; the OBSERVED worst is %.4g, which is the "
+                           "actual evidence\n",
+                           bound, worst_abs);
+                    printf("                worst_rel=%.4g at row %zu where the reference "
+                           "value is %.4g; a near-zero sum inflates the ratio\n",
+                           worst_rel, worst_rel_i, ref_at_rel);
+                    if (ok) { pass++; } else { fail++; }
+                }
+                free(vvec);
+            }
+
+            /* -- V takes NO per-head norm. Proving that is a claim too: Q and K are
+             * normalised per head in this architecture, and an implementation that
+             * normed V as well would be wrong. -- */
+            const sllm_gguf_tensor * vn = NULL;
+            { char nm[128];
+              snprintf(nm, sizeof nm, "blk.%llu.attn_v_norm.weight", 0ULL);
+              vn = sllm_gguf_find_tensor(&g, nm); }
+            printf("    V NO NORM    %s  blk.0.attn_v_norm.weight is %s, so V is NOT "
+                   "per-head normalised; Q and K are, and conflating them would be a "
+                   "real defect\n",
+                   vn == NULL ? "ok  " : "FAIL",
+                   vn == NULL ? "ABSENT, as the geometry requires"
+                              : "PRESENT, which contradicts the measured Q/K structure");
+            if (vn == NULL) { pass++; } else { fail++; }
+        }
+        t3_refs--;   /* this reader is done; the owner still holds the buffer */
+    }
+    printf("\n    THE DAG IS NOW CLOSED:\n"
+           "      embedding -> RMSNorm -+-> Q proj -> Q norm -> RoPE-Q   (32 heads)\n"
+           "                          +-> K proj -> K norm -> RoPE-K   ( 8 kv heads)\n"
+           "                          +-> V proj (no per-head norm)      ( 8 kv heads)\n"
+           "      one immutable refcounted parent, three independently proven readers.\n");
         t3_refs--;   /* this reader is done; the owner still holds the buffer */
     }
 

@@ -204,3 +204,8 @@ topoprobe: $(TOPOPROBE_BIN)
 
 $(TOPOPROBE_BIN): $(TOPOPROBE_OBJ) $(LIBOBJ)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lm -lpthread
+
+# A local, upstream-shaped investigation report must never be committed or pushed
+# with the Saphira repository. The .gitignore entry may be committed; the report
+# file itself stays local and untracked.
+llama.cpp-bugreport.md

@@ -31,14 +31,29 @@ extern "C" {
  * DIFFERENT results that each look entirely reasonable.
  *
  * The tempting shortcut is to look up the convention by architecture name. That
- * is refused here for a concrete reason, not a stylistic one: architecture
- * identity is not evidence for mathematics. Worse, the shortcut was checked and
- * it is demonstrably unsafe. The vendored reference path in third_party maps
- * LLM_ARCH_QWEN3 to LLAMA_ROPE_TYPE_NORM (ggml documents NORMAL as adjacent,
- * "[cscscscs]"), while the model's own authoritative implementation, HF
- * transformers modeling_qwen3.py, applies rotate_half, which is unambiguously
- * half-split ("[ccccssss]"). A name-based lookup would have selected the wrong
- * pairing from the very artefact it was meant to describe.
+ * is refused here. Architecture identity is not evidence for mathematics, and the
+ * evidence is concrete: the model's own authoritative implementation (HF
+ * transformers modeling_qwen3.py) applies rotate_half, which pairs element i with
+ * i + n/2, whereas the vendored reference path in third_party selects
+ * LLAMA_ROPE_TYPE_NORM, which ggml documents on its input layout as adjacent pairs
+ * ("[cscscscs]" against NEOX's "[ccccssss]").
+ *
+ * WHAT THAT MISMATCH DOES AND DOES NOT ESTABLISH. The ENUM MAPPING differing is
+ * measured. It is NOT established that the end-to-end logical mathematics differs,
+ * and this comment previously overstated that. The reason is a compensating
+ * transform on the reference path: before RoPE, llama.cpp applies the SAME
+ * orthogonal Hadamard rotation to q and k (llama-graph.cpp, the self_k_rot branch).
+ * For an orthogonal H that leaves the attention logits invariant, since
+ * (Hq) dot (Hk) = q^T H^T H k = q dot k, so a shared pre-transform can absorb an
+ * apparent pairing difference. An individual rotated q or k vector is then NOT
+ * element-wise equal to the source implementation's, while the attention result
+ * still is. The claim "the reference path is wrong" therefore requires a
+ * common-coordinate comparison that has not been performed, and is NOT made here.
+ *
+ * What survives regardless: a name-based lookup does not tell you which mathematics
+ * is in play, because the same architecture name can reach different arithmetic
+ * through different layouts. That is enough to justify refusing it, and it is why
+ * the pairing is carried as evidence instead of derived from a family.
  *
  * So the semantics are established at the SOURCE MODEL, carried in the artefact
  * as typed fields Saphira owns, and read back with typed reads. The runtime
