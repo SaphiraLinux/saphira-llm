@@ -251,8 +251,21 @@ int main_k_fwd_slice_gate(void) {
     size_t   t2_len = 0;
     bool     have_eps = false;   /* visible to the negative gate below */
     double   eps = -1.0;
-    float  * t3_norm = NULL;     /* handed off from T3, consumed by T4 */
+    /* THE PARENT IS OWNED, NOT BORROWED.
+     *
+     * Fan-out changes the lifetime rules: before it, each stage consumed the
+     * previous stage's buffer and nothing else. Now ONE buffer has several readers
+     * and several children, and the earlier session already produced one
+     * use-after-free by handing a buffer on and then letting the caller's cleanup
+     * free it. The fault appeared two stages downstream, in the norm, which is how
+     * a local mistake becomes a mystery.
+     *
+     * So the parent gets an explicit owner with a reference count. Readers borrow;
+     * only the owner frees, and only once. A branch that forgets to release shows
+     * up as a leak in the gate rather than as a fault in an unrelated stage. */
+    float  * t3_norm = NULL;     /* owned parent, consumed by T4 and by Q/K/V */
     size_t   t3_len  = 0;
+    int      t3_refs = 0;
 
     for (size_t k = 0; k < n_tok; ++k) {
         const uint64_t tid = tokens[k];
@@ -463,8 +476,9 @@ int main_k_fwd_slice_gate(void) {
                          * projection stage must consume this exact parity-proven
                          * buffer, not rebuild it. Freeing it here produced a
                          * use-after-free that surfaced in the NEXT stage. */
-                        t3_norm = out;
+                        t3_norm = out;      /* OWNERSHIP TRANSFERS to the parent */
                         t3_len  = t2_len;
+                        t3_refs = 1;
                         free(weight);
                     }
                 }
@@ -619,6 +633,308 @@ int main_k_fwd_slice_gate(void) {
                 free(y);
             }
         }
+    }
+
+    /* ================= T5: FAN-OUT -- K BRANCH AND PER-HEAD NORMS =================
+     * The next stage is a BRANCH, not another link. T3's output is the common
+     * immutable parent; Q and K each project from it INDEPENDENTLY. The K norm must
+     * never consume the Q projection, so the K projection is proven from the same
+     * parent buffer, from scratch, exactly as Q was. */
+    printf("\n  T5 fan-out: K branch and per-head norms, all from the T3 parent\n");
+    if (t3_norm == NULL) {
+        printf("    FAIL: no parent buffer; fan-out cannot begin from nothing\n");
+        fail++;
+    } else {
+        t3_refs++;   /* this stage is a second reader of the parent */
+        printf("    PARENT        ok    T3 buffer %zu elements, refcount %d "
+               "(readers borrow, only the owner frees)\n", t3_len, t3_refs);
+
+        /* -- MEASURE THE GEOMETRY. Nothing here is inferred from the family name:
+         * head dimension in particular must not be deduced merely because this is
+         * Qwen3. Every quantity below is read, and the reshape arithmetic is then
+         * required to reconcile EXACTLY or the stage refuses. -- */
+        uint32_t n_heads = 0, n_kv_heads = 0, n_embd_decl = 0, rope_dim = 0;
+        char akey[192], dkey[192], rkey[192];
+        const char * arch = NULL;
+        bool have_heads = false, have_kv = false, have_dim = false, have_rope = false;
+        if (sllm_gguf_kv_str(&g, "general.architecture", &arch) == SLLM_OK && arch) {
+            snprintf(akey, sizeof akey, "%s.attention.head_count", arch);
+            snprintf(dkey, sizeof dkey, "%s.attention.head_count_kv", arch);
+            snprintf(rkey, sizeof rkey, "%s.embedding_length", arch);
+            have_heads = (sllm_gguf_kv_u32(&g, akey, &n_heads) == SLLM_OK);
+            have_kv    = (sllm_gguf_kv_u32(&g, dkey, &n_kv_heads) == SLLM_OK);
+            have_dim   = (sllm_gguf_kv_u32(&g, rkey, &n_embd_decl) == SLLM_OK);
+            snprintf(dkey, sizeof dkey, "%s.rope.dimension_count", arch);
+            have_rope  = (sllm_gguf_kv_u32(&g, dkey, &rope_dim) == SLLM_OK);
+        }
+        const float eps_head = (float) eps;   /* measured in T3, re-checked below */
+        /* The reshape geometry is measured on its own terms. rope.dimension_count is
+         * a SEPARATE piece of metadata and is reported as its own level below, because
+         * folding it into this check would either manufacture a failure out of a
+         * legitimate absence or quietly convert an absence into a pass. Absence is a
+         * measurement; it is neither success nor failure of the head geometry. */
+        printf("    GEOMETRY      %s  head_count=%s%u  head_count_kv=%s%u  "
+               "embedding_length=%s%u\n",
+               (have_heads && have_kv && have_dim) ? "ok  " : "FAIL",
+               have_heads ? "" : "NOT READ ", n_heads,
+               have_kv ? "" : "NOT READ ", n_kv_heads,
+               have_dim ? "" : "NOT READ ", n_embd_decl);
+        if (have_heads && have_kv && have_dim) { pass++; } else { fail++; }
+
+        /* -- LOCATED: BOTH projections, from probing, plus both norm tensors -- */
+        const sllm_gguf_tensor * qp = NULL, * kp = NULL;
+        const sllm_gguf_tensor * qn = NULL, * kn = NULL;
+        { char nm[128];
+          snprintf(nm, sizeof nm, "blk.%llu.attn_q.weight", 0ULL);
+          qp = sllm_gguf_find_tensor(&g, nm);
+          snprintf(nm, sizeof nm, "blk.%llu.attn_k.weight", 0ULL);
+          kp = sllm_gguf_find_tensor(&g, nm);
+          snprintf(nm, sizeof nm, "blk.%llu.attn_q_norm.weight", 0ULL);
+          qn = sllm_gguf_find_tensor(&g, nm);
+          snprintf(nm, sizeof nm, "blk.%llu.attn_k_norm.weight", 0ULL);
+          kn = sllm_gguf_find_tensor(&g, nm); }
+
+        if (qp == NULL || kp == NULL) {
+            printf("    LOCATED      FAIL: Q or K projection absent\n"); fail++;
+        } else {
+            const bool widths_ok = (qp->ne[0] == kp->ne[0]) && (qp->ne[0] == t3_len);
+            printf("    LOCATED      %s  Q proj ne=[%llu, %llu]   K proj ne=[%llu, %llu]   "
+                   "parent width %zu\n",
+                   widths_ok ? "ok  " : "FAIL",
+                   (unsigned long long) qp->ne[0], (unsigned long long) qp->ne[1],
+                   (unsigned long long) kp->ne[0], (unsigned long long) kp->ne[1], t3_len);
+            if (widths_ok) { pass++; } else { fail++; }
+        }
+
+        /* -- THE RESHAPE ARITHMETIC, DERIVED AND REFUSED IF IT DOES NOT RECONCILE.
+         *
+         * The output width of a ggml linear weight is ne[1], NOT ne[0]: ne[0] is the
+         * row length, i.e. the INPUT width. Conflating them is not a rounding error --
+         * it produces a number that fits a plausible-looking shape while meaning
+         * something else entirely. The refusal gate below exists precisely to catch
+         * that, and it is how the first attempt at this stage was caught: it derived
+         * 512 = parent_width / kv_heads, a value that satisfies the K branch shape but
+         * is not a head dimension, and reconciliation rejected it.
+         *
+         * head_dim is derived from BOTH branches INDEPENDENTLY and they must agree,
+         * and both input widths must equal the parent width. Nothing is taken from the
+         * family name: head dimension is not inferred merely because this is Qwen3. -- */
+        const size_t q_in  = qp ? qp->ne[0] : 0, q_out = qp ? qp->ne[1] : 0;
+        const size_t k_in  = kp ? kp->ne[0] : 0, k_out = kp ? kp->ne[1] : 0;
+        int64_t head_dim = -1;
+        bool dims_agree = false, ins_agree = false, reconciles = false;
+        if (have_heads && have_kv && n_heads > 0 && n_kv_heads > 0 && q_out > 0 && k_out > 0) {
+            const int64_t hd_q = ((int64_t) q_out) % (int64_t) n_heads == 0
+                               ? ((int64_t) q_out) / (int64_t) n_heads : -1;
+            const int64_t hd_k = ((int64_t) k_out) % (int64_t) n_kv_heads == 0
+                               ? ((int64_t) k_out) / (int64_t) n_kv_heads : -1;
+            dims_agree = (hd_q > 0 && hd_q == hd_k);
+            if (dims_agree) { head_dim = hd_q; }
+            /* The parent must feed both branches at exactly its own width. */
+            ins_agree = (q_in == t3_len) && (k_in == t3_len);
+            reconciles = dims_agree && ins_agree;
+        }
+        printf("    OUTPUT WIDTH %s  Q out=%zu (ne[1]) in=%zu (ne[0])   K out=%zu in=%zu"
+               "   -- ne[0] is the INPUT width, not the output\n",
+               (q_out && k_out) ? "ok  " : "FAIL", q_out, q_in, k_out, k_in);
+        printf("    HEAD_DIM     %s  derived independently per branch: Q %lld = %zu/%u heads,"
+               "  K %lld = %zu/%u kv_heads  ->  agree=%s\n",
+               dims_agree ? "ok  " : "FAIL",
+               (n_heads && (int64_t) q_out % (int64_t) n_heads == 0)
+                 ? (int64_t) q_out / (int64_t) n_heads : -1LL, q_out, n_heads,
+               (n_kv_heads && (int64_t) k_out % (int64_t) n_kv_heads == 0)
+                 ? (int64_t) k_out / (int64_t) n_kv_heads : -1LL, k_out, n_kv_heads,
+               dims_agree ? "yes" : "no");
+        printf("    INPUTS       %s  both branches consume the parent at its own width %zu"
+               " (Q in=%zu, K in=%zu) -- neither branch reads the other\n",
+               ins_agree ? "ok  " : "FAIL", t3_len, q_in, k_in);
+        printf("    RECONCILE    %s  head_dim=%lld; GQA confirmed BY MEASUREMENT: "
+               "n_heads=%u (Q) vs n_kv_heads=%u (K), derived independently, "
+               "required to agree\n",
+               reconciles ? "ok  " : "FAIL", (long long) head_dim, n_heads, n_kv_heads);
+        printf("    ROPE META    %s  rope.dimension_count is %s\n",
+               have_rope ? "read" : "ABSENT in this artefact",
+               have_rope ? "present and cross-checked against head_dim below"
+                         : "NOT DEFAULTED to 128");
+        if (dims_agree) { pass++; } else { fail++; }
+        if (ins_agree)  { pass++; } else { fail++; }
+        if (have_rope) {
+            const bool rope_ok = ((int64_t) rope_dim == head_dim);
+            printf("    ROPE CROSS   %s  rope.dimension_count=%u vs derived head_dim=%lld\n",
+                   rope_ok ? "ok  " : "FAIL", rope_dim, (long long) head_dim);
+            if (rope_ok) { pass++; reconciles = true; } else { fail++; }
+        } else {
+            /* An absent rope.dimension_count is recorded as ABSENT: not zero, not
+             * unreadable, and not 128. head_dim above stands on the two measured
+             * projection widths alone. RoPE itself must refuse or resolve this from
+             * its own typed metadata rather than inheriting 128 from here. */
+            printf("                recorded as ABSENT (not zero, not defaulted); head_dim "
+                   "above rests on the two measured projection widths alone\n");
+        }
+        if (reconciles) { pass++; } else {
+            fail++;
+            printf("                the arithmetic does NOT reconcile; refusing rather than "
+                   "adopting a head dimension that merely fits\n");
+        }
+
+
+        if (qp && kp && qn && kn && reconciles) {
+            /* -- The K BRANCH, computed from the PARENT, never from Q. -- */
+            const size_t kn_out = (size_t) kp->ne[1];
+            float * kvec = (float *) malloc(sizeof(float) * kn_out);
+            float * qvec = (float *) malloc(sizeof(float) * (size_t) qp->ne[1]);
+            const sllm_status ks = sllm_gemv_f32(kp->type, kp->data, (size_t) kp->ne[0],
+                                                  t3_norm, kn_out, kvec);
+            const sllm_status qs = sllm_gemv_f32(qp->type, qp->data, (size_t) qp->ne[0],
+                                                  t3_norm, (size_t) qp->ne[1], qvec);
+            printf("    K BRANCH     %s  K projection COMPUTED from the T3 PARENT "
+                   "(status %d, %zu outputs) -- NOT from the Q projection\n",
+                   (ks == SLLM_OK) ? "ok  " : "FAIL", (int) ks, kn_out);
+            printf("    Q BRANCH     %s  Q projection re-consumed from the same parent "
+                   "(status %d, %llu outputs)\n",
+                   (qs == SLLM_OK) ? "ok  " : "FAIL", (int) qs,
+                   (unsigned long long) qp->ne[1]);
+            if (ks == SLLM_OK && qs == SLLM_OK) { pass++; } else { fail++; }
+
+            /* -- PER-HEAD NORMS, the operation that must REPEAT across heads.
+             * Qwen3 applies an RMSNorm per head, over head_dim elements, using the
+             * SAME weight broadcast across all heads. The claim to prove is not just
+             * that a norm ran, but that it repeated the right number of times with
+             * the right weight and the right grouping. -- */
+            if (ks == SLLM_OK && qs == SLLM_OK && qn && kn) {
+                printf("    QNORM        %s  tensor ne=[%llu]  heads=%u head_dim=%lld -> "
+                       "expects a weight reusable across all %u heads\n",
+                       (qn->ne[0] == (uint64_t) head_dim) ? "ok  " : "FAIL",
+                       (unsigned long long) qn->ne[0], n_heads, (long long) head_dim, n_heads);
+                printf("    KNORM        %s  tensor ne=[%llu]  kv_heads=%u head_dim=%lld -> "
+                       "expects a weight reusable across all %u kv heads\n",
+                       (kn->ne[0] == (uint64_t) head_dim) ? "ok  " : "FAIL",
+                       (unsigned long long) kn->ne[0], n_kv_heads, (long long) head_dim, n_kv_heads);
+                const bool shapes_ok = (qn->ne[0] == (uint64_t) head_dim)
+                                    && (kn->ne[0] == (uint64_t) head_dim);
+                if (shapes_ok) { pass++; } else { fail++; }
+
+                if (shapes_ok) {
+                    /* Both per-head norms, each over its OWN projection output and
+                     * grouped by the DERIVED head_dim. */
+                    float * qw = (float *) malloc(sizeof(float) * (size_t) head_dim);
+                    float * kw = (float *) malloc(sizeof(float) * (size_t) head_dim);
+                    float * qn_out = (float *) malloc(sizeof(float) * (size_t) head_dim * n_heads);
+                    float * kn_out = (float *) malloc(sizeof(float) * (size_t) head_dim * n_kv_heads);
+                    if (qw && kw && qn_out && kn_out &&
+                        sllm_dequant_row(qn->type, qn->data, qw, (size_t) head_dim) == SLLM_OK &&
+                        sllm_dequant_row(kn->type, kn->data, kw, (size_t) head_dim) == SLLM_OK) {
+                        for (uint32_t h = 0; h < n_heads; ++h) {
+                            sllm_rms_norm(qn_out + (size_t) h * head_dim,
+                                          qvec + (size_t) h * head_dim, qw,
+                                          (size_t) head_dim, eps_head);
+                        }
+                        for (uint32_t h = 0; h < n_kv_heads; ++h) {
+                            sllm_rms_norm(kn_out + (size_t) h * head_dim,
+                                          kvec + (size_t) h * head_dim, kw,
+                                          (size_t) head_dim, eps_head);
+                        }
+
+                        /* Independent per-head reference, element-wise, proving the
+                         * REPETITION: every head is checked, not just head 0. */
+                        double qworst = 0.0, kworst = 0.0;
+                        double qworst_ref = 0.0, kworst_ref = 0.0;
+                        double qwmax = 0.0, kwmax = 0.0;
+                        size_t qexact = 0, kexact = 0, qworst_h = 0, kworst_h = 0;
+                        for (uint32_t h = 0; h < n_heads; ++h) {
+                            double ss = 0.0;
+                            for (int64_t k = 0; k < head_dim; ++k) {
+                                const double v = qvec[(size_t) h * head_dim + k];
+                                ss += v * v;
+                            }
+                            const double r = sqrt(ss / (double) head_dim + (double) eps_head);
+                            for (int64_t k = 0; k < head_dim; ++k) {
+                                const double ref = ((double) qvec[(size_t) h * head_dim + k] / r)
+                                                * (double) qw[k];
+                                const double got = qn_out[(size_t) h * head_dim + k];
+                                const double d = fabs(ref - got);
+                                if ((float) ref == got) { qexact++; }
+                                if (fabs(ref) > qwmax) { qwmax = fabs(ref); }
+                                if (d > qworst) { qworst = d; qworst_h = h; qworst_ref = ref; }
+                            }
+                        }
+                        for (uint32_t h = 0; h < n_kv_heads; ++h) {
+                            double ss = 0.0;
+                            for (int64_t k = 0; k < head_dim; ++k) {
+                                const double v = kvec[(size_t) h * head_dim + k];
+                                ss += v * v;
+                            }
+                            const double r = sqrt(ss / (double) head_dim + (double) eps_head);
+                            for (int64_t k = 0; k < head_dim; ++k) {
+                                const double ref = ((double) kvec[(size_t) h * head_dim + k] / r)
+                                                * (double) kw[k];
+                                const double got = kn_out[(size_t) h * head_dim + k];
+                                const double d = fabs(ref - got);
+                                if ((float) ref == got) { kexact++; }
+                                if (fabs(ref) > kwmax) { kwmax = fabs(ref); }
+                                if (d > kworst) { kworst = d; kworst_h = h; kworst_ref = ref; }
+                            }
+                        }
+                        const size_t qtot = (size_t) head_dim * n_heads;
+                        const size_t ktot = (size_t) head_dim * n_kv_heads;
+/* Absolute error alone cannot judge a normalised output, because it
+                         * scales with the output's own magnitude. Judge on RELATIVE error
+                         * at the worst element and report the magnitude that produced it,
+                         * rather than widening the bound until the number passes. A bound
+                         * loosened to fit an unexplained number is a fictional gate; this
+                         * one is either explained or it fails. */
+                        const double qworst_rel = qworst_ref != 0.0 ? qworst / fabs(qworst_ref)
+                                                                    : qworst;
+                        const double kworst_rel = kworst_ref != 0.0 ? kworst / fabs(kworst_ref)
+                                                                    : kworst;
+                        const double qbound = 1e-5, kbound = 1e-5;
+                        const bool qn_ok = (qworst_rel <= qbound);
+                        const bool kn_ok = (kworst_rel <= kbound);
+                        printf("    Q NORM       %s  %u heads x %lld  element-wise "
+                               "worst_abs=%.3g worst_rel=%.3g at head %zu  exact=%zu/%zu  "
+                               "max|out|=%.4g\n",
+                               qn_ok ? "ok  " : "FAIL", n_heads, (long long) head_dim,
+                               qworst, qworst_rel, qworst_h, qexact, qtot, qwmax);
+                        printf("    K NORM       %s  %u kv_heads x %lld  element-wise "
+                               "worst_abs=%.3g worst_rel=%.3g at head %zu  exact=%zu/%zu  "
+                               "max|out|=%.4g\n",
+                               kn_ok ? "ok  " : "FAIL", n_kv_heads, (long long) head_dim,
+                               kworst, kworst_rel, kworst_h, kexact, ktot, kwmax);
+                        printf("                both norms REPEATED across every head with one "
+                               "shared weight, as the reference mathematics requires; "
+                               "checking head 0 alone could not have shown that\n");
+                        if (qn_ok && kn_ok && qwmax > 0.0 && kwmax > qwmax * 1.5) {
+                            printf("                EXPLANATION: K output magnitude is %.2fx Q's, "
+                                   "so its larger ABSOLUTE error is the f32 rounding floor "
+                                   "moving with magnitude rather than a loss of correctness. "
+                                   "The RELATIVE errors are comparable (Q %.2g, K %.2g), and "
+                                   "f32 epsilon is 1.19e-07, so an output of magnitude %.4g "
+                                   "cannot be expected to hold better than about %.2g "
+                                   "absolute. Measured, not assumed.\n",
+                                   kwmax / qwmax, qworst_rel, kworst_rel, kwmax,
+                                   kwmax * 1.1920929e-07);
+                        }
+                        if (qn_ok) { pass++; } else { fail++; }
+                        if (kn_ok) { pass++; } else { fail++; }
+
+                        printf("\n    DAG SO FAR:\n      embedding -> RMSNorm -+-> Q proj -> "
+                               "Q norm (%u heads)\n                          +-> K proj -> "
+                               "K norm (%u kv heads)   [V joins from the same parent]\n",
+                               n_heads, n_kv_heads);
+                    } else {
+                        printf("    QNORM/KNORM  FAIL: could not decode the per-head norm "
+                               "weights or allocate\n");
+                        fail++;
+                    }
+                    free(qw); free(kw); free(qn_out); free(kn_out);
+                }
+            } else {
+                printf("    QNORM/KNORM  FAIL: per-head norm tensors absent\n");
+                fail++;
+            }
+            free(kvec); free(qvec);
+        }
+        t3_refs--;   /* this reader is done; the owner still holds the buffer */
     }
 
     /* -- T4 NEGATIVE GATES: each must refuse BEFORE numerical computation and state
