@@ -402,8 +402,21 @@ TEST(gguf_known_versus_supported_are_different_questions) {
     uint64_t n = 0;
     CHECK_STATUS(sllm_gguf_type_nbytes((sllm_ggml_type) 200, 16, &n),
                  SLLM_ERR_TYPE_UNSUPPORTED);
-    CHECK_STATUS(sllm_gguf_type_traits(SLLM_TYPE_Q5_K, NULL, NULL),
-                 SLLM_ERR_TYPE_UNSUPPORTED);
+    /* Traits are about LAYOUT and are deliberately independent of having a
+     * kernel. This assertion used to require traits(Q5_K) == UNSUPPORTED, which
+     * collapsed "we know the byte layout" into "we can decode it" -- the same
+     * conflation this test is named for. It also made a correctly sized but
+     * undecodable type impossible to even measure, so a caller could not report
+     * the truth about a file containing one.
+     *
+     * The separation is now asserted directly: the layout is reportable, the
+     * kernel is honestly absent, and asking for a decode is still refused. */
+    {
+        uint32_t blck = 0, tsz = 0;
+        CHECK_STATUS(sllm_gguf_type_traits(SLLM_TYPE_Q5_K, &blck, &tsz), SLLM_OK);
+        CHECK(blck == 256);
+        CHECK(tsz == 176);
+    }
 
     CHECK_STR(sllm_gguf_type_name(SLLM_TYPE_I2_S), "I2_S");
     CHECK_STR(sllm_gguf_type_name((sllm_ggml_type) 200), "UNKNOWN(200)");

@@ -146,6 +146,99 @@ void sllm_i2s_dequant(const void * packed, float * dst, size_t n) {
 }
 
 /* ------------------------------------------------------------------ */
+/* K-quants: Q4_K and Q6_K                                            */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Transcribed from the vendored reference (ggml-common.h block layouts and
+ * ggml-quants.c dequantize_row_q4_K / dequantize_row_q6_K) and gated against
+ * tests/golden/mainstream-qwen3-dequant.txt, which was captured from the
+ * reference build rather than from this code. If these two disagree with the
+ * golden by more than f32 rounding, the gate fails -- the flag cannot be a
+ * promise without a kernel.
+ *
+ * QK_K = 256 elements per super-block. K_SCALE_SIZE = 12 bytes carrying eight
+ * 6-bit scales and eight 6-bit mins, interleaved. The unpack below is the part
+ * that must match bit-for-bit: for j < 4 the low six bits live in q[j] and
+ * q[j+4], and for j >= 4 two bits are borrowed from the top of the neighbouring
+ * bytes. Reimplementing that layout "reasonably" rather than exactly is how a
+ * dequantiser ends up subtly, plausibly wrong.
+ */
+#define QK_K 256
+#define K_SCALE_SIZE 12
+
+typedef struct {
+    uint16_t d;    /* super-block scale for the quantized scales, f16 */
+    uint16_t dmin; /* super-block scale for the quantized mins,  f16 */
+    uint8_t  scales[K_SCALE_SIZE];
+    uint8_t  qs[QK_K / 2]; /* 4-bit quants */
+} sllm_block_q4_K;
+
+typedef struct {
+    uint8_t  ql[QK_K / 2];  /* quants, lower 4 bits */
+    uint8_t  qh[QK_K / 4];  /* quants, upper 2 bits */
+    int8_t   scales[QK_K / 16]; /* scales, quantized with 8 bits */
+    uint16_t d;              /* super-block scale, f16 */
+} sllm_block_q6_K;
+
+/* Transcribed verbatim from the reference get_scale_min_k4. */
+static inline void sllm_get_scale_min_k4(int j, const uint8_t * q,
+                                         uint8_t * d, uint8_t * m) {
+    if (j < 4) {
+        *d = q[j] & 63; *m = q[j + 4] & 63;
+    } else {
+        *d = (uint8_t)((q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4));
+        *m = (uint8_t)((q[j + 4] >>  4) | ((q[j - 0] >> 6) << 4));
+    }
+}
+
+static void dequant_q4_K(const void * vx, float * y, size_t k) {
+    const sllm_block_q4_K * x = (const sllm_block_q4_K *) vx;
+    const size_t nb = k / QK_K;
+    for (size_t i = 0; i < nb; i++) {
+        const uint8_t * q = x[i].qs;
+        const float d    = sllm_fp16_to_fp32((sllm_fp16) x[i].d);
+        const float dmin = sllm_fp16_to_fp32((sllm_fp16) x[i].dmin);
+        int is = 0;
+        for (int j = 0; j < QK_K; j += 64) {
+            uint8_t sc, m;
+            sllm_get_scale_min_k4(is + 0, x[i].scales, &sc, &m);
+            const float d1 = d * sc, m1 = dmin * m;
+            sllm_get_scale_min_k4(is + 1, x[i].scales, &sc, &m);
+            const float d2 = d * sc, m2 = dmin * m;
+            for (int l = 0; l < 32; ++l) *y++ = d1 * (float)(q[l] & 0xF) - m1;
+            for (int l = 0; l < 32; ++l) *y++ = d2 * (float)(q[l]  >> 4)  - m2;
+            q += 32; is += 2;
+        }
+    }
+}
+
+static void dequant_q6_K(const void * vx, float * y, size_t k) {
+    const sllm_block_q6_K * x = (const sllm_block_q6_K *) vx;
+    const size_t nb = k / QK_K;
+    for (size_t i = 0; i < nb; i++) {
+        const float d = sllm_fp16_to_fp32((sllm_fp16) x[i].d);
+        const uint8_t * ql = x[i].ql;
+        const uint8_t * qh = x[i].qh;
+        const int8_t  * sc = x[i].scales;
+        for (int n = 0; n < QK_K; n += 128) {
+            for (int l = 0; l < 32; ++l) {
+                const int is = l / 16;
+                const int8_t q1 = (int8_t)((ql[l +  0] & 0xF) | (((qh[l] >> 0) & 3) << 4)) - 32;
+                const int8_t q2 = (int8_t)((ql[l + 32] & 0xF) | (((qh[l] >> 2) & 3) << 4)) - 32;
+                const int8_t q3 = (int8_t)((ql[l +  0] >> 4)    | (((qh[l] >> 4) & 3) << 4)) - 32;
+                const int8_t q4 = (int8_t)((ql[l + 32] >> 4)    | (((qh[l] >> 6) & 3) << 4)) - 32;
+                y[l +  0] = d * sc[is + 0] * q1;
+                y[l + 32] = d * sc[is + 2] * q2;
+                y[l + 64] = d * sc[is + 4] * q3;
+                y[l + 96] = d * sc[is + 6] * q4;
+            }
+            y  += 128; ql += 64; qh += 32; sc += 8;
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* generic row dequantisation                                          */
 /* ------------------------------------------------------------------ */
 
@@ -297,6 +390,19 @@ sllm_status sllm_dequant_row(sllm_ggml_type type, const void * src,
 #endif
             return SLLM_OK;
         }
+
+        /* K-quants. These are the two types a Q4_K_M mainstream model actually
+         * needs, and they are the first types implemented against a REFERENCE
+         * golden rather than against Saphira's own output. */
+        case SLLM_TYPE_Q4_K:
+            if (n % QK_K != 0) { return SLLM_ERR_ARG; }
+            dequant_q4_K(src, dst, n);
+            return SLLM_OK;
+
+        case SLLM_TYPE_Q6_K:
+            if (n % QK_K != 0) { return SLLM_ERR_ARG; }
+            dequant_q6_K(src, dst, n);
+            return SLLM_OK;
 
         case SLLM_TYPE_Q4_0: {
 #if defined(SLLM_X86)

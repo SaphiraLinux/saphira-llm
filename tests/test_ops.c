@@ -213,7 +213,22 @@ TEST(dequant_row_matches_a_scalar_reference) {
     float dst[8] = {0};
     uint8_t src[64] = {0};
     CHECK_STATUS(sllm_dequant_row(SLLM_TYPE_Q5_K, src, dst, 8), SLLM_ERR_TYPE_UNSUPPORTED);
-    CHECK_STATUS(sllm_dequant_row(SLLM_TYPE_Q6_K, src, dst, 8), SLLM_ERR_TYPE_UNSUPPORTED);
+    /* Q6_K now HAS a kernel, so it is no longer refused as an unknown type. It IS
+     * refused for a length it cannot represent: a super-block is 256 elements, so
+     * 8 is not a whole number of blocks. Returning UNSUPPORTED here would have
+     * been false -- it would have claimed we lack a capability we have -- and
+     * silently decoding a partial block would have been worse. INVALID_ARG is the
+     * honest answer, and the round trip below confirms the kernel works at the
+     * length it does accept. */
+    CHECK_STATUS(sllm_dequant_row(SLLM_TYPE_Q6_K, src, dst, 8), SLLM_ERR_ARG);
+    CHECK_STATUS(sllm_dequant_row(SLLM_TYPE_Q4_K, src, dst, 255), SLLM_ERR_ARG);
+    {
+        float big[256];
+        static uint8_t blk[210];
+        memset(blk, 0, sizeof blk);
+        CHECK_STATUS(sllm_dequant_row(SLLM_TYPE_Q6_K, blk, big, 256), SLLM_OK);
+        CHECK_STATUS(sllm_dequant_row(SLLM_TYPE_Q4_K, blk, big, 256), SLLM_OK);
+    }
     CHECK_STATUS(sllm_dequant_row(SLLM_TYPE_I2_S, src, dst, 8), SLLM_OK);
     CHECK_STATUS(sllm_dequant_row(SLLM_TYPE_F32, NULL, dst, 8), SLLM_ERR_ARG);
     CHECK_STATUS(sllm_dequant_row(SLLM_TYPE_F32, src, NULL, 8), SLLM_ERR_ARG);

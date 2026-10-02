@@ -40,10 +40,14 @@ float sllm_fp16_to_fp32(sllm_fp16 h);
 /*
  * Expand one row of `n` values of `type` at `src` into `n` floats at `dst`.
  *
- * Implemented now: F32, F16, BF16, Q8_0, Q4_0, and I2_S. The K-quants are
- * Phase 7 scope: they only appear in conventional GGUF models, and the plan
- * is BitNet first. Asking for one of them returns
- * SLLM_ERR_TYPE_UNSUPPORTED rather than a wrong answer.
+ * Implemented now: F32, F16, BF16, Q8_0, Q4_0, I2_S, Q4_K and Q6_K. The
+ * K-quants are transcribed from the vendored reference and gated against a
+ * REFERENCE golden in tests/test_quant_k.c -- expected values captured by
+ * driving the reference build's own type traits over a real Q4_K_M model, not by
+ * recording our own output. A type we have not implemented still returns
+ * SLLM_ERR_TYPE_UNSUPPORTED rather than a wrong answer, and a K-quant asked for a
+ * length that is not a whole number of 256-element super-blocks returns
+ * SLLM_ERR_ARG rather than decoding a partial block.
  *
  * For I2_S the destination receives the *integer* ternary codes as floats,
  * because the scale is applied separately by the GEMM epilogue exactly as

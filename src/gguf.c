@@ -177,8 +177,12 @@ static const type_info g_types[SLLM_TYPE_COUNT] = {
      * lets the container remain general.
      *
      * The dequantisers are NOT implemented by this change. */
-    [SLLM_TYPE_Q4_K]   = { "Q4_K",   256, 144, false },
-    [SLLM_TYPE_Q6_K]   = { "Q6_K",   256, 210, false },
+    /* Kernels exist and are gated against the REFERENCE golden in
+     * tests/test_quant_k.c. The flag was flipped only after that gate passed;
+     * until then it stays false and sllm_dequant_row keeps returning
+     * SLLM_ERR_TYPE_UNSUPPORTED rather than a wrong answer. */
+    [SLLM_TYPE_Q4_K]   = { "Q4_K",   256, 144, true  },
+    [SLLM_TYPE_Q6_K]   = { "Q6_K",   256, 210, true  },
     [SLLM_TYPE_I2_S]   = { "I2_S",   1, 0, true },  /* 0 == variable, see nbytes */
 
     [SLLM_TYPE_Q4_1]   = { "Q4_1",   32, 20, false },
@@ -242,9 +246,14 @@ sllm_status sllm_gguf_type_traits(sllm_ggml_type type,
     if ((int) type < 0 || (int) type >= SLLM_TYPE_COUNT || g_types[type].name == NULL) {
         return SLLM_ERR_TYPE_UNSUPPORTED;
     }
-    if (!g_types[type].supported) {
-        return SLLM_ERR_TYPE_UNSUPPORTED;
-    }
+    /* Type TRAITS are about layout, and are deliberately independent of whether
+     * we have a kernel. sllm_gguf_type_nbytes already relies on that separation:
+     * it sizes a Q4_K tensor correctly even when no kernel exists, which is what
+     * lets a container be parsed and sized without being decodable. Gating traits
+     * on `supported` collapsed those two questions into one and made a correctly
+     * sized-but-unsupported type unmeasurable, which is how a caller ends up
+     * unable to even report the truth about a file. Use
+     * sllm_gguf_type_is_supported() to ask about a kernel. */
     if (blck_size != NULL) {
         *blck_size = g_types[type].blck_size;
     }
