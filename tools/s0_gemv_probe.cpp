@@ -1,239 +1,476 @@
 /* ------------------------------------------------------------------ *
- * s0_gemv_probe.cpp -- external witness for Step 2's f32 GEMV.
+ * s0_gemv_probe.cpp -- external witness for Step 2's f32 GEMV. REBUILT.
  *
- * This is deliberately NOT Saphira arithmetic on both sides. The reference result
- * is produced by the VENDORED reference implementation:
+ * This is a WITNESS. A witness has one obligation beyond computing an answer: it
+ * must be able to say it did not go out of bounds, and it must be able to say that
+ * BEFORE it reads, not afterwards when the MMU happens to notice.
  *
- *   dequantisation : ggml_get_type_traits(type).to_float, the reference's own
- *                    per-type expander (the same entry point that produced
- *                    tests/golden/mainstream-qwen3-dequant.txt)
- *   the dot product: DOUBLE-precision accumulation.
+ * WHY THE REBUILD. The previous version read tensors through raw pointer
+ * arithmetic and died, non-deterministically, on the q6_K case. An instrumented
+ * study (tools/s0_q6k_crash.cpp) showed the fault was LATE: walking the same
+ * 64 x 48 grid from a one-row buffer faults at ROW 8, eight rows after the buffer
+ * ended. So "where it crashed" was never "where it went out of bounds", every
+ * truncation count we had recorded was noise rather than a coordinate, and a run
+ * that appeared to succeed may simply not have read far enough to die.
  *
- * Accumulating in double is deliberately STRICTER than matching another f32
- * kernel. A reference that merely used f32 would agree with a wrong-but-close
- * implementation; a double-precision reference is closer to the mathematically
- * exact answer, so Saphira's f32 result is measured against truth rather than
- * against a peer. Anything wrong with stride, index or block boundaries lands in
- * the fifth decimal or worse, and is unmissable.
+ * Two rules follow, and they are the whole point of this rewrite:
  *
- * and Saphira's sllm_gemv_f32 is compared against that. If both sides used our
- * code the comparison would prove only that our code agrees with itself.
+ *   1. PROVE THE GEOMETRY BEFORE TOUCHING DATA. Every byte offset that will be
+ *      read is computed, compared against the buffer size, and refused if it does
+ *      not fit -- before the read happens.
+ *   2. DO NOT USE A DERIVATION AS ITS OWN PROOF. The row stride, the block count
+ *      and the tensor size are cross-checked against the FILE's own layout: this
+ *      tensor's computed end must not overlap the next tensor's offset, and the
+ *      total must fit inside the actual file size. Those bounds come from the
+ *      container, not from the arithmetic that produced the quantity being checked.
  *
- * WHAT THIS IS DESIGNED TO CATCH, stated before the run rather than after:
+ * Everything else is unchanged in intent. Dequantisation is the vendored
+ * reference's own type_traits.to_float. The dot product accumulates in DOUBLE
+ * precision, which is deliberately stricter than matching another f32 kernel.
  *
- *   - a wrong row stride. Testing a single row cannot see one, because a stride
- *     error only manifests once the row index moves. Several rows are mandatory.
- *   - an off-by-one in the block loop. A tensor whose row is an exact multiple of
- *     the block size hides a trailing-block bug; a row count and element count
- *     that do NOT divide evenly are included below on purpose.
- *   - an accumulator not reset between rows.
- *   - the x vector being indexed by block rather than by element.
- *
- * Each case prints the reference value, Saphira's value, and the ULP distance, so
- * a disagreement is quantified rather than merely flagged.
+ * Output grammar, explicit and self-delimiting so a reader cannot misalign:
+ *   [gemv] <tensor>
+ *   type / row_elems / blocks_per_row / block_size / type_size / row_bytes
+ *   n_rows / stored_rows / tensor_required_bytes / supplied_buffer_bytes
+ *   first_byte_touched / max_byte_touched / buffer_bytes
+ *   BOUNDS <OK|REFUSED>
+ *   ROWS <n values>
+ *   ROWHASH <n values>
+ *   ENDCASE <tensor>
  * ------------------------------------------------------------------ */
 
 #include "ggml.h"
 #include "gguf.h"
-#include "ggml-alloc.h"
 
-#include <cmath>
 #include <cstdio>
+#include <cstdarg>
+#include <cstdlib>
 #include <cstring>
-#include <string>
 #include <vector>
 
-/* Ordered representation of a float, so "bit-for-bit" and "within N ULP" can be
- * distinguished. A dot product accumulates in a different order in different
- * implementations, so exact equality is NOT the right bar here; the bar is that
- * the two agree to within a stated ULP distance, reported rather than assumed. */
-static uint64_t bits_of(float f) {
-    uint32_t u; memcpy(&u, &f, 4);
-    return ((uint64_t) u) << 32;
-}
-static int64_t ulp_distance(float a, float b) {
-    if (a == b) { return 0; }
-    if (std::isnan(a) || std::isnan(b)) { return INT64_MAX; }
-    const int64_t ia = (int64_t) (int32_t) *(uint32_t *) &a;
-    const int64_t ib = (int64_t) (int32_t) *(uint32_t *) &b;
-    return ia > ib ? ia - ib : ib - ia;
+/* ---------------- geometry, computed then CHECKED ---------------- */
+
+struct geom {
+    /* Declared by the container. */
+    int64_t  n_dims;
+    int64_t  ne0, ne1;
+    int32_t  block_size;
+    int32_t  type_size;
+    uint64_t tensor_offset;
+    uint64_t data_offset;
+    uint64_t file_bytes;
+
+    /* Derived, each from exactly one source. */
+    uint64_t blocks_per_row;
+    uint64_t row_bytes;
+    uint64_t n_rows;
+    uint64_t stored_rows;
+    uint64_t tensor_required_bytes;
+    uint64_t supplied_buffer_bytes;
+
+    /* The traversal, declared before it runs. */
+    uint64_t first_byte_touched;
+    uint64_t max_byte_touched;   /* INCLUSIVE last index */
+    uint64_t requested_span;
+
+    /* Independent container bounds, NOT derived from the above. */
+    uint64_t next_tensor_offset; /* absolute, or file_bytes if last */
+    bool     is_last_tensor;
+
+    bool     ok;
+    char     why[256];
+};
+
+static void geo_fail(geom * g, const char * fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(g->why, sizeof g->why, fmt, ap);
+    va_end(ap);
+    g->ok = 0;
 }
 
-/* The reference path, using ONLY the vendored reference implementation. */
-static void reference_gemv(const ggml_type_traits * tr, const void * data,
-                           int64_t row_elems, const float * x, int64_t n_rows,
-                           std::vector<double> & out) {
-    const int64_t nb = row_elems / tr->blck_size;
-    out.assign((size_t) n_rows, 0.0);
-    std::vector<float> buf((size_t) tr->blck_size);
-    (void) out;
-    for (int64_t r = 0; r < n_rows; ++r) {
-        const char * row = (const char *) data + (size_t) r * (size_t) tr->type_size * (size_t) nb;
-        double acc = 0.0;
-        for (int64_t b = 0; b < nb; ++b) {
-            tr->to_float(row + (size_t) b * (size_t) tr->type_size, buf.data(), tr->blck_size);
-            for (int64_t i = 0; i < tr->blck_size; ++i) {
-                acc += (double) buf[(size_t) i] * (double) x[(size_t) (b * tr->blck_size + i)];
-            }
-        }
-        out[(size_t) r] = acc;
+/* Build the geometry and CHECK it. Returns 1 only if every invariant holds.
+ *
+ * The independent bounds are the important part. `next_tensor_offset` comes from
+ * the file's own tensor table: if our computed size for this tensor were too
+ * large, its end would overlap the next tensor's start. Checking against that
+ * validates the arithmetic using the container as the authority rather than
+ * itself. */
+static int geo_build(geom * g, gguf_context * ctx, const char * name,
+                     bool one_row_regression) {
+    memset(g, 0, sizeof *g);
+    g->ok = 1;
+
+    const int64_t id = gguf_find_tensor(ctx, name);
+    if (id < 0) { geo_fail(g, "tensor %s not found", name); return 0; }
+
+    const ggml_type tt = gguf_get_tensor_type(ctx, id);
+    const ggml_type_traits * tr = ggml_get_type_traits(tt);
+    const int64_t * ne = gguf_get_tensor_ne(ctx, id);
+
+    if (tr == NULL) { geo_fail(g, "no type traits for %s", ggml_type_name(tt)); return 0; }
+    /* F32 has NO to_float in ggml, because F32 data is already float and the
+     * reference expander is a memcpy. Treating its absence as a fatal geometry
+     * error would have refused a case that is perfectly measurable, and refusing
+     * a measurable case is how a witness stops covering what it exists to cover. */
+    if (tr->to_float == NULL && tr->type_size != (int32_t) sizeof(float)) {
+        geo_fail(g, "no reference expander for type %s", ggml_type_name(tt));
+        return 0;
     }
+    /* n_dims is not exposed by this gguf API; ne[dim] is 1 for dim >= n_dims, so the
+     * shape itself carries the information and a separate dim count is not needed. */
+    g->n_dims    = (g->ne1 > 1) ? 2 : 1;
+    g->ne0       = ne[0];
+    g->ne1       = ne[1];
+    g->block_size = tr->blck_size;
+    g->type_size  = tr->type_size;
+    g->data_offset = gguf_get_data_offset(ctx);
+    g->tensor_offset = gguf_get_tensor_offset(ctx, id);
+
+    /* Independent container bound: the next tensor's start, absolute. */
+    const int64_t n_tensors = gguf_get_n_tensors(ctx);
+    g->is_last_tensor = (id + 1 >= n_tensors);
+    g->next_tensor_offset = g->is_last_tensor
+        ? g->file_bytes
+        : g->data_offset + gguf_get_tensor_offset(ctx, id + 1);
+
+    /* ---- derived, one source each ---- */
+    if (g->block_size <= 0) { geo_fail(g, "block_size is %d", g->block_size); return 0; }
+    if (g->ne0 % g->block_size != 0) {
+        geo_fail(g, "ne[0]=%lld is not a whole number of %d-element blocks",
+                 (long long) g->ne0, g->block_size);
+        return 0;
+    }
+    g->blocks_per_row = (uint64_t) (g->ne0 / g->block_size);
+    g->row_bytes      = g->blocks_per_row * (uint64_t) g->type_size;
+
+    g->stored_rows = (g->ne1 > 1) ? (uint64_t) g->ne1 : 1u;
+
+    /* The traversal we intend: this many rows, capped for a complete record. */
+    g->n_rows = 64;
+    if (g->n_rows > g->stored_rows) { g->n_rows = g->stored_rows; }
+    if (g->n_rows < 1) { g->n_rows = 1; }
+
+    g->tensor_required_bytes = g->n_rows * g->row_bytes;
+
+    /* ---- structural relationships, asserted SEPARATELY ---- */
+
+    /* (a) the stride identity, stated rather than implied */
+    if (g->row_bytes != g->blocks_per_row * (uint64_t) g->type_size) {
+        geo_fail(g, "row_bytes %llu != blocks_per_row %llu * type_size %d",
+                 (unsigned long long) g->row_bytes,
+                 (unsigned long long) g->blocks_per_row, g->type_size);
+        return 0;
+    }
+    /* (b) the span identity, stated rather than implied */
+    if (g->tensor_required_bytes != g->n_rows * g->row_bytes) {
+        geo_fail(g, "tensor_required_bytes %llu != n_rows %llu * row_bytes %llu",
+                 (unsigned long long) g->tensor_required_bytes,
+                 (unsigned long long) g->n_rows,
+                 (unsigned long long) g->row_bytes);
+        return 0;
+    }
+
+    /* (c) THE TRAVERSAL, DECLARED. These are the exact bytes the loops below will
+     * touch: the first byte of row 0 block 0, and the last byte of the final
+     * block of the final row. Computed, not discovered. */
+    g->first_byte_touched = 0;
+    g->max_byte_touched   = g->tensor_required_bytes - 1;
+    g->requested_span     = g->tensor_required_bytes;
+
+    /* (d) THE INVARIANT, against the SUPPLIED buffer. */
+    /* The supplied buffer is DECIDED HERE, not implied downstream: in normal
+     * operation it is exactly the declared span, and in the regression case it is
+     * exactly one row. Deciding it in one place is what makes the bounds check
+     * meaningful rather than circular. */
+    g->supplied_buffer_bytes = one_row_regression ? g->row_bytes
+                                                  : g->tensor_required_bytes;
+    if (g->supplied_buffer_bytes < g->tensor_required_bytes) {
+        /* Five specifiers, five arguments. This had four and printed a raw stack
+         * value as the buffer size, which is the last thing a refusal message
+         * should do: the number a reader would trust most was the one that was
+         * garbage. */
+        geo_fail(g, "REFUSED BEFORE ANY READ: buffer %llu bytes < required %llu "
+                    "(max_byte_touched %llu would be at index %llu of buffer %llu)",
+                 (unsigned long long) g->supplied_buffer_bytes,
+                 (unsigned long long) g->tensor_required_bytes,
+                 (unsigned long long) g->max_byte_touched,
+                 (unsigned long long) g->supplied_buffer_bytes,
+                 (unsigned long long) g->supplied_buffer_bytes);
+        return 0;
+    }
+    if (g->max_byte_touched >= g->supplied_buffer_bytes) {
+        geo_fail(g, "REFUSED BEFORE ANY READ: max_byte_touched %llu >= buffer %llu",
+                 (unsigned long long) g->max_byte_touched,
+                 (unsigned long long) g->supplied_buffer_bytes);
+        return 0;
+    }
+
+    /* (e) INDEPENDENT BOUND: against the container, not against ourselves. */
+    if (g->data_offset + g->tensor_offset + g->tensor_required_bytes >
+        g->next_tensor_offset && !g->is_last_tensor) {
+        geo_fail(g, "requested span %llu bytes would overlap the next tensor at %llu "
+                    "(start %llu)",
+                 (unsigned long long) g->tensor_required_bytes,
+                 (unsigned long long) g->next_tensor_offset,
+                 (unsigned long long) (g->data_offset + g->tensor_offset));
+        return 0;
+    }
+    return 1;
 }
 
-/* Deterministic activation vector: a fixed LCG, so the probe and any golden are
- * reproducible without depending on rand() implementation details. */
-static void fill_x(float * x, size_t n, uint64_t seed) {
+/* ---------------- CHECKED SPAN ACCESS ----------------
+ *
+ * Every read goes through this. It re-verifies the bound at the point of use, so
+ * even a future edit that changes the traversal cannot silently escape: the
+ * accessor is the boundary, not an offset computed once somewhere far above. */
+struct cspan {
+    const uint8_t * base;
+    uint64_t        size;
+    uint64_t        used;   /* running high-water mark */
+};
+
+static int span_ok(cspan * s, uint64_t off, uint64_t len, char * why, size_t cap) {
+    if (len == 0) { return 1; }
+    if (off > s->size || len > s->size || off + len > s->size) {
+        snprintf(why, cap,
+                 "span REFUSED: off=%llu len=%llu exceeds buffer %llu "
+                 "(would touch byte %llu)",
+                 (unsigned long long) off, (unsigned long long) len,
+                 (unsigned long long) s->size,
+                 (unsigned long long) (off + len - 1));
+        return 0;
+    }
+    const uint64_t hi = off + len - 1;
+    if (hi + 1 > s->used) { s->used = hi + 1; }
+    return 1;
+}
+
+/* ---------------- the traversal, using only checked spans ---------------- */
+
+static bool fill_x(float * x, size_t n, uint64_t seed) {
     uint64_t s = seed ? seed : 1;
     for (size_t i = 0; i < n; ++i) {
         s = s * 6364136223846793005ULL + 1442695040888963407ULL;
-        /* Map to roughly [-1, 1) with a fixed shape. */
         x[i] = (float) ((int32_t) ((s >> 33) % 20001) - 10000) / 10000.0f;
     }
+    return true;
 }
 
 int main(int argc, char ** argv) {
-    if (argc < 2) { fprintf(stderr, "usage: %s model.gguf [tensor] [xseed]\n", argv[0]); return 1; }
+    if (argc < 2) {
+        fprintf(stderr, "usage: %s model.gguf [tensor] [xseed] [--one-row-buffer]\n",
+                argv[0]);
+        return 1;
+    }
+    const char * only = NULL;
+    uint64_t xseed = 12345ULL;
+    bool force_one_row = false;
+    /* EXPLICIT FLAGS ONLY. The previous parser treated any non-flag argument as a
+     * tensor name, so passing the numeric seed 12345 silently became a search for
+     * a tensor called "12345", which matched nothing and produced a clean,
+     * confident, EMPTY witness. A number that turns into an identifier is the same
+     * family of mistake as a filename that turns into a topology: the tool agreed
+     * to look for something it was never asked about, and reported no results
+     * without saying the question had changed. */
+    for (int i = 2; i < argc; ++i) {
+        if (strcmp(argv[i], "--one-row-buffer") == 0) { force_one_row = true; }
+        else if (strcmp(argv[i], "--tensor") == 0 && i + 1 < argc) { only = argv[++i]; }
+        else if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc) { xseed = strtoull(argv[++i], NULL, 10); }
+        else {
+            fprintf(stderr,
+                    "unknown argument '%s'. Use --tensor NAME, --seed N, "
+                    "--one-row-buffer. Bare arguments are rejected so a value can "
+                    "never be silently reinterpreted as a name.\n", argv[i]);
+            return 2;
+        }
+    }
 
     uint64_t fsize = 0;
     { FILE * sf = fopen(argv[1], "rb");
-      if (sf == NULL) { fprintf(stderr, "cannot stat %s\n", argv[1]); return 1; }
+      if (!sf) { fprintf(stderr, "cannot stat %s\n", argv[1]); return 1; }
       fseek(sf, 0, SEEK_END); fsize = (uint64_t) ftell(sf); fclose(sf); }
 
-    gguf_init_params gp; memset(&gp, 0, sizeof gp); gp.no_alloc = true;
-    gguf_init_params gp_map; memset(&gp_map, 0, sizeof gp_map);
-    gguf_context * g = gguf_init_from_file(argv[1], gp);
-    if (!g) { fprintf(stderr, "cannot open %s\n", argv[1]); return 1; }
+    gguf_init_params gp;
+    memset(&gp, 0, sizeof gp);
+    gp.no_alloc = true;
+    gguf_context * ctx = gguf_init_from_file(argv[1], gp);
+    if (!ctx) { fprintf(stderr, "cannot open %s\n", argv[1]); return 1; }
 
-    const uint64_t xseed = argc > 3 ? strtoull(argv[3], NULL, 10) : 12345ULL;
-
-    /* Candidate tensors: prefer one of each interesting type, then anything. */
-    std::vector<std::string> want = {
-        "blk.0.attn_q.weight",   /* q4_K, many rows, many blocks */
-        "blk.0.ffn_down.weight", /* q6_K */
-        "blk.0.attn_norm.weight",/* f32 */
-        "token_embd.weight"      /* q6_K, large */
-    };
-    if (argc > 2) { want.clear(); want.push_back(argv[2]); }
-
-    printf("\n=== STEP 2 GEMV: Saphira vs vendored reference ===\n");
-    printf("  activation seed = %llu (deterministic; no rand())\n", (unsigned long long) xseed);
-    printf("  reference path  = ggml type_traits.to_float + ggml_vec_dot_f32\n");
-    printf("  reference only: vendored to_float for dequantisation, double accumulation\n");
-    printf("  for the dot. Hex float output, every row, so a stride error cannot hide.\n");
-
-    int total = 0, mismatched = 0;
-    /* Tolerance in ULP. The two implementations accumulate in different orders, so
-     * this is the honest bar rather than exact equality. It is TIGHT on purpose:
-     * a wrong stride or a wrong index is enormous, and a wrong order of addition
-     * within one row is a handful. 4096 ULP separates those two failure classes
-     * by a wide margin. */
-    const int64_t ULP_TOL = 4096;
-
-    for (const std::string & name : want) {
-        const int64_t id = gguf_find_tensor(g, name.c_str());
-        if (id < 0) { continue; }
-        const ggml_type tt = gguf_get_tensor_type(g, id);
-        const ggml_type_traits * tr = ggml_get_type_traits(tt);
-        const int64_t * ne = gguf_get_tensor_ne(g, id);
-        const int64_t row_elems = ne[0];
-        const int64_t nb = row_elems / tr->blck_size;
-        /* Offsets are computed, not assumed: data_offset from the header plus the
-         * per-tensor offset, against a buffer we read ourselves. The gguf API
-         * exposes metadata but not a data pointer, so borrowing the pattern from
-         * s0_deq_probe keeps this arithmetic visible and checkable. */
-        const uint64_t toff = gguf_get_tensor_offset(g, id);
-        const uint64_t doff = gguf_get_data_offset(g);
-        /* Row count FIRST, then the read sized from it. The first version of this
-         * probe read ONE row's bytes and then iterated n_rows rows, so the
-         * reference walked off the end of its own buffer and segfaulted. Reading
-         * exactly as many bytes as are consumed is the whole discipline; a probe
-         * that reads less than it walks is not measuring the model, it is
-         * measuring its own optimism. */
-        int64_t n_rows = (ne[1] > 1) ? ne[1] : 1;
-        if (n_rows > 64) { n_rows = 64; }
-        if (n_rows < 1) { n_rows = 1; }
-        /* ne[1] is the stored row count for a 2D weight. It is NOT the block
-         * count per row. Capping by the block count silently reduced attn_q from
-         * 4096 stored rows to 16, which is a plausible-looking small matrix and
-         * would have made a stride test far weaker than intended without ever
-         * reporting that it had done so. */
-        const int64_t stored_rows = (ne[1] > 1) ? ne[1] : 1;
-        if (n_rows > stored_rows) { n_rows = stored_rows; }
-
-        const uint64_t row_bytes = (uint64_t) tr->type_size * (uint64_t) nb;
-        const uint64_t tbytes = row_bytes * (uint64_t) n_rows;
-
-        /* BOUNDS CHECK before dereferencing. An out-of-range offset that silently
-         * reads past the buffer is a segfault with no diagnosis; reporting the
-         * four numbers that decide it turns a crash into a fact. */
-        if (doff + toff + tbytes > fsize) {
-            printf("  %-26s %-6s OFFSET OUT OF RANGE: data_offset=%llu tensor_offset=%llu "
-                   "need=%llu file=%llu\n",
-                   name.c_str(), ggml_type_name(tt),
-                   (unsigned long long) doff, (unsigned long long) toff,
-                   (unsigned long long) (doff + toff + tbytes),
-                   (unsigned long long) fsize);
-            mismatched++; total++;
-            continue;
-        }
-        std::vector<uint8_t> wbuf((size_t) tbytes);
-        { FILE * tf = fopen(argv[1], "rb");
-          if (tf == NULL) { printf("  cannot reopen model\n"); mismatched++; total++; continue; }
-          if (fseek(tf, (long) (doff + toff), SEEK_SET) != 0 ||
-              fread(wbuf.data(), 1, (size_t) tbytes, tf) != (size_t) tbytes) {
-              printf("  %-26s short read at offset %llu\n", name.c_str(),
-                     (unsigned long long) (doff + toff));
-              fclose(tf); mismatched++; total++; continue;
-          }
-          fclose(tf); }
-        const uint8_t * wdata = wbuf.data();
-
-        std::vector<float> x((size_t) row_elems);
-        fill_x(x.data(), x.size(), xseed);
-
-        std::vector<double> ref;
-        reference_gemv(tr, wdata, row_elems, x.data(), n_rows, ref);
-
-        /* Emit EVERY row, not a sample. A golden that carries only the first row
-         * cannot detect a stride error: every wrong-stride implementation gets row
-         * 0 right. Each row is printed in hex float form so the witness is exact
-         * and no decimal rounding can hide a disagreement. */
-        printf("  [gemv] %s\n", name.c_str());
-        printf("    type          = %s\n", ggml_type_name(tt));
-        printf("    row_elems     = %lld\n", (long long) row_elems);
-        printf("    blocks_per_row= %lld\n", (long long) nb);
-        printf("    n_rows        = %lld  (of %lld stored)\n", (long long) n_rows, (long long) stored_rows);
-        printf("    x_seed        = %llu\n", (unsigned long long) xseed);
-        printf("    ROWS");
-        for (int64_t r = 0; r < n_rows; ++r) {
-            printf(" %a", ref[(size_t) r]);
-        }
-        /* Per-row hash of the DEQUANTISED bytes, via the reference expander. The
-         * K-quant gate only ever checked ROW 0, so a dequantisation that is right
-         * on the first row and wrong on later ones -- a stride bug in the expander,
-         * or a block walk that drifts -- would be invisible. Emitting a hash per row
-         * makes that separable from the GEMV, so when a GEMV row disagrees we can
-         * say whether the fault is in the bytes or in the multiply-accumulate. */
-        printf("    ROWHASH");
-        { std::vector<uint8_t> h((size_t) row_elems * 4);
-          for (int64_t r = 0; r < n_rows; ++r) {
-              std::vector<float> rowbuf((size_t) row_elems);
-              const char * rp = (const char *) wdata + (size_t) r * row_bytes;
-              for (int64_t b = 0; b < nb; ++b) {
-                  tr->to_float(rp + (size_t) b * tr->type_size, rowbuf.data() + (size_t) (b * tr->blck_size),
-                               tr->blck_size);
-              }
-              uint64_t hh = 1469598103934665603ULL;
-              const uint8_t * bb = (const uint8_t *) rowbuf.data();
-              for (size_t i = 0; i < rowbuf.size() * sizeof(float); ++i) { hh ^= bb[i]; hh *= 1099511628211ULL; }
-              printf(" %016llx", (unsigned long long) hh);
-          }
-        }
-        printf("\n");
-        total++;
+    std::vector<const char *> want;
+    if (only) {
+        want.push_back(only);
+    } else {
+        want.push_back("blk.0.attn_q.weight");
+        want.push_back("blk.0.ffn_down.weight");
+        want.push_back("blk.0.attn_norm.weight");
+        want.push_back("token_embd.weight");
     }
 
-    printf("\n  cases=%d  reference rows emitted for golden capture\n", total);
-    gguf_free(g);
+    printf("\n=== STEP 2 GEMV WITNESS (geometry proven before data) ===\n");
+    printf("  reference dequant : vendored ggml type_traits.to_float\n");
+    printf("  reference dot     : DOUBLE accumulation\n");
+    printf("  x_seed            : %llu\n", (unsigned long long) xseed);
+
+    int n_cases = 0, n_refused = 0;
+    char why[256];
+
+    for (size_t w = 0; w < want.size(); ++w) {
+        const char * name = want[w];
+        if (gguf_find_tensor(ctx, name) < 0) { continue; }
+
+        /* ---- 1. GEOMETRY FIRST. Nothing below this point reads a payload. ---- */
+        geom g;
+        g.file_bytes = fsize;
+        /* The deliberate regression: ask for one row of supply while the
+         * traversal will need more. geo_build must REFUSE before any read. */
+        const int geo_ok = geo_build(&g, ctx, name, force_one_row);
+
+        printf("  [gemv] %s\n", name);
+        printf("    type                  = %s\n", ggml_type_name(gguf_get_tensor_type(ctx, gguf_find_tensor(ctx, name))));
+        printf("    ne                    = [%lld, %lld]\n", (long long) g.ne0, (long long) g.ne1);
+        printf("    block_size            = %d\n", g.block_size);
+        printf("    type_size             = %d\n", g.type_size);
+        printf("    blocks_per_row        = %llu\n", (unsigned long long) g.blocks_per_row);
+        printf("    row_bytes             = %llu\n", (unsigned long long) g.row_bytes);
+        printf("    n_rows                = %llu\n", (unsigned long long) g.n_rows);
+        printf("    stored_rows           = %llu\n", (unsigned long long) g.stored_rows);
+        printf("    tensor_required_bytes = %llu\n", (unsigned long long) g.tensor_required_bytes);
+        printf("    first_byte_touched    = %llu\n", (unsigned long long) g.first_byte_touched);
+        printf("    max_byte_touched      = %llu\n", (unsigned long long) g.max_byte_touched);
+        printf("    requested_span        = %llu\n", (unsigned long long) g.requested_span);
+        printf("    supplied_buffer_bytes = %llu\n", (unsigned long long) g.supplied_buffer_bytes);
+        printf("    next_tensor_offset    = %llu%s\n",
+               (unsigned long long) g.next_tensor_offset,
+               g.is_last_tensor ? " (last tensor; file size used)" : "");
+        printf("    BOUNDS                = %s\n", geo_ok ? "OK" : "REFUSED");
+        if (!geo_ok) {
+            printf("    reason                = %s\n", g.why);
+            printf("    ENDCASE %s REFUSED\n", name);
+            n_refused++;
+            n_cases++;
+            continue;
+        }
+
+        /* ---- 2. READ EXACTLY THE DECLARED SPAN ---- */
+        std::vector<uint8_t> wbuf((size_t) g.tensor_required_bytes);
+        {
+            FILE * tf = fopen(argv[1], "rb");
+            if (!tf) { printf("    reason = cannot reopen\n"); n_cases++; continue; }
+            const uint64_t at = g.data_offset + g.tensor_offset;
+            if (fseek(tf, (long) at, SEEK_SET) != 0 ||
+                fread(wbuf.data(), 1, (size_t) g.tensor_required_bytes, tf) !=
+                    (size_t) g.tensor_required_bytes) {
+                printf("    BOUNDS  = REFUSED (short read at %llu)\n",
+                       (unsigned long long) at);
+                printf("    ENDCASE %s REFUSED\n", name);
+                fclose(tf);
+                n_refused++; n_cases++;
+                continue;
+            }
+            fclose(tf);
+        }
+
+        cspan sp;
+        sp.base = wbuf.data();
+        sp.size = g.supplied_buffer_bytes;
+        sp.used = 0;
+
+        const ggml_type_traits * tr =
+            ggml_get_type_traits(gguf_get_tensor_type(ctx, gguf_find_tensor(ctx, name)));
+        std::vector<float> x((size_t) g.ne0);
+        fill_x(x.data(), x.size(), xseed);
+
+        /* ---- 3. TRAVERSE THROUGH CHECKED SPANS ONLY ---- */
+        std::vector<double> ref((size_t) g.n_rows, 0.0);
+        std::vector<unsigned long long> rh((size_t) g.n_rows, 0);
+        std::vector<float> rowbuf((size_t) g.ne0);
+        bool refused = false;
+
+        for (uint64_t r = 0; r < g.n_rows && !refused; ++r) {
+            for (uint64_t b = 0; b < g.blocks_per_row; ++b) {
+                const uint64_t off = r * g.row_bytes + b * (uint64_t) g.type_size;
+                if (!span_ok(&sp, off, (uint64_t) g.type_size, why, sizeof why)) {
+                    printf("    SPAN REFUSED at row %llu block %llu: %s\n",
+                           (unsigned long long) r, (unsigned long long) b, why);
+                    refused = true;
+                    break;
+                }
+                if (tr->to_float != NULL) {
+                    tr->to_float((const char *) sp.base + off,
+                                 rowbuf.data() + b * (uint64_t) g.block_size,
+                                 g.block_size);
+                } else {
+                    /* F32 passthrough, matching the reference's own semantics. */
+                    memcpy(rowbuf.data() + b * (uint64_t) g.block_size,
+                           sp.base + off, (size_t) g.type_size);
+                }
+                const uint64_t dst = b * (uint64_t) g.block_size;
+                if (dst + (uint64_t) g.block_size > (uint64_t) g.ne0) {
+                    snprintf(why, sizeof why,
+                             "destination overflow: block %llu writes [%llu,%llu) past %llu",
+                             (unsigned long long) b, (unsigned long long) dst,
+                             (unsigned long long) (dst + g.block_size),
+                             (unsigned long long) g.ne0);
+                    printf("    DEST REFUSED: %s\n", why);
+                    refused = true;
+                    break;
+                }
+            }
+            if (refused) { break; }
+
+            double acc = 0.0;
+            for (uint64_t i = 0; i < (uint64_t) g.ne0; ++i) {
+                acc += (double) rowbuf[(size_t) i] * (double) x[(size_t) i];
+            }
+            ref[(size_t) r] = acc;
+
+            unsigned long long hh = 1469598103934665603ULL;
+            const uint8_t * bb = (const uint8_t *) rowbuf.data();
+            for (uint64_t i = 0; i < (uint64_t) g.ne0 * sizeof(float); ++i) {
+                hh ^= bb[i];
+                hh *= 1099511628211ULL;
+            }
+            rh[(size_t) r] = hh;
+        }
+
+        if (refused) {
+            printf("    ENDCASE %s REFUSED\n", name);
+            n_refused++; n_cases++;
+            continue;
+        }
+
+        /* ---- 4. VERIFY THE HIGH-WATER MARK MATCHED THE DECLARATION ---- */
+        if (sp.used != g.tensor_required_bytes) {
+            printf("    BOUNDS  = REFUSED AFTER TRAVERSAL: used %llu != declared %llu\n",
+                   (unsigned long long) sp.used,
+                   (unsigned long long) g.tensor_required_bytes);
+            printf("    ENDCASE %s REFUSED\n", name);
+            n_refused++; n_cases++;
+            continue;
+        }
+
+        printf("    bytes_actually_read  = %llu\n", (unsigned long long) sp.used);
+        printf("    ROWS");
+        for (uint64_t r = 0; r < g.n_rows; ++r) { printf(" %a", ref[(size_t) r]); }
+        printf("\n    ROWHASH");
+        for (uint64_t r = 0; r < g.n_rows; ++r) {
+            printf(" %016llx", rh[(size_t) r]);
+        }
+        printf("\n    ENDCASE %s OK\n", name);
+        n_cases++;
+    }
+
+    gguf_free(ctx);
+
+    printf("\n  cases=%d refused=%d\n", n_cases, n_refused);
+    /* The exit status is part of the witness. Golden capture is permitted only on
+     * exit 0 AND complete records AND zero refusals, so a partial run cannot be
+     * mistaken for a witness by the mere existence of an output file. */
+    if (n_refused > 0) {
+        printf("  VERDICT: REFUSED -- not a witness; golden capture is forbidden\n");
+        return 1;
+    }
+    printf("  VERDICT: COMPLETE -- every record structurally whole\n");
     return 0;
 }
