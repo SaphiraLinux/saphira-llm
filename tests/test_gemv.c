@@ -68,8 +68,11 @@ static int64_t ulp_distance(float a, float b) {
 
 struct gcase {
     char     name[128];
-    uint64_t row_elems;
+    uint64_t row_elems;        /* DERIVED from the golden's geometry, then cross-checked */
+    uint64_t block_size;
+    uint64_t type_size;
     uint64_t blocks_per_row;
+    uint64_t row_bytes;
     uint64_t n_rows;
     uint64_t seed;
     uint64_t * rowhash;   /* reference per-row hash of the DEQUANTISED bytes */
@@ -91,10 +94,19 @@ static int parse_case(const char * blk, struct gcase * c) {
      * one and every case looked like a stale golden. A field is located by its
      * delimiter, not by arithmetic on its layout. */
     struct { const char * key; uint64_t * out; } fields[] = {
-        { "row_elems",     &c->row_elems },
-        { "blocks_per_row",&c->blocks_per_row },
-        { "n_rows",        &c->n_rows },
-        { "x_seed",        &c->seed },
+        /* The rebuilt witness declares GEOMETRY rather than a bare element count,
+         * because that is what lets a reader check its work. This test had been
+         * looking for "row_elems", a field that no longer exists, so row_elems
+         * stayed 0, the per-row hash loop ran ZERO times, and every row "disagreed"
+         * against an unchanged hash constant -- including attn_norm, which is F32
+         * and involves no decoding at all. A stale field name in a parser produced
+         * a confident, entirely fictional disagreement. */
+        { "block_size",     &c->block_size },
+        { "type_size",      &c->type_size },
+        { "blocks_per_row", &c->blocks_per_row },
+        { "row_bytes",      &c->row_bytes },
+        { "n_rows",         &c->n_rows },
+        { "x_seed",         &c->seed },
     };
     for (size_t k = 0; k < sizeof fields / sizeof *fields; ++k) {
         char pat[64];
@@ -104,6 +116,12 @@ static int parse_case(const char * blk, struct gcase * c) {
         q = strchr(q, '=');
         if (q == NULL) { continue; }
         *fields[k].out = strtoull(q + 1, NULL, 10);
+    }
+
+    /* Derive, then cross-check against the golden's own declared row_bytes, so
+     * the derivation is not also its own proof. */
+    if (c->block_size > 0 && c->blocks_per_row > 0) {
+        c->row_elems = c->block_size * c->blocks_per_row;
     }
 
     const char * rh = strstr(blk, "    ROWHASH");
@@ -205,6 +223,12 @@ int main_k_gemv_gate(void) {
             const sllm_gguf_tensor * t = sllm_gguf_find_tensor(&g, c.name);
             if (t == NULL) {
                 printf("    FAIL %-28s tensor not in model\n", c.name);
+                fail++;
+            } else if (c.row_bytes != 0 &&
+                       c.row_bytes != c.blocks_per_row * c.type_size) {
+                printf("    FAIL %-28s golden row_bytes %llu != blocks_per_row*type_size %llu\n",
+                       c.name, (unsigned long long) c.row_bytes,
+                       (unsigned long long) (c.blocks_per_row * c.type_size));
                 fail++;
             } else if (c.row_elems != t->ne[0]) {
                 printf("    FAIL %-28s row_elems %llu != model ne[0] %llu (golden is stale)\n",

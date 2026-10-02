@@ -23,6 +23,7 @@
     blocks_per_row        = 16
     row_bytes             = 2304
     n_rows                = 64
+    x_seed                = 12345
     stored_rows           = 4096
     tensor_required_bytes = 147456
     first_byte_touched    = 0
@@ -43,6 +44,7 @@
     blocks_per_row        = 48
     row_bytes             = 10080
     n_rows                = 64
+    x_seed                = 12345
     stored_rows           = 4096
     tensor_required_bytes = 645120
     first_byte_touched    = 0
@@ -63,6 +65,7 @@
     blocks_per_row        = 4096
     row_bytes             = 16384
     n_rows                = 1
+    x_seed                = 12345
     stored_rows           = 1
     tensor_required_bytes = 16384
     first_byte_touched    = 0
@@ -83,6 +86,7 @@
     blocks_per_row        = 16
     row_bytes             = 2304
     n_rows                = 64
+    x_seed                = 12345
     stored_rows           = 151936
     tensor_required_bytes = 147456
     first_byte_touched    = 0

@@ -334,6 +334,16 @@ int main(int argc, char ** argv) {
         printf("    blocks_per_row        = %llu\n", (unsigned long long) g.blocks_per_row);
         printf("    row_bytes             = %llu\n", (unsigned long long) g.row_bytes);
         printf("    n_rows                = %llu\n", (unsigned long long) g.n_rows);
+        /* THE SEED BELONGS INSIDE THE RECORD. It was printed once in the header,
+         * outside every [gemv] block, so a reader parsing records got seed 0 and
+         * rebuilt the activation vector from a different seed than the reference
+         * used. The sums then differed by whole units -- not by rounding, but
+         * because they were products of different numbers -- and the gate reported
+         * a confident numerical disagreement on correct code.
+         *
+         * A record that cannot reproduce its own inputs is not a record. Anything
+         * needed to recompute the values belongs beside them. */
+        printf("    x_seed                = %llu\n", (unsigned long long) xseed);
         printf("    stored_rows           = %llu\n", (unsigned long long) g.stored_rows);
         printf("    tensor_required_bytes = %llu\n", (unsigned long long) g.tensor_required_bytes);
         printf("    first_byte_touched    = %llu\n", (unsigned long long) g.first_byte_touched);

@@ -652,6 +652,47 @@ if [ $? -eq 0 ]; then ok "V6 routing attribution NOT claimed from ownership" 0; 
 grep -q 'routing attribution is impossible in general' /tmp/v_gf.txt
 if [ $? -eq 0 ]; then ok "V7 artefact absence is not generalised to impossibility" 0; else ok "V7 artefact absence is not generalised to impossibility" 1; fi
 
+# ---- W: WITNESS BOUNDS REFUSAL, before the first invalid read --------------
+# The late-fault finding (a witness faulting 8 rows after its buffer ended) proved a
+# witness must not depend on the MMU catching it. This asserts the refusal is CLEAN:
+# a deliberate undersized buffer must be refused by ARITHMETIC, before any read, and
+# must NOT segfault. A refusal that arrives via SIGSEGV is the bug this prevents.
+QW=/var/lib/spoon/models/qwen3-8b/Qwen3-8B-Q4_K_M.gguf
+if [ -f "$QW" ]; then
+  SLLM_SRC="" QUIET=1 ./tools/run_s0_probe.sh tools/s0_gemv_probe.cpp "$QW" \
+    --one-row-buffer > /tmp/w_refuse.txt 2>/dev/null
+  WRC=$?
+  [ "$WRC" -ne 139 ]
+  if [ $? -eq 0 ]; then ok "W1 undersized buffer does NOT segfault (rc=$WRC)" 0; else ok "W1 undersized buffer does NOT segfault (rc=$WRC)" 1; fi
+  [ "$WRC" -eq 1 ]
+  if [ $? -eq 0 ]; then ok "W2 refusal exits 1, not 0 and not 139" 0; else ok "W2 refusal exits 1, not 0 and not 139" 1; fi
+  grep -q 'BOUNDS *= *REFUSED' /tmp/w_refuse.txt
+  if [ $? -eq 0 ]; then ok "W3 BOUNDS REFUSED reported" 0; else ok "W3 BOUNDS REFUSED reported" 1; fi
+  grep -q 'REFUSED BEFORE ANY READ' /tmp/w_refuse.txt
+  if [ $? -eq 0 ]; then ok "W4 refusal happens BEFORE the first invalid read" 0; else ok "W4 refusal happens BEFORE the first invalid read" 1; fi
+  grep -q 'golden capture is forbidden' /tmp/w_refuse.txt
+  if [ $? -eq 0 ]; then ok "W5 a refused run declares golden capture forbidden" 0; else ok "W5 a refused run declares golden capture forbidden" 1; fi
+  grep -q 'ENDCASE .* REFUSED' /tmp/w_refuse.txt
+  if [ $? -eq 0 ]; then ok "W6 refused cases still emit a terminated record" 0; else ok "W6 refused cases still emit a terminated record" 1; fi
+  # ROWS may appear for a case that legitimately SUCCEEDED with one row
+  # (attn_norm needs only one), so the invariant is not "no ROWS anywhere" but
+  # "ROWS appears for exactly the cases that completed". A refused case emitting
+  # values is the thing that must never happen.
+  WROWS=$(grep -cE '^    ROWS ' /tmp/w_refuse.txt || true)
+  WOK=$(grep -cE '^    ENDCASE .* OK$' /tmp/w_refuse.txt || true)
+  [ "$WROWS" -eq "$WOK" ] && [ "$WOK" -gt 0 ] && [ "$WOK" -lt 4 ]
+  if [ $? -eq 0 ]; then ok "W7 ROWS appears for exactly the completed cases ($WROWS rows / $WOK ok / some refused)" 0; else ok "W7 ROWS appears for exactly the completed cases ($WROWS rows / $WOK ok / some refused)" 1; fi
+  # And the well-formed run must still succeed, so the refusal is not merely
+  # refusing everything.
+  QUIET=1 ./tools/run_s0_probe.sh tools/s0_gemv_probe.cpp "$QW" > /tmp/w_ok.txt 2>/dev/null
+  [ $? -eq 0 ] && grep -q 'VERDICT: COMPLETE' /tmp/w_ok.txt
+  if [ $? -eq 0 ]; then ok "W8 correctly sized run still COMPLETES" 0; else ok "W8 correctly sized run still COMPLETES" 1; fi
+  # The record must carry everything needed to reproduce its own inputs.
+  grep -q 'x_seed  *= *[0-9]' /tmp/w_ok.txt
+  if [ $? -eq 0 ]; then ok "W9 x_seed is INSIDE each record, not only the header" 0; else ok "W9 x_seed is INSIDE each record, not only the header" 1; fi
+fi
+
+
 
 echo "discovery-ir structural tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
