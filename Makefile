@@ -56,7 +56,7 @@ MAIN_SRC = src/main.c
 TEST_SRC = tests/main.c tests/test_isa.c tests/test_gguf.c tests/test_thread.c \
             tests/test_eval.c tests/test_i2s_convert.c tests/test_i2s_hermetic.c tests/test_qat.c tests/test_lifecycle.c tests/test_export.c \
             tests/test_ops.c tests/test_i2s.c tests/test_tokenizer.c tests/test_forward.c \
-            tests/test_phase5.c tests/test_dot_f16.c tests/test_quant_k.c tests/test_gemv.c tests/test_dispatch.c tests/test_fwd_slice.c tests/test_rope_contract.c tests/test_attention.c tests/test_residual.c
+            tests/test_phase5.c tests/test_dot_f16.c tests/test_quant_k.c tests/test_gemv.c tests/test_dispatch.c tests/test_fwd_slice.c tests/test_rope_contract.c tests/test_attention.c tests/test_residual.c tests/test_ffn.c
 
 CORE_OBJ = $(CORE_SRC:%.c=$(OBJDIR)/%.o)
 MAIN_OBJ = $(MAIN_SRC:%.c=$(OBJDIR)/%.o)
