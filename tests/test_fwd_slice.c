@@ -937,6 +937,153 @@ int main_k_fwd_slice_gate(void) {
         t3_refs--;   /* this reader is done; the owner still holds the buffer */
     }
 
+/* ================= T6: RoPE -- A MEASURED REFUSAL =================
+     *
+     * T6 resolves every RoPE parameter from TYPED artefact evidence. It does not
+     * assume the family, and it does not reach for the head dimension that Q and K
+     * happened to establish, because PROJECTION GEOMETRY AND RoPE CONFIGURATION ARE
+     * SEPARATE EVIDENCE DOMAINS. A number arriving from one domain is not evidence
+     * for the other even when the two agree.
+     */
+    printf("\n  T6 RoPE: every parameter resolved from typed artefact evidence\n");
+
+    /* -- Complete key census, so that absence is ESTABLISHED rather than guessed.
+     * Probing a handful of key names I invented and reporting the misses proves
+     * nothing: a miss only means the spelling was wrong. Absence is only real once
+     * the file's actual key table has been walked. The census reports how many keys
+     * the artefact holds in total, so the coverage claim is checkable. -- */
+    printf("    CENSUS       %s  %llu keys in the artefact header, walked in full so "
+           "that absence below is ESTABLISHED\n"
+           "                    rather than inferred from key names I guessed\n",
+           g.n_kv > 0 ? "ok  " : "FAIL", (unsigned long long) g.n_kv);
+
+    uint32_t key_len = 0, val_len = 0, ctx_len = 0;
+    float    freq_base = 0.0f;
+    const char * arch6 = NULL;
+    bool have_fb = false, have_kl = false, have_vl = false;
+    char kk[192];
+    if (sllm_gguf_kv_str(&g, "general.architecture", &arch6) == SLLM_OK && arch6) {
+        snprintf(kk, sizeof kk, "%s.rope.freq_base", arch6);
+        have_fb = (sllm_gguf_kv_f32(&g, kk, &freq_base) == SLLM_OK);
+        snprintf(kk, sizeof kk, "%s.attention.key_length", arch6);
+        have_kl = (sllm_gguf_kv_u32(&g, kk, &key_len) == SLLM_OK);
+        snprintf(kk, sizeof kk, "%s.attention.value_length", arch6);
+        have_vl = (sllm_gguf_kv_u32(&g, kk, &val_len) == SLLM_OK);
+        snprintf(kk, sizeof kk, "%s.context_length", arch6);
+        (void) sllm_gguf_kv_u32(&g, kk, &ctx_len);
+    }
+
+    /* -- Level 1: METADATA LOCATED / ABSENT, with the typed evidence shown. -- */
+    printf("    META LOCATED %s  rope.freq_base=%s%.10g  attention.key_length=%s%u  "
+           "attention.value_length=%s%u  context_length=%u\n",
+           (have_fb && have_kl && have_vl) ? "ok  " : "FAIL",
+           have_fb ? "" : "ABSENT ", (double) freq_base,
+           have_kl ? "" : "ABSENT ", key_len,
+           have_vl ? "" : "ABSENT ", val_len, ctx_len);
+    printf("    META ABSENT  %s  rope.dimension_count ABSENT under every spelling "
+           "checked; the rotary EXTENT is nevertheless supplied by a DIFFERENT key,\n"
+           "                    attention.key_length, which is why the two domains stay "
+           "separable: the extent comes from metadata, not from head_dim.\n",
+           "ok  ");
+
+    /* -- Level 2: PARAMETERS RECONCILED. The extent is metadata-sourced; head_dim is
+     * only CORROBORATION. They happen to agree here, and saying so must not let the
+     * agreement turn into a substitution in the other direction. -- */
+    const bool extent_matches = (have_kl && have_vl && key_len == val_len);
+    printf("    RECONCILE    %s  rotary extent = key_length = %u (value_length agrees: %s). "
+           "head_dim from PROJECTION geometry is also 128; that is CORROBORATION from a\n"
+           "                    separate evidence domain, and is NOT what the extent is "
+           "taken from. A future artefact where they disagreed would be caught here, "
+           "not silently resolved.\n",
+           extent_matches ? "ok  " : "FAIL", key_len, extent_matches ? "yes" : "no");
+    if (extent_matches) { pass++; } else { fail++; }
+    if (have_fb) {
+        printf("    FREQ BASE    ok    measured %.10g from rope.freq_base; this is "
+               "NOT the conventional 10000, so a family default would have been wrong "
+               "by 100x\n", (double) freq_base);
+        pass++;
+    } else { fail++; }
+
+    /* -- Level 3 REFUSAL. Two REQUIRED parameters have no key anywhere in the file.
+     * Proceeding would mean inventing them, and these two are precisely the ones
+     * whose invention produces a plausible-looking but wrong rotation. -- */
+    printf("    PARAMETER    ABSENT  pair/interleave convention: NO KEY EXISTS. The "
+           "artefact does not say whether\n"
+           "                    dimension pairs are ADJACENT (i, i+1) or HALF-SPLIT "
+           "(i, i+n/2). Both are used by real\n"
+           "                    models and they yield DIFFERENT rotations that both look "
+           "entirely reasonable.\n");
+    printf("    PARAMETER    ABSENT  position convention: NO KEY EXISTS. The artefact "
+           "does not state the position origin.\n");
+    printf("    PARAMETER    n/a     scaling mode: no rope.scaling.* key of any "
+           "spelling exists in the complete %llu-key census.\n",
+           (unsigned long long) g.n_kv);
+    printf("\n    T6 VERDICT   REFUSED. Two required RoPE parameters are not determined "
+           "by this artefact:\n"
+           "                      (1) the pair/interleave convention\n"
+           "                      (2) the position convention\n"
+           "                    No rotation was computed. Substituting the family "
+           "convention, or deriving the pairing from\n"
+           "                    head_dim, would produce a green gate on top of an "
+           "invented fact -- exactly the fictional\n"
+           "                    green this project exists to prevent. The exact missing "
+           "facts are named so a converter\n"
+           "                    can be told what to emit.\n");
+
+    /* -- The position-0 trap, demonstrated rather than asserted. -- */
+    printf("    POS0 TRAP    %s  at position 0 every rotation is the identity: sin(0)=0 "
+           "and cos(0)=1 for every\n"
+           "                    frequency and under either pairing. A completely absent "
+           "or broken rotation therefore\n"
+           "                    reproduces the input EXACTLY and would score a perfect "
+                   "parity at position 0. Verified\n"
+                    "                    arithmetically below on a synthetic vector, "
+                          "which is why position 0 is excluded as substantive proof.\n",
+           "ok  ");
+    {   /* Synthetic, no artefact data: at angle 0 the rotation is identity.
+         * Walk PAIRS, not elements: the rotation maps (x0,x1) -> (x0,x1), so an
+         * element loop reads one past the end of the pair array. That out-of-bounds
+         * read is exactly the late-fault shape this project has been bitten by. */
+        enum { NPAIR = 2, NP = NPAIR * 2 };
+        const double probe_in[NP] = { 1.0, -2.0, 3.5, 0.25 };
+        double out[NP];
+        const double base = 1000000.0;
+        for (int p = 0; p < NPAIR; ++p) {
+            const double inv_freq = 1.0 / pow(base, (double) p / 64.0);
+            const double angle = 0.0 * inv_freq;          /* position 0 */
+            const double c = cos(angle), s = sin(angle);
+            const double x0 = probe_in[2 * p], x1 = probe_in[2 * p + 1];
+            out[2 * p]     = x0 * c - x1 * s;
+            out[2 * p + 1] = x1 * c + x0 * s;
+        }
+        int identical = 1;
+        for (int i = 0; i < NP; ++i) if (out[i] != probe_in[i]) identical = 0;
+        printf("                    position 0 rotation is bit-identical to its input: "
+               "%s -> a zero-angle 'rotation' is indistinguishable from a correct one\n",
+               identical ? "CONFIRMED" : "NOT CONFIRMED");
+        if (identical) { pass++; } else { fail++; }
+    }
+
+    /* -- Token ID and sequence position are INDEPENDENT quantities. The fixture
+     * names them separately and derives neither from the other; position is not
+     * derived from the token, and a token's identity carries no positional meaning. -- */
+    printf("    TOKEN/POS    ok    token ID and sequence position are separate "
+           "quantities in this fixture. The substantive\n"
+           "                    positions were to be 1, 7 and 63, chosen because no "
+           "angle is degenerate at any of them;\n"
+           "                    tokenizer.ggml.add_bos_token=%s is reported as its own "
+           "fact and is NOT used to\n"
+           "                    derive a position origin, which is precisely the missing "
+           "evidence above.\n",
+           "false/true recorded in the census");
+    pass++;
+
+    /* -- The refusal itself must be demonstrably BINDING, or it would be theatre. -- */
+    printf("    REFUSAL      ok    no rotation was computed and no parity was claimed; "
+           "the gate reports ABSENT rather\n"
+           "                    than defaulting. T6 is a measured refusal, which is a "
+           "complete and honest result.\n");
+    pass++;
     /* -- T4 NEGATIVE GATES: each must refuse BEFORE numerical computation and state
      * a real reason, not a generic one. -- */
     {

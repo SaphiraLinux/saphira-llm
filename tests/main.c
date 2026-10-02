@@ -8,6 +8,7 @@
  */
 
 #include "harness.h"
+#include "gate_runner.h"
 
 void sllm_test_isa(void);
 void sllm_test_gguf(void);
@@ -32,20 +33,6 @@ int  main_k_fwd_slice_gate(void);
 int sllm_tests_run    = 0;
 int sllm_tests_failed = 0;
 const char * sllm_current = "";
-
-/* Fold a product gate's own verdict into the global counters. The gate keeps its
- * local pass/fail accounting and reporting; this makes that verdict AUTHORITATIVE so
- * it can no longer be silently dropped on the floor by its caller. */
-static void run_product_gate(int (*fn)(void), const char *name) {
-    const int rc = fn();
-    sllm_tests_run += 1;
-    if (rc != 0) {
-        sllm_tests_failed += 1;
-        printf("  GATE FAIL    %s -> returned %d, and this verdict is counted\n", name, rc);
-    } else {
-        printf("  GATE ok      %s\n", name);
-    }
-}
 
 int main(void) {
     (void) sllm_current;
@@ -72,10 +59,10 @@ int main(void) {
      * a gate that cannot fail. It stayed latent only because T2-T4 all passed; the
      * first genuine failure inside a gate exposed it, and the failure is invisible
      * unless the gate's verdict is actually folded into the global counters. */
-    run_product_gate(main_k_quant_gate,   "K-quant dequantisers vs reference golden");
-    run_product_gate(main_k_gemv_gate,    "f32 GEMV vs reference double-accumulated golden");
-    run_product_gate(main_k_dispatch_gate,"execution dispatched by measured evidence");
-    run_product_gate(main_k_fwd_slice_gate,"forward slice: T2/T3/T4/T5 claim levels");
+    sllm_run_product_gate(main_k_quant_gate,   "K-quant dequantisers vs reference golden");
+    sllm_run_product_gate(main_k_gemv_gate,    "f32 GEMV vs reference double-accumulated golden");
+    sllm_run_product_gate(main_k_dispatch_gate,"execution dispatched by measured evidence");
+    sllm_run_product_gate(main_k_fwd_slice_gate,"forward slice: T2/T3/T4/T5/T6 claim levels");
 
     printf("\n%d checks, %d failed\n", sllm_tests_run, sllm_tests_failed);
     return sllm_tests_failed == 0 ? 0 : 1;

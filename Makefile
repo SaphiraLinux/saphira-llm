@@ -101,7 +101,17 @@ $(EVAL_BIN): $(EVAL_OBJ) $(LIBOBJ)
 
 # ---------------------------------------------------------------- tests
 
-test: $(TESTBIN)
+# HARNESS-FAILURE PROPAGATION IS AN INVARIANT. This binary deliberately induces
+# failing gates and proves the verdict reaches the global counters and the process
+# exit status. It is run as part of `make test` precisely so that a harness which
+# cannot fail is itself caught by the build. It must not be removed when the defect
+# it guards against is forgotten.
+GATE_PROP_BIN = saphira-llm-gate-propagation
+$(GATE_PROP_BIN): tests/test_gate_propagation.c tests/gate_runner.h
+	$(CC) $(CFLAGS) -o $@ $<
+
+test: $(TESTBIN) $(GATE_PROP_BIN)
+	./$(GATE_PROP_BIN)
 	./$(TESTBIN)
 
 # Scheduler benchmark. Measures the Phase 2 gate: no full-occupancy collapse.
