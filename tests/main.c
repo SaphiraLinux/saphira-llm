@@ -25,6 +25,7 @@ void sllm_test_qat(void);
 void sllm_test_lifecycle(void);
 void sllm_test_export(void);
 int  main_k_quant_gate(void);
+int  main_k_gemv_gate(void);
 
 int sllm_tests_run    = 0;
 int sllm_tests_failed = 0;
@@ -51,6 +52,8 @@ int main(void) {
     sllm_test_export();
     /* Step 1 gate: the K-quant dequantisers checked against a REFERENCE golden. */
     main_k_quant_gate();
+    /* Step 2 gate: the f32 GEMV against a reference double-accumulated golden. */
+    main_k_gemv_gate();
 
     printf("\n%d checks, %d failed\n", sllm_tests_run, sllm_tests_failed);
     return sllm_tests_failed == 0 ? 0 : 1;

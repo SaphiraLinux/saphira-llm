@@ -16,6 +16,7 @@
  */
 
 #include <saphira_llm/ops.h>
+#include <stdlib.h>
 #include <saphira_llm/quant.h>
 #include <saphira_llm/log.h>
 
@@ -148,6 +149,70 @@ float sllm_dot_f16_f32(const uint16_t * row, const float * x, size_t n) {
 /* ------------------------------------------------------------------ */
 /* add / mul                                                           */
 /* ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ */
+/* Step 2: matrix-vector over stored (quantised) rows                   */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The first f32 GEMV. It is deliberately BORING: a plain scalar loop, no intrinsics,
+ * no blocking, no threading, no fused scale application. That is an intentional
+ * choice and the reason is falsifiability.
+ *
+ * Everything optimisable in this function is also where a dequantised GEMV
+ * silently goes wrong: a stride computed once and reused, an accumulator reset in
+ * the wrong scope, a block boundary that happens to line up for the first block
+ * and not the others. Those bugs are invisible when the loop is clever and obvious
+ * when it is not. The optimised version comes after this one is gated against an
+ * external witness, and it will be required to agree with THIS one bit-for-bit, so
+ * a plain reference always exists to diff against.
+ *
+ * `n` is the number of elements in ONE row, i.e. tensor ne[0]; `n_rows` is the
+ * count of stored rows. The caller supplies the mapped tensor payload and this
+ * function knows nothing about GGUF or offsets, so it cannot get them wrong on the
+ * caller's behalf.
+ *
+ * A row must be a whole number of stored blocks. That is CHECKED rather than
+ * assumed: a length that is not a multiple of the block size cannot be decoded, and
+ * truncating it would produce a plausible number from a tensor the caller did not
+ * intend.
+ */
+sllm_status sllm_gemv_f32(sllm_ggml_type type, const void * data, size_t n,
+                          const float * x, size_t n_rows, float * out) {
+    if (data == NULL || x == NULL || out == NULL) { return SLLM_ERR_ARG; }
+    if (n == 0 || n_rows == 0) { return SLLM_ERR_ARG; }
+
+    uint32_t blck = 0, tsz = 0;
+    const sllm_status ts = sllm_gguf_type_traits(type, &blck, &tsz);
+    if (ts != SLLM_OK) { return ts; }
+    if (blck == 0 || n % blck != 0) { return SLLM_ERR_ARG; }
+
+    const size_t blocks_per_row = n / blck;
+    const size_t row_bytes = (size_t) tsz * blocks_per_row;
+
+    /* Scratch for one decoded block, allocated once and reused for every block of
+     * every row, so the steady state allocates nothing. A stack buffer would be
+     * marginally faster and would put a hidden size limit on the block size. */
+    float * buf = (float *) malloc(sizeof(float) * blck);
+    if (buf == NULL) { return SLLM_ERR_NOMEM; }
+
+    for (size_t r = 0; r < n_rows; ++r) {
+        const uint8_t * row = (const uint8_t *) data + r * row_bytes;
+        float acc = 0.0f;
+        for (size_t b = 0; b < blocks_per_row; ++b) {
+            const sllm_status ds =
+                sllm_dequant_row(type, row + b * (size_t) tsz, buf, blck);
+            if (ds != SLLM_OK) { free(buf); return ds; }
+            for (size_t i = 0; i < blck; ++i) {
+                acc += buf[i] * x[b * blck + i];
+            }
+        }
+        out[r] = acc;
+    }
+
+    free(buf);
+    return SLLM_OK;
+}
 
 void sllm_add(float * dst, const float * a, const float * b, size_t n) {
     size_t i = 0;

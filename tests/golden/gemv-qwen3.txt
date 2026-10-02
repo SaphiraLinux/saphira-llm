@@ -1,0 +1,39 @@
+# REFERENCE f32 GEMV results, independent of Saphira.
+#
+# Source: tools/s0_gemv_probe.cpp against Qwen3-8B-Q4_K_M.gguf. Dequantisation is
+# the vendored reference's own ggml type_traits.to_float; the dot product is
+# accumulated in DOUBLE precision, which is deliberately stricter than matching
+# another f32 kernel -- the reference is then closer to the mathematically exact
+# answer, so Saphira is measured against truth rather than against a peer.
+#
+# 64 rows per tensor, and every row is emitted. A golden carrying only row 0
+# cannot detect a stride error, because every wrong-stride implementation gets
+# row 0 right. Values are hex float (%a), so the witness is exact and no decimal
+# rounding can hide a disagreement.
+#
+# Saphira's sllm_gemv_f32 is compared against this in tests/test_gemv.c.
+compiling (quiet)
+running fresh binary
+
+compiling (quiet)
+running fresh binary
+
+=== STEP 2 GEMV: Saphira vs vendored reference ===
+  activation seed = 12345 (deterministic; no rand())
+  reference path  = ggml type_traits.to_float + ggml_vec_dot_f32
+  reference only: vendored to_float for dequantisation, double accumulation
+  for the dot. Hex float output, every row, so a stride error cannot hide.
+  [gemv] blk.0.attn_q.weight
+    type          = q4_K
+    row_elems     = 4096
+    blocks_per_row= 16
+    n_rows        = 64  (of 4096 stored)
+    x_seed        = 12345
+    ROWS -0x1.66eb1cede7d2p-7 -0x1.d13c32f6c5c78p-2 -0x1.a8404223cd09p-7 -0x1.0a30f6fa16bdp-6 -0x1.27d947d145493p-2 0x1.285ae75f7b166p-4 -0x1.b7399751038bcp-1 0x1.94ec737ca8399p-2 0x1.6c089f7a5384fp-1 0x1.a7396309adc64p-2 -0x1.cca31079ea8eep-2 0x1.885d0637eac8cp-4 0x1.1fecb97d22306p+0 0x1.6ee0a5764ee81p-1 -0x1.455c6cc2b94d8p-4 -0x1.cbc17f4ff5c84p+0 -0x1.7de68bf7c62p-8 0x1.347530c4b0f9cp-4 0x1.b31c6c1e6de28p-2 -0x1.778532c22947ap-1 0x1.8b1c14727e03ap+0 0x1.d4a679a5efd54p-3 -0x1.4e781aad93b06p+0 0x1.343e0665af072p+0 0x1.ae058428eb30ap+0 0x1.219512660cf62p-4 -0x1.260da724ae7fap-1 -0x1.12dd23b209019p+0 -0x1.a6368b1a8d3fp-3 -0x1.0ba2a8597eca6p+0 -0x1.90a850a0f690cp+1 -0x1.cc8e15a4b4572p-1 0x1.4818b16ff6708p+0 -0x1.445d10b6b46a3p-1 -0x1.07b0b74801186p-2 -0x1.b20aee62df288p+0 -0x1.b9c62c5a5e6p+1 0x1.4c038f6dcc30fp-1 0x1.eb17439cd8e72p+0 0x1.42b39a2603dc7p-1 0x1.7aeb4cbee21aep-3 0x1.496ad7121e23p+0 -0x1.e0413cfb791ap-6 -0x1.5ca6cdd16f395p+0 0x1.2ac490de762aap-3 0x1.b1860a26932d8p-5 -0x1.96e738b0bc37fp-1 0x1.d953c3005c1a1p+0 -0x1.823c10de389fp-3 0x1.45221912c50abp-2 -0x1.df1d44b0a9bdcp-1 -0x1.781a64baf93ccp+1 0x1.b73cabd9241a6p-3 0x1.4e48da20d65e9p-2 0x1.1e73acaa57234p+0 0x1.853a8e0ab04f3p-1 0x1.a5150541a50ecp-1 -0x1.de35d26e2b0c8p-4 -0x1.b8d110894135p-1 -0x1.7b7e631bfe1d8p-6 0x1.f7dd75dd1060ep-1 0x1.49e073d211defp-1 0x1.5726641cf6b6fp-2 0x1.2f9b60d7d7f4ap-2    ROWHASH fc4c8f77573054f6 246614ae7df530ab 26cc572a5bc9f5ef f616564790265efb 5faa0afac6f117ce a7242afa939098f7 233d365f6cb2f481 f5c70bc75cf2ad8f 84f2ce86a77f8beb 288d6c9c0416527b a143eac602f00401 3309b8eeb6ffb144 505f92a37f42635b 6bf748c368e66b23 a96c9bf51f17ce42 2e2e14a11471dad1 2ee1830744d381c7 0dfd3ce28e639537 41af19f32ff6a447 c78ad9362efee10e fef4ad32f356ba57 9ae94b7b02ac1e83 ae740063887c03c9 780537a8bd9881ad 43139842b2dfff80 024c87b5e45fb3b6 ba651c7b4d5463cc 1a348500b91a3d09 fb30b9a4181c4fc8 3e52a73e7564bda2 3995104a1201dfd6 8eef49200fc81a26 76423453ec21d14e 7ecb27c56d9e42cf d10ef006f6752feb d6a1ec5d856d39a1 08975bc9e9ccf90d 998a4d8179b2951f 18118603b9eab9f8 f9959c115543b1ff 62336ba1143ab7cf 6d0faa4f4cfe1c1b 7babb99577dad1a4 4d75996df3b0b26c 78a7323e245dcc20 27746f89d8981368 179ede2daab2d0a7 2b768353be38fed6 524f0bf29f27d8b5 89f54dba4e32de73 2f47d58cf201bfa9 115a94d652cca7c2 beada45bf151dcf5 5c765b441f54b8a1 0d2b557f00a912d3 4f434081173102d7 3dece164c75ec021 fa95fe03d5789dd7 7e839d12855e5871 6674f98987ea7240 74e67a4ad21c4fde d7752121f98091df cbe335de31699654 666bff6aad8e746a
+  [gemv] blk.0.ffn_down.weight
+    type          = q6_K
+    row_elems     = 12288
+    blocks_per_row= 48
+    n_rows        = 64  (of 4096 stored)
+    x_seed        = 12345
+    ROWS 0x1.88dd9dd42f428p-5 0x1.8689d9ace746p-6 0x1.0b714ed955ddap-1 -0x1.3d9f15fc70bb3p+0 0x1.a76cb01a2bf38p-5 -0x1.fc4c7205c9bf4p-3 0x1.8321d817a2f07p-1 -0x1.4f7358db9eb1ep-1 0x1.5c29368fc4d76p+0 -0x1.00c60050d4ad3p+0 -0x1.24f225254678p-10 -0x1.2fc16ccf5c51cp+0 0x1.7d953ef60addp-2 -0x1.f6f5120a20f52p-2 -0x1.c5e77b0efffep-6 -0x1.7d9356fea7c97p+0 -0x1.26330b3ab6658p+1 0x1.ea366176c2152p+0 -0x1.2c73b8e5482e6p-3 0x1.3a7de6bbd42ccp-3 0x1.d9c56e2419f4p-1 -0x1.b55b48568aa9cp-4 0x1.8cfdd0cfdb9cp-5 -0x1.619388dc16d0cp-4 0x1.3eca9c45ee5b8p-1 0x1.b1bcde878366ap-1 -0x1.c88e71ff05804p-3 0x1.822f67f5b3bdcp-4 -0x1.5c6e9001e5c38p-2 -0x1.9a57ae945f8dep-3 0x1.5772789f09816p-1 -0x1.2a58ed103aa4cp-4 -0x1.6e6a583ba14e4p-3 0x1.9e7cb9ddcfc95p+0 -0x1.4177be4c1f5fcp+0 -0x1.31baca19141p-2 -0x1.0e2817a7370bap+0 0x1.2dca93d5f5dbfp+0 0x1.3353f3c7945fep-3 0x1.b4e5aaf699728p-4 -0x1.ac194dc3f02fap-1 -0x1.4430a392b5e2p-6 -0x1.62c02a0ead6e4p-1 0x1.4defea3609838p-1 -0x1.4e02cea4dec7bp-1 -0x1.85d016cccc467p-1 0x1.bb12ac5c40d7p-4 0x1.342e87efad4dap-3 -0x1.428a271e59f79p-1 0x1.6767fb5190782p-3 0x1.06ce6604e64d8p-5 0x1.bf52cd17e9da6p-2 0x1.627ac127120a8p-4 0x1.5df298a76be54p-3 0x1.39fab22de39cap-2 0x1.df75f4ecfdeb3p+0 0x1.78a083e13309p-7 0x1.4c586187f4e54p-1 -0x1.1a9df9c008d1p-6 -0x1.f6f320ddab17p-3 -0x1.9c9b6e47e8b7bp+0 0x1.b4ab29bcf52bcp-2 -0x1.81cf476e7c325p-1 0x1.856d97f60180ap-1    ROWHASH f39edbac2347ce31 2fa8de176b3328fa 3e9a01e200c4e2d8 3959e8d5f7116e1d c39a7dba94dee1f1 62d5090bae428704 2621320d6226ed7e eef3fa3cbff51640 9fc74163bbabfc3e d942b90a3589381a 8ade27ccae6844de 5dd4ee7adfc18c7f fb5615f1677c0c81 b5fbf6d66be607c9 f7a5c98864d513c8 ba07351b9bda0eab c1ad6e7bb25c7b6f cedab84c7a69c7fa 9fc81dd28f4f99af 3a08f057f599a8a3 7e1c99e1fa0604ee 61c8055de7d1fe9a 7c133a8aa1fc9d58 b5e0fa7fde8dcd33 8392e658873ebac5 7d8169dce1f730cb ac22503b561916b8 17a661c24783ed3d 20cbd5c93a3da011 0668e25b3a75d826 cf4e321700512e96 7e5e42c280c964f8 f23aad0373f575f0 7ca0274d89a412e0 96614ee1354f1b48 ef9a0fef867afebe 1133bce7fc7c1868 bff36c741c26a537

@@ -12,6 +12,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <saphira_llm/gguf.h>
 #include <saphira_llm/status.h>
 
 #ifdef __cplusplus
@@ -45,6 +46,30 @@ void sllm_rms_norm(float * dst, const float * x, const float * weight,
  * way it is, and what the profile that motivated it actually said.
  */
 float sllm_dot_f16_f32(const uint16_t * row, const float * x, size_t n);
+
+/*
+ * Step 2: matrix-vector product over stored rows of a (possibly quantised)
+ * tensor payload, producing one f32 result per row.
+ *
+ *     out[r] = sum_i W[r][i] * x[i]
+ *
+ * `n` is the number of elements in one row (tensor ne[0]) and `n_rows` the number
+ * of stored rows. `data` is the mapped tensor payload; this function performs no
+ * offset arithmetic of its own, so the caller cannot be surprised by it.
+ *
+ * Deliberately a plain scalar loop. It is the reference against which any
+ * optimised version must agree bit-for-bit, and it is where stride, index and
+ * block-boundary mistakes are actually visible rather than merely plausible.
+ *
+ * Note this is a separate capability from decoding. A type may be decodable, or
+ * have a known layout, or be computable, or be dispatchable; these are four
+ * different questions and sllm_gguf_type_is_supported() answers only the first two.
+ *
+ * Returns SLLM_ERR_ARG when `n` is not a whole number of stored blocks, rather
+ * than decoding a partial block.
+ */
+sllm_status sllm_gemv_f32(sllm_ggml_type type, const void * data, size_t n,
+                          const float * x, size_t n_rows, float * out);
 float sllm_dot_f16_f32_scalar(const uint16_t * row, const float * x, size_t n);
 
 /*

@@ -19,13 +19,31 @@ LLAMA_DIR="${LLAMA_DIR:-third_party/llama.cpp}"
 LIBDIR="${LIBDIR:-/tmp/lcpbuild/bin}"
 
 if [ -n "${QUIET:-}" ]; then printf 'compiling (quiet)\n'; else printf 'compiling %s -> %s\n' "$SRC" "$TMP"; fi
-if ! g++ -O2 -std=c++17 -I"$LLAMA_DIR/include" -I"$LLAMA_DIR/ggml/include" \
-        "$SRC" -o "$TMP" -L"$LIBDIR" -lllama -lggml-base -Wl,-rpath,"$LIBDIR"; then
+# SLLM_SRC, when set, additionally compiles Saphira's own sources into the probe so
+# that a reference value and our value can be produced in ONE process and compared
+# directly. Without it a probe is reference-only, which is the right default: a
+# golden captured from the reference is an independent witness, while linking our
+# code in makes the comparison self-evident rather than assumed. C files need a C
+# compiler, so they are built separately and linked in.
+SLLM_OBJS=""
+if [ -n "${SLLM_SRC:-}" ]; then
+    for f in $SLLM_SRC; do
+        o="$TMP.$(basename "$f" .c).o"
+        if ! gcc -O2 -std=c11 -D_POSIX_C_SOURCE=200809L -Iinclude -c "$f" -o "$o"; then
+            printf 'COMPILE FAILED (saphira src %s): refusing to run.\n' "$f" >&2
+            exit 70
+        fi
+        SLLM_OBJS="$SLLM_OBJS $o"
+    done
+fi
+if ! g++ -O2 -std=c++17 -Iinclude -I"$LLAMA_DIR/include" -I"$LLAMA_DIR/ggml/include" \
+        "$SRC" $SLLM_OBJS -o "$TMP" -L"$LIBDIR" -lllama -lggml-base -Wl,-rpath,"$LIBDIR"; then
     printf 'COMPILE FAILED: refusing to run. No executable was produced.\n' >&2
     exit 70
 fi
 [ -x "$TMP" ] || { printf 'COMPILE PRODUCED NO BINARY: refusing to run.\n' >&2; exit 70; }
 
+rm -f $TMP.*.o 2>/dev/null || true
 mv -f "$TMP" "$OUT"                    # publish only on success
 printf 'running fresh binary\n'
 set +e
