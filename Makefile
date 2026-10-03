@@ -56,7 +56,7 @@ MAIN_SRC = src/main.c
 TEST_SRC = tests/main.c tests/test_isa.c tests/test_gguf.c tests/test_thread.c \
             tests/test_eval.c tests/test_i2s_convert.c tests/test_i2s_hermetic.c tests/test_qat.c tests/test_lifecycle.c tests/test_export.c \
             tests/test_ops.c tests/test_i2s.c tests/test_tokenizer.c tests/test_forward.c \
-            tests/test_phase5.c tests/test_dot_f16.c tests/test_quant_k.c tests/test_gemv.c tests/test_dispatch.c tests/test_fwd_slice.c tests/test_rope_contract.c tests/test_attention.c tests/test_residual.c tests/test_ffn.c tests/test_logits.c
+            tests/test_phase5.c tests/test_dot_f16.c tests/test_quant_k.c tests/test_gemv.c tests/test_dispatch.c tests/test_fwd_slice.c tests/test_rope_contract.c tests/test_attention.c tests/test_residual.c tests/test_ffn.c tests/test_logits.c tests/test_blocks.c
 
 CORE_OBJ = $(CORE_SRC:%.c=$(OBJDIR)/%.o)
 MAIN_OBJ = $(MAIN_SRC:%.c=$(OBJDIR)/%.o)
@@ -110,6 +110,10 @@ ROPE_CONVERT_BIN = saphira-rope-convert
 $(ROPE_CONVERT_BIN): tools/saphira_rope_convert.c src/rope_contract.c src/ops.c src/gguf.c \
                      src/quant.c src/status.c src/log.c
 	$(CC) $(CFLAGS) -Iinclude -o $@ $^ $(LDLIBS)
+
+CONTRACT_INJECT_BIN = saphira-contract-inject
+$(CONTRACT_INJECT_BIN): tools/saphira_contract_inject.c
+	$(CC) $(CFLAGS) -o $@ $<
 
 GATE_PROP_BIN = saphira-llm-gate-propagation
 $(GATE_PROP_BIN): tests/test_gate_propagation.c tests/gate_runner.h
