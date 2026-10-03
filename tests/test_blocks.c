@@ -397,6 +397,23 @@ int main_k_blocks_gate(void) {
     printf("      after 36 blocks -> final RMSNorm (worst_rel %.3g) -> logits over %llu "
            "vocabulary, max|logit| = %.4g\n",
            final_rel, (unsigned long long) oout->ne[1], lmag);
+    /* Export a digest of the T=1 result. T14 must prove that adding sequence machinery
+     * left the single-position path UNCHANGED, and that comparison is worth far more
+     * than a re-run of the same chain: it is a check against a separately written
+     * implementation, not against itself. */
+    {   double digest = 0.0, mx = 0.0;
+        for (uint64_t i = 0; i < (uint64_t) oout->ne[1]; ++i) {
+            const double v = (double) logits[i];
+            digest += v * (double) (i + 1) * 1e-6;
+            if (fabs(v) > mx) mx = fabs(v);
+        }
+        char path[512];
+        snprintf(path, sizeof path, "build/t13_t1.digest");
+        FILE * f = fopen(path, "w");
+        if (f) { fprintf(f, "%.17g %.17g\n", digest, mx); fclose(f); }
+        printf("      T=1 digest exported: sum=%.17g max|logit|=%.17g -> %s\n",
+               digest, mx, path);
+    }
     expect(chain_ok && isfinite(lmag) && lmag > 1e-6,
            "the chain reaches finite, non-trivial logits through the final norm");
     expect(final_rel <= 1e-5, "the final norm after 36 blocks matches its reference");
