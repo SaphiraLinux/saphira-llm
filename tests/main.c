@@ -33,6 +33,7 @@ int  main_k_rope_contract_gate(void);
 int  main_k_attention_gate(void);
 int  main_k_residual_gate(void);
 int  main_k_ffn_gate(void);
+int  main_k_logits_gate(void);
 
 int sllm_tests_run    = 0;
 int sllm_tests_failed = 0;
@@ -71,6 +72,7 @@ int main(void) {
     sllm_run_product_gate(main_k_attention_gate,"T9 attention: three-branch convergence + GQA + causal + softmax");
     sllm_run_product_gate(main_k_residual_gate,"T10 attention output projection + residual merge");
     sllm_run_product_gate(main_k_ffn_gate,"T11 FFN block + second residual");
+    sllm_run_product_gate(main_k_logits_gate,"T12 final norm + logits projection");
 
     printf("\n%d checks, %d failed\n", sllm_tests_run, sllm_tests_failed);
     return sllm_tests_failed == 0 ? 0 : 1;
