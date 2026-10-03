@@ -36,6 +36,7 @@ int  main_k_ffn_gate(void);
 int  main_k_logits_gate(void);
 int  main_k_blocks_gate(void);
 int  main_k_seq_gate(void);
+int  main_k_cache_gate(void);
 
 int sllm_tests_run    = 0;
 int sllm_tests_failed = 0;
@@ -77,6 +78,7 @@ int main(void) {
     sllm_run_product_gate(main_k_logits_gate,"T12 final norm + logits projection");
     sllm_run_product_gate(main_k_blocks_gate,"T13 contract-complete artefact + 36-block repetition");
     sllm_run_product_gate(main_k_seq_gate,"T14 real uncached sequence execution");
+    sllm_run_product_gate(main_k_cache_gate,"T15 KV cache vs the independent T14 oracle");
 
     printf("\n%d checks, %d failed\n", sllm_tests_run, sllm_tests_failed);
     return sllm_tests_failed == 0 ? 0 : 1;

@@ -273,6 +273,57 @@ static int seq_run(seqctx_t * S, const int * toks, unsigned ntok, unsigned n_blo
     return 1;
 }
 
+/* Exported for T15: run the T14 UNCHANGED uncached sequence executor and hand back
+ * per-position logits plus the hidden-state digests.
+ *
+ * This is a thin wrapper over the same seq_open()/seq_run() the T14 gate itself uses.
+ * It adds no arithmetic, no option and no path of its own, so the oracle T15 compares
+ * against is the oracle T14 already proved. It exists so T15 can obtain oracle output
+ * without duplicating the execution graph, which would defeat the point of having an
+ * independent oracle at all. */
+int saphira_t14_run_sequence(const char * path, const int * toks, unsigned ntok,
+                             unsigned n_blocks, float * logits_out,
+                             double * hidden_digest) {
+    static seqctx_t S;
+    if (!seq_open(&S, path, n_blocks)) return 0;
+    static const unsigned cp[1] = { 0 };
+    double a[SEQMAX], f[SEQMAX];
+    memset(a, 0, sizeof a); memset(f, 0, sizeof f);
+    const int ok = seq_run(&S, toks, ntok, n_blocks, cp, 1, a, f, logits_out);
+    if (hidden_digest)
+        for (unsigned t = 0; t < ntok; ++t) hidden_digest[t] = f[t];
+    seq_close(&S);
+    return ok;
+}
+
+/* Diagnostic export for T15: per-BLOCK, per-POSITION digests of the carried stream.
+ * Used to locate the FIRST divergent block rather than inferring it from a final
+ * mismatch. Adds no arithmetic: it calls the same seq_run() with a checkpoint list
+ * covering every block. */
+int saphira_t14_run_sequence_blocks(const char * path, const int * toks, unsigned ntok,
+                                    unsigned n_blocks, double * per_block_per_pos,
+                                    float * logits_out, double * per_block_after_attn) {
+    static seqctx_t S;
+    if (!seq_open(&S, path, n_blocks)) return 0;
+    unsigned * cp = (unsigned *) calloc(n_blocks, sizeof(unsigned));
+    if (!cp) { seq_close(&S); return 0; }
+    for (unsigned i = 0; i < n_blocks; ++i) cp[i] = i;
+    double * a = (double *) calloc((size_t) n_blocks * SEQMAX, sizeof(double));
+    double * f = (double *) calloc((size_t) n_blocks * SEQMAX, sizeof(double));
+    const int ok = seq_run(&S, toks, ntok, n_blocks, cp, n_blocks, a, f, logits_out);
+    if (per_block_per_pos)
+        for (unsigned i = 0; i < n_blocks; ++i)
+            for (unsigned t = 0; t < ntok; ++t)
+                per_block_per_pos[i * SEQMAX + t] = f[i * SEQMAX + t];
+    if (per_block_after_attn)
+        for (unsigned i = 0; i < n_blocks; ++i)
+            for (unsigned t = 0; t < ntok; ++t)
+                per_block_after_attn[i * SEQMAX + t] = a[i * SEQMAX + t];
+    free(cp); free(a); free(f);
+    seq_close(&S);
+    return ok;
+}
+
 int main_k_seq_gate(void) {
     printf("\n  T14: real uncached sequence execution\n");
     seqctx_t S;
